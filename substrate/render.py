@@ -455,7 +455,7 @@ def search_payload(
     hash says nothing about WHICH index it stamps when one server serves several. `db` names the
     file behind them, which is what a scope-less query has instead of a name.
 
-    `refresh` closes the gap PRINCIPLES.md predicted and the unattended refresh agent then opened.
+    `refresh` closes the gap docs/principles.md predicted and the unattended refresh agent then opened.
     `index_version` says what the index was BUILT from; nothing said whether the job that keeps it
     current had succeeded. So a scope whose recompose refused kept answering from the superseded
     index in an envelope byte-identical to a healthy run — the Boundary Principle at the one seam a

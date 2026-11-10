@@ -2107,7 +2107,7 @@ def cmd_refresh_record(args: argparse.Namespace) -> int:
     The engine owns this write rather than the shell script that calls it, and that is the point
     of having a subcommand at all. A bash heredoc could emit the same JSON — and then the format
     would have two authors, with the reader in Python and the writer in shell drifting exactly as
-    PRINCIPLES.md's third law describes: a key one side stops writing is invisible to the other,
+    docs/principles.md's third law describes: a key one side stops writing is invisible to the other,
     which reads the default and reports a healthy scope.
 
     Deliberately says nothing about WHETHER the scope is registered. The freeze signal must be
@@ -2204,7 +2204,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
             # COMPLETENESS, not presence. An earlier version checked >0 and would have
             # passed a partially-embedded corpus (256 of 1811 after a timeout), reporting a
             # confident MRR computed on 14% of the data. Presence was attached to the
-            # result; completeness was not. Same failure family as PRINCIPLES.md.
+            # result; completeness was not. Same failure family as docs/principles.md.
             if _n < _total:
                 print(f"FATAL: {embedder.key!r} has {_n}/{_total} vectors — "
                       f"{'none' if _n == 0 else 'INCOMPLETE (partial embed?)'}. Run: "
@@ -2361,7 +2361,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     # Refuse a number measured under a degradation its label does not state. retrieve() records
     # every mid-run arm failure — embedder, HyDE, multi-query, or a reranker that fell back to
     # fused order — ON the Trace, which run_case threads onto CaseResult.degraded. The condition
-    # travels WITH the case (PRINCIPLES.md), so the eval can refuse AND name which query rather
+    # travels WITH the case (docs/principles.md), so the eval can refuse AND name which query rather
     # than read a per-arm scalar from the side. These arms share one Ollama daemon, so one
     # hiccup can hit several at once; a single degraded query taints the aggregate.
     degraded = [c for c in summary.cases if c.degraded]

@@ -36,7 +36,7 @@ EXCLUDED_STATUSES: frozenset[str] = STATUSES - INCLUDED_STATUSES  # {archived, s
 
 # The five Doc-2 §6a doc_types: the JOB a note does. Four are Diátaxis-derived; `digest` (a
 # maintained per-area summary that POINTS at atomic notes, never contains them) is not. The
-# rationale, the placement rule and the discipline are Doc 2 §6a — docs/README.md: this repo
+# rationale, the placement rule and the discipline are Doc 2 §6a (docs/specification.md): this repo
 # implements the contract, it does not define it, and a summary here would drift out of agreement.
 #
 # What IS this code's business: unlike status, doc_type has no default-retrieval partition — every
@@ -81,7 +81,7 @@ CONFIDENCES: frozenset[str] = frozenset({"proposed", "inferred", "stated", "veri
 # confidence key at all, while six `_sources` conversation notes DECLARED `confidence: unstated`
 # deliberately — a transcript's settledness varies within it, so no single marker is true of the
 # whole. Those six were byte-identical in the store to the 530 nobody had judged — a declared value
-# that did not survive into anything downstream, which is PRINCIPLES.md's third law on this axis.
+# that did not survive into anything downstream, which is docs/principles.md's third law on this axis.
 #
 # Be precise about the blast radius rather than overstating it: all six are `class: conversation`
 # under `_sources/`, so they are already outside DEFAULT retrieval and no ordinary query was
@@ -180,12 +180,12 @@ def validate_confidence(doc: Document, *, require_present: bool = False) -> str:
     the next compose — which a launchd agent runs unattended every 15 minutes. Worse than loud:
     `cmd_compose` returns before it opens the IndexStore, so the DB keeps its last good content and
     every scope would answer queries normally while silently frozen, with no drift field on the
-    result envelope to say so. That is PRINCIPLES.md's second law (promoting a check to a gate
+    result envelope to say so. That is docs/principles.md's second law (promoting a check to a gate
     audits every value it now judges) landing in the one place the first law makes invisible.
 
     So the gate is per-caller: the vault WRITE path (`notes.py`) passes True, because a note being
     authored now has someone present to judge it. `compose` leaves it False, grandfathering a corpus
-    whose `unjudged` majority is not a defect — `MIGRATION-VOCABULARY.md` §8 records it as the
+    whose `unjudged` majority is not a defect — `docs/migration-vocabulary.md` §8 records it as the
     ratified source-signal policy, and WRITING.md forbids inventing a marker to fill the field.
 
     Absence returns UNJUDGED, not UNSTATED: see the vocabulary comment above. Declaring UNJUDGED is

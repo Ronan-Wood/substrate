@@ -1,6 +1,6 @@
 """What the unattended refresh agent last did to a scope — the field the query envelope lacked.
 
-PRINCIPLES.md is exact about the gap this closes. `index_version` "surfaces staleness; does not
+docs/principles.md is exact about the gap this closes. `index_version` "surfaces staleness; does not
 solve it", and `freshness.drift()` answers the real question — has the vault moved? — but it is a
 stat-and-hash sweep over every note in the scope, far too expensive to run per query. So the
 envelope carried `index_version` and nothing else, and the failure mode was the one the Boundary

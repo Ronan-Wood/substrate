@@ -120,8 +120,9 @@ class Trace:
 # (EXPERIMENTS.md measured nomic 0.656, 8b 0.683, embeddinggemma 0.691, cross-encoder 0.708 — NOT
 # one "ollama" number), so generalizing them by family would stamp a number on a config it was
 # never measured at, the exact Boundary-Principle sin this contract exists to prevent. NEVER
-# compare across cohorts (HANDOFF §6); the cohort travels on the Capability field. This replaces
-# PRINCIPLES.md's older mixed-cohort sketch (0.698/0.375/0.21) with same-cohort 44-case numbers.
+# compare across cohorts (docs/history/handoff-2026-07.md §6); the cohort travels on the
+# Capability field. This replaces docs/principles.md's older mixed-cohort sketch
+# (0.698/0.375/0.21) with same-cohort 44-case numbers.
 # Imported, not retyped. `rerank_cross` pulls only stdlib plus what this module already imports, so
 # there is no weight or cycle in taking the name from its owner — and a hand-copied model string
 # here would be a second author for a value the tier match compares EXACTLY.
@@ -246,7 +247,7 @@ def _measured_tier(
 class Capability:
     """Which retrieval arms ACTUALLY ran, and the measured MRR that implies — carried as FIELDS on
     the result so a degradation crosses the boundary to the caller instead of reading as absence
-    (PRINCIPLES.md, the Boundary Principle). `fallbacks` is the un-hidden list of arms that
+    (docs/principles.md, the Boundary Principle). `fallbacks` is the un-hidden list of arms that
     dropped mid-run; a run with any fallback is a real degradation the caller must not treat as
     full-quality. `expected_mrr` is the measured envelope for THIS exact stack — None when the
     configuration was never measured at `cohort` (honest absence, not a smoothed guess; a number
@@ -649,7 +650,7 @@ def retrieve(
 ) -> RetrievalResult:
     """Passage retrieval, returning the RESULT CONTRACT: passages + which arms actually ran +
     index_version. The retrieval itself is `_retrieve`, unchanged — this only surfaces the
-    condition the engine already knew and used to throw away (PRINCIPLES.md, the Boundary
+    condition the engine already knew and used to throw away (docs/principles.md, the Boundary
     Principle). No consumer should ever go back to reading a bare hit list.
 
     `statuses` is the default-retrieval filter (Doc 2 §6), defaulting to active+complete. Pass a
