@@ -24,7 +24,7 @@ from substrate.models import Document
 # `NOTES_VERSION` when a writer may use a change (a new field, class or value); raise
 # `NOTES_MIN_VERSION` too when notes an older writer produces would be refused or read differently.
 # It versions `classes` and `markdown/yaml_scalar.py` as well, which point back here.
-NOTES_VERSION = 1
+NOTES_VERSION = 2
 NOTES_MIN_VERSION = 1
 
 # The four Doc-2 §6 statuses and their default-retrieval membership. INCLUDED_STATUSES is the

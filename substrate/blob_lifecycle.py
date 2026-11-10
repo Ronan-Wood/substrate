@@ -11,10 +11,10 @@ an unreadable vault, a chain whose inherited vaults cannot be resolved, or a ref
 parse would each make a held blob look unreferenced, and deleting on that would be silent loss.
 
 **References are read by a scan deliberately LOOSER than the note reader.** The reader decides
-what a note means for retrieval, and it drops a whole frontmatter block over one line it does not
-recognise — a YAML block list, which is how Obsidian's Properties editor writes `tags`. Letting
-that rule decide liveness would let an Obsidian edit make a note's original collectable. So three
-readings are unioned, and a blob any of them names is alive:
+what a note means for retrieval: it leaves out a value it cannot hold on one line (a nested
+mapping, a multi-line scalar), and reads a block YAML cannot read as body text. Letting that rule
+decide liveness would let an edit the reader cannot follow make a note's original collectable.
+So three readings are unioned, and a blob any of them names is alive:
 
 - the leading `---` block as YAML, which is what a note declares to every YAML reader. A line scan
   stopped at the first line that was not a `- item`, so a comment or a blank line inside a list hid

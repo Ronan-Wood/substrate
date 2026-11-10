@@ -79,7 +79,7 @@ def cmd_ingest(args: argparse.Namespace) -> int:
       * **pdf** — the PDF's own text layer, with Apple's recognizer for scanned pages, or docling's
         batched extractor when `--docling-models` names its models. Still the only arm that
         REQUIRES `--doc-class`. Reached by a `.pdf` path or by `--pdf`.
-      * **markdown / text** — the stdlib reader, no Docling, no torch. Reached by `.md`/`.txt` or
+      * **markdown / text** — the markdown reader, no Docling or torch. Reached by `.md`/`.txt` or
         by `--md` (which forces this arm regardless of extension, as `ingest-md` always has).
       * **converted** — DOCX/PPTX/XLSX/HTML/CSV/VTT/AsciiDoc/LaTeX/email/EPUB/image, converted to
         markdown by Docling and then handed to the SAME `ingest_markdown` body a vault note goes

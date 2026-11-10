@@ -419,11 +419,10 @@ def test_the_reader_decides_what_frontmatter_is() -> None:
     """Shapes the READER treats as body must not refuse — the gate shares its rule, not its own.
 
     Each of these has a leading `---` and a spine-looking line, but `_parse_frontmatter` classifies
-    the block as a thematic break (any non-blank line lacking a colon voids the whole block), so the
-    file has no spine at all. A second hand-rolled parser refused all three.
+    the block as a thematic break (a prose line voids the whole block), so the file has no spine at
+    all. A second hand-rolled parser refused all of them.
     """
     shapes = {
-        "block-list": "---\ntags:\n  - a\nstatus: active\n---\n\n# Nav\n",
         "prose-line": "---\nProject memory\nstatus: active\n---\n\n# Nav\n",
         "unclosed-rule": "---\n\n# Log\n\nstatus: done was reached\n",
     }
@@ -431,6 +430,16 @@ def test_the_reader_decides_what_frontmatter_is() -> None:
         with tempfile.TemporaryDirectory() as td:
             v = _nav_vault(Path(td), "log.md", content)
             assert _refusal(v) is None, f"{label}: refused a file the reader reads as pure body"
+
+
+def test_a_block_list_does_not_hide_a_skipped_file_s_spine() -> None:
+    """The reader reads a block list as frontmatter, so the gate does too: the `status` beside it is
+    declared, as it is beside the same list in flow form."""
+    for tags in ("tags:\n  - a", "tags: [a]"):
+        with tempfile.TemporaryDirectory() as td:
+            v = _nav_vault(Path(td), "log.md", f"---\n{tags}\nstatus: active\n---\n\n# Nav\n")
+            msg = _refusal(v)
+            assert msg is not None and "status" in msg, tags
 
 
 def test_a_spine_beyond_any_fixed_read_window_still_refuses() -> None:
