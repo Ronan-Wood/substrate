@@ -107,7 +107,7 @@ PDF = FormatSpec(
 )
 MARKDOWN = FormatSpec(
     "markdown", (".md", ".markdown"), "markdown", None, False, None,
-    "The vault format. Read by the stdlib reader, not Docling — frontmatter, spine and doc_id "
+    "The vault format. Read by the markdown reader, not Docling — frontmatter, spine and doc_id "
     "round-trip, and a project vault ingests with nothing installed.",
 )
 TEXT = FormatSpec(
