@@ -1,6 +1,6 @@
 """The freeze signal: a scope whose recompose refused must not answer like a healthy one.
 
-PRINCIPLES.md predicted this failure before the refresh agent existed — `index_version` "surfaces
+docs/principles.md predicted this failure before the refresh agent existed — `index_version` "surfaces
 staleness; does not solve it" — and the agent then made it worse by converting manual freshness
 into assumed freshness. `compose` returns before it opens the index database, so a refusal leaves
 the old index in place and every subsequent query answers from it. Nothing in the envelope differed.

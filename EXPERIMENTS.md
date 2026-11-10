@@ -5,7 +5,7 @@ chronological and mixed with implementation detail, so they answer "what changed
 "what did we try and what did we learn".
 
 > The dominant failure shape of this project is written up separately in
-> **[PRINCIPLES.md](PRINCIPLES.md)** — five incidents where information existed but did not
+> **[docs/principles.md](docs/principles.md)** — five incidents where information existed but did not
 > cross the boundary to its consumer. Four of the entries below are instances of it.
 
 **Rule for this file: a rejected experiment is as valuable as an accepted one, and a retracted
@@ -573,7 +573,7 @@ whose correct answer is not in the corpus (consistent hashing) get deleted, not 
 | 6 | Reranking — qwen2.5:7b vs Bonsai-27B ternary | arguably should move ahead of #4 |
 | — | Adaptive multi-query (fallback only on low confidence) | needs a confidence signal the retriever does not expose |
 | — | qwen3 instruction format | **unanswered** — first attempt retracted |
-| — | Result contract (snippet-first, graduated capability + measured cost, version-stamped) | the cure for PRINCIPLES.md; precedes any transport choice |
+| — | Result contract (snippet-first, graduated capability + measured cost, version-stamped) | the cure for docs/principles.md; precedes any transport choice |
 | — | Extract engine to its own repo | relocate BEFORE wiring consumers — do not wire through the weld |
 | — | Claude access: skill+CLI primary, MCP only if Desktop/web reach is real | trivial once the contract exists |
 | — | **Scanned-PDF ingestion** | granite-docling-258M is DOWNLOADED but **NOT WIRED** — see below |
@@ -611,7 +611,7 @@ comparison.
 Run serially, one resident model at a time:
 
 ```bash
-cd ~/CodeHome/CallTranscriber/substrate
+# from the root of a clone
 
 for M in qwen3-embedding:4b qwen3-embedding:8b; do
   ollama pull  "$M"
@@ -736,7 +736,7 @@ an inherited one.
 **Denominators, because these are small.** 13 semantic cases. 0.351 → 0.635 is four cases moving
 to rank 1 plus one miss becoming a hit; read it as "clearly better", not as a precise figure. The
 two cohorts are within one run over one corpus and ARE comparable to each other; none of them is
-comparable to the 44-case numbers above (HANDOFF §6).
+comparable to the 44-case numbers above (docs/history/handoff-2026-07.md §6).
 
 **Latency is not measured here, and the runs cannot be compared.** They shared a warm cache in an
 order nobody controlled, so the p50s (listwise 299ms · cross gated 5692ms · cross gate-off 566ms)

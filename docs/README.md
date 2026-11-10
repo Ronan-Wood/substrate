@@ -1,31 +1,35 @@
-# Where the specification lives
+# Documentation
 
-The structural contract this engine implements — vault tiers, the `.substrate.toml` manifest
-format, the spine fields (`status`, `doc_type`, `confidence`, `domains`), inheritance and
-supersession semantics — is specified in **Doc 2**, held in `core-vault` under
-`00-operator/specs/`. Doc 1 (the substrate model this all serves) sits beside it.
+Start with the [project README](../README.md) for the install and the quickstart. In these pages,
+`substrate <command>` means `uv run python -m substrate.cli <command>`, and `substrate-mcp` means
+`uv run python -m substrate.mcp.server`.
 
-**This repo implements that contract; it does not define it.** The engine is one consumer of the
-vault structure. Scripta is another, an editor plugin would be a third, and none of them owns the
-spec — which is why it does not live in any one of them.
+## Using the engine
 
-**Doc 3a — the MCP server surface — lives somewhere else again, and the split is the point.**
-It is `03-references/doc3a-mcp-server.md` in the **scripta PROJECT vault**, not core-vault. Docs 1
-and 2 are shared contracts that several consumers implement and none owns, so they sit in the tier
-every scope inherits. Doc 3a describes one product's transport and changes when that product
-changes, so it belongs with the project it governs. Reach it with
-`substrate query --scope scripta`, or read the file.
+| doc | what it covers |
+|---|---|
+| [`architecture.md`](architecture.md) | the pipeline from a vault to an answer, and a module map |
+| [`configuration.md`](configuration.md) | `.substrate.toml`, the registry, `serve.toml`, `~/.substrate`, local models |
+| [`security.md`](security.md) | who can reach what: loopback-only models, the Unix socket, read-only transports, the vault guard, agent mode |
+| [`demo-vault.md`](demo-vault.md) | the demo vaults, note by note, and queries that show each behaviour |
+| [`client-contract.md`](client-contract.md) | for client authors: `contract/contract.json`, the golden frames, the wire version |
 
-That it is written down at all is recent. **Until 2026-07-29 Doc 3a existed on no disk**, while
-nine files in this repo cited it 22 times — including two verbatim quotations in test docstrings.
-Every citation turned out to be accurate, which is the lucky version of that story rather than the
-expected one. Four spec/implementation divergences were found on recovery and are marked inline in
-the note rather than silently reconciled.
+## How the engine was built
 
-A clone of this repo is therefore incomplete by design. That is deliberate and stated here rather
-than discovered: a contributor should know immediately that the governing document exists elsewhere,
-and what it governs. This file is a pointer, never a copy or a summary — a pointer cannot drift out
-of agreement with its target, and a summary would.
+| doc | what it covers |
+|---|---|
+| [`principles.md`](principles.md) | the Boundary Principle and its laws: the failure shape this project is built against |
+| [`specification.md`](specification.md) | the specification documents the code cites (Doc 1, 2, 3a), and what is public today |
+| [`../EXPERIMENTS.md`](../EXPERIMENTS.md) | every retrieval experiment, accepted or rejected, and the configuration that shipped |
+| [`ingestion-findings.md`](ingestion-findings.md) | what PDF and Docling ingestion taught, measured on real documents |
+| [`migration-vocabulary.md`](migration-vocabulary.md) | moving an existing Obsidian vault onto the spine: the vocabulary and the landmines |
+| [`history/`](history/) | dated records: a handoff, an audit tracker and a spike readout. Superseded where they disagree with the code |
 
-`PRINCIPLES.md` and `HANDOFF.md` in this repo are about how the engine is built and how it fails.
-They are engine documents and stay here.
+## Project process
+
+| doc | what it covers |
+|---|---|
+| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | setup, tests, and the rules a change follows |
+| [`../RELEASING.md`](../RELEASING.md) | cutting a release, and the interpreter pin |
+| [`../CHANGELOG.md`](../CHANGELOG.md) | what each release contains |
+| [`../SECURITY.md`](../SECURITY.md) | reporting a vulnerability |

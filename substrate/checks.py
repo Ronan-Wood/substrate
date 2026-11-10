@@ -3,7 +3,7 @@
 This is assertion POLICY, not command plumbing: which checks run over an ingested note, which
 source formats each applies to, and — in `_QUALITY_CHECKS` — which failures merely report rather
 than refuse a whole composed vault. It lived in `cli.py` only because `verify` was its first
-caller; `compose` is now the one that matters, and PRINCIPLES.md's second law is specifically
+caller; `compose` is now the one that matters, and docs/principles.md's second law is specifically
 about what happens when this set becomes a gate. A policy that decides whether real content is
 refused should not be reachable only through an argument parser.
 

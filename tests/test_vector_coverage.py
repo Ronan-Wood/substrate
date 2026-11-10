@@ -1,6 +1,6 @@
 """A wired embedder over an unembedded index must NOT report a measured tier.
 
-The defect these pin is PRINCIPLES.md's second incident in its purest form. `vector_search`
+The defect these pin is docs/principles.md's second incident in its purest form. `vector_search`
 returns [] on a model with no stored vectors — no exception, nothing to catch — so a full stack
 wired over an index that was composed but never embedded produced:
 

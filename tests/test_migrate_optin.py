@@ -25,7 +25,7 @@ connection after the command, so what is asserted is that the rows are still the
 
 `test_migrate_flag_actually_rebuilds` is what stops this suite being tautological. A `--migrate`
 that refused everything would satisfy every other test in this file while removing the one path
-that is allowed to rebuild — the same defect as the A17 fixture in PRINCIPLES.md that passed with
+that is allowed to rebuild — the same defect as the A17 fixture in docs/principles.md that passed with
 the fix and without it.
 
 Runnable with plain `python tests/test_migrate_optin.py`; discovered by pytest if added.

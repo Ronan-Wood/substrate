@@ -1,9 +1,9 @@
 """The eval fixture's content signature must stay RECOMPUTABLE.
 
 Its predecessor was not. `4a4f765c9ad75dc9` guarded `out/substrate.db` in three readouts and in
-SESSION-HANDOFF's "EVAL MUST NOT MOVE", and its derivation was written down nowhere —
-MIGRATION-VOCABULARY.md records seventeen plausible constructions over `(chunk_id,
-text_with_path)` reproducing none of it. An invariant nobody can recompute is an unchecked claim,
+a session handoff's "EVAL MUST NOT MOVE", and its derivation was written down nowhere — one
+session tried seventeen plausible constructions over `(chunk_id, text_with_path)` and reproduced
+none of it. An invariant nobody can recompute is an unchecked claim,
 which this project already knows is worse than silence: the next reader trusts it instead of
 testing it, and it silently stops meaning anything the first time the corpus moves.
 
