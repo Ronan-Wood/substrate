@@ -29,7 +29,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from substrate.extract.base import doc_id_for  # stdlib-only; no Docling/torch pulled in
-from substrate.markdown.reader import _DOC_ID, _DOMAIN, _parse_frontmatter, _parse_list
+from substrate.markdown.reader import (
+    _DOC_ID, _DOMAIN, FrontmatterError, _parse_frontmatter, _parse_list, unread_keys,
+)
 
 MANIFEST = ".substrate.toml"
 
@@ -248,6 +250,12 @@ def _tier_for(rel_parts: tuple[str, ...]) -> int:
     return 3
 
 
+# The `_meta.md` fields `_source_meta` reads, which its passages inherit.
+_META_KEYS: frozenset[str] = frozenset({"class", "document_class", "status", "doc_type",
+                                        "confidence", "raw", "raw_sha256", "raw_location",
+                                        "domains", "version"})
+
+
 def _source_meta(note_path: Path, vault_root: Path) -> dict:
     """`_meta.md` context for a reference passage: the `class`/`status`/`doc_type`/`confidence`/
     `domains` a passage under `<source>/passages/` inherits from its source. Empty for a note that
@@ -273,7 +281,13 @@ def _source_meta(note_path: Path, vault_root: Path) -> dict:
     # govern a note inside it, so assert the resolved path rather than trusting the arithmetic.
     if not meta_file.is_file() or vault_root not in meta_file.parents:
         return {}
-    front, _ = _parse_frontmatter(_read_capped(meta_file))
+    # Strict over the fields read below: nothing ingests a `_meta.md` itself, so one of them the
+    # reader cannot read must refuse here, or every passage under it loses it without a word.
+    try:
+        front, _ = _parse_frontmatter(_read_capped(meta_file), strict=True, keys=_META_KEYS)
+    except FrontmatterError as e:
+        raise VaultError(f"{meta_file}: {e}. Its passages inherit this field, so refusing rather "
+                         f"than composing them without it.") from e
     return {
         # Doc 2 writes reference metadata as `class:`; the engine's field is `document_class`.
         "doc_class": front.get("class") or front.get("document_class"),
@@ -313,10 +327,11 @@ def _refuse_skipped_note_with_a_spine(path: Path) -> None:
     that reasoning held only while no doc_type could describe them, and `digest` ended it.
 
     Uses `_parse_frontmatter` rather than a local parser. A second implementation of "is this
-    frontmatter" disagreed with the reader in BOTH directions: it refused a YAML block list (which
-    the reader classifies as a thematic break, so the file has no spine at all) and it missed a
-    real declaration past a fixed read window. Sharing the reader's rule is what makes "declared"
-    here mean the same thing it means at ingest.
+    frontmatter" disagreed with the reader in BOTH directions: it refused a block the reader
+    classifies as a thematic break (so the file has no spine at all) and it missed a real
+    declaration past a fixed read window. Sharing the reader's rule is what makes "declared" here
+    mean the same thing it means at ingest. A spine key whose value the reader cannot read is
+    declared all the same: it is written there, and YAML reads it.
 
     An unreadable file is skipped, not refused: it cannot have declared anything, and these paths
     were never opened before this check existed — so a broken symlink or a non-UTF-8 `log.md` must
@@ -329,7 +344,8 @@ def _refuse_skipped_note_with_a_spine(path: Path) -> None:
     except VaultError:
         return
     front, _ = _parse_frontmatter(text)
-    declared = sorted(k for k in front if k in _SPINE_KEYS)
+    declared = sorted({k for k in front if k in _SPINE_KEYS}
+                      | {k for k, _ in unread_keys(text) if k in _SPINE_KEYS})
     if not declared:
         return
     raise VaultError(

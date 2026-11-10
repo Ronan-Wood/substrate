@@ -132,7 +132,11 @@ def ingest_markdown(
     out_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
 
-    doc, body_md, rstats = read_markdown(src, doc_class=doc_class)
+    # Strict on the vault path: a value the reader cannot read under a key it reads refuses the
+    # note, naming it. A foreign document's spine is cleared below anyway, and the rest of what it
+    # declares is optional, so its unreadable values are only left out.
+    doc, body_md, rstats = read_markdown(src, doc_class=doc_class, strict=origin is None)
+    unread = rstats.pop("frontmatter_unread", None)
 
     # Identity moves to the REAL artifact before anything reads it. Done here rather than after
     # the gates because `classes.apply` enforces `source_sha256` as a required field and
@@ -280,6 +284,10 @@ def ingest_markdown(
         for field, meta_path in inherited.items():
             if meta_path is not None and f"{field} " in str(e):
                 raise spine.SpineError(f"{e} (inherited from {meta_path})") from e
+        # A note that opens with a `---` block the reader took for a divider declared nothing, so
+        # say which line made it one, or the refusal names a field the operator can see written.
+        if unread is not None:
+            raise spine.SpineError(f"{e} Its frontmatter is not read: {unread}.") from e
         raise
 
     # repair=False: markdown carries no glyph artifacts, so PDF-tier hyphen/ligature repair could
