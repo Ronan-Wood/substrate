@@ -20,7 +20,9 @@ wearing a new hat. `assert_composed` is the post-index proof that it did not hap
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 
 import tomllib
 from dataclasses import dataclass, field
@@ -118,6 +120,53 @@ class Scope:
         return frozenset(v.name for v in self.vaults)
 
 
+# A TOML key that needs no quotes.
+_BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
+
+# Every key the manifest format defines at top level. `guard.GUARD_KEY` and `identity.IDENTITY_KEY`
+# are two of them, spelled out rather than imported because `guard` imports this module; a test
+# keeps the three in step. `reference_pins` is the only table, and its keys are the operator's
+# reference names, so no table has a fixed schema to hold unknown keys against.
+TOP_LEVEL_KEYS: frozenset[str] = frozenset(
+    {"name", "inherits", "reference_domains", "reference_pins", "guard_state", "identity"})
+
+
+def misplaced_keys(manifest: dict) -> list[tuple[str, str]]:
+    """(key, table) for each top-level manifest key found inside a table, the table written as its
+    TOML header would name it.
+
+    TOML puts every key written after a `[table]` header inside that table, so a top-level key
+    written below `[reference_pins]` is absent where it is read and present where nothing reads it.
+    A swallowed `guard_state` is a string, so it passed as a pin, and the vault was unguarded.
+    The path is a tuple, not a joined string: a table may be named `[""]`, and its path must not
+    read as the top level. Iterative, because a manifest tomllib can parse may nest deeper than a
+    recursive walk can go.
+    """
+    found: list[tuple[str, str]] = []
+    pending: list[tuple[object, tuple[str, ...]]] = [(manifest, ())]
+    while pending:
+        value, where = pending.pop()
+        if isinstance(value, dict):
+            for key, child in reversed(list(value.items())):
+                pending.append((child, (*where, key)))
+            if where:
+                found.extend((key, _header(where)) for key in value if key in TOP_LEVEL_KEYS)
+        elif isinstance(value, list):
+            pending.extend((child, where) for child in reversed(value))
+    return found
+
+
+def _header(path: tuple[str, ...]) -> str:
+    return ".".join(p if _BARE_KEY.fullmatch(p) else json.dumps(p) for p in path)
+
+
+def misplaced_refusal(path: Path, misplaced: list[tuple[str, str]]) -> str:
+    keys = ", ".join(f"{key!r} is inside the [{table}] table" for key, table in misplaced)
+    return (f"{path}: {keys}, where the engine never reads it. Move it above the first [table] "
+            f"header: in TOML every key written after a header belongs to that table. (A pin that "
+            f"really has this name needs another: the manifest reserves it.)")
+
+
 def _read_manifest(vault_dir: Path) -> dict:
     path = vault_dir / MANIFEST
     text = _read_capped(path)  # size-checked; raises VaultError on read failure / over-cap
@@ -125,6 +174,9 @@ def _read_manifest(vault_dir: Path) -> dict:
         manifest = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         raise VaultError(f"malformed manifest {path}: {e}") from e
+    misplaced = misplaced_keys(manifest)
+    if misplaced:
+        raise VaultError(misplaced_refusal(path, misplaced))
     name = manifest.get("name")
     if not isinstance(name, str) or not name:
         raise VaultError(f"{path}: manifest has no string 'name'.")
@@ -382,6 +434,10 @@ def chain_best_effort(project_vault: Path) -> tuple[Path, ...]:
         except (tomllib.TOMLDecodeError, RecursionError, ValueError) as e:
             raise VaultError(f"cannot parse {manifest}, so the vaults it inherits are unknown: "
                              f"{e}") from e
+        swallowed = [(k, t) for k, t in misplaced_keys(data) if k == "inherits"]
+        if swallowed:
+            raise VaultError(f"{misplaced_refusal(manifest, swallowed)} So the vaults it inherits "
+                             f"are unknown.")
         inherits = data.get("inherits", [])
         if not isinstance(inherits, list):
             raise VaultError(f"{manifest}: 'inherits' is not a list, so the vaults it inherits "

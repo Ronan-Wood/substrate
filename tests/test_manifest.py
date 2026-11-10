@@ -564,6 +564,87 @@ def test_clean_refuses_to_delete_anything_vault_shaped() -> None:
             "authored markdown is a deletion refusal; writing beside it is recoverable")
 
 
+
+# ------------------------------------- a top-level key written inside a table (TOML swallows it)
+
+def _manifest_refusal(body: str) -> str | None:
+    p = Path(tempfile.mkdtemp()) / "demo-vault"
+    p.mkdir()
+    (p / ".substrate.toml").write_text(body, encoding="utf-8")
+    try:
+        V._read_manifest(p)
+    except V.VaultError as e:
+        return str(e)
+    return None
+
+
+def test_a_guard_written_below_a_table_is_refused_by_name() -> None:
+    """`guard_state` below `[reference_pins]` is a string, so it passed as a pin and the vault
+    composed unguarded. The refusal names the key and the table it landed in."""
+    for table, body in (
+        ("reference_pins", 'name = "demo"\ninherits = []\n\n[reference_pins]\ngo = "1.21"\n'
+                           'guard_state = "/tmp/state.json"\n'),
+        ("extra", 'name = "demo"\ninherits = []\n\n[extra]\nguard_state = "/tmp/state.json"\n'),
+        ("reference_pins", 'name = "demo"\ninherits = []\n'
+                           'reference_pins.guard_state = "/tmp/state.json"\n'),
+        ("extra", 'name = "demo"\ninherits = []\n\n[[extra]]\nguard_state = "/tmp/state.json"\n'),
+        ("extra.deeper", 'name = "demo"\ninherits = []\n\n[extra.deeper]\n'
+                         'guard_state = "/tmp/state.json"\n'),
+        # A table may be named by an empty quoted key. Its keys are no more top level than any
+        # other table's, though a path built from its name is empty.
+        ('""', 'name = "demo"\ninherits = []\n\n[""]\nguard_state = "/tmp/state.json"\n'),
+        ('""', 'name = "demo"\ninherits = []\n"".guard_state = "/tmp/state.json"\n'),
+    ):
+        refusal = _manifest_refusal(body)
+        assert refusal is not None, f"accepted a swallowed guard_state: {body!r}"
+        assert "'guard_state'" in refusal and f"[{table}]" in refusal, refusal
+
+
+def test_every_known_top_level_key_is_refused_inside_a_table() -> None:
+    for key, value in (("identity", '"/tmp/roster.json"'), ("name", '"other"'),
+                       ("inherits", '["core-vault"]'), ("reference_domains", '["software-dev"]'),
+                       ("guard_state", '"/tmp/state.json"')):
+        refusal = _manifest_refusal(
+            f'name = "demo"\ninherits = []\n\n[reference_pins]\ngo = "1.21"\n{key} = {value}\n')
+        assert refusal is not None and f"'{key}'" in refusal and "[reference_pins]" in refusal, \
+            (key, refusal)
+
+
+def test_pins_with_ordinary_names_still_parse() -> None:
+    """The refusal is for the manifest's own keys only. Pin names are the operator's."""
+    assert _manifest_refusal(
+        'name = "demo"\ninherits = []\n\n[reference_pins]\ngo = "1.21"\npython = "3.14"\n') is None
+
+
+def test_the_shipped_demo_manifest_has_nothing_misplaced() -> None:
+    demo = Path(__file__).resolve().parent.parent / "vaults" / "demo-vault"
+    assert V._read_manifest(demo)["name"] == "demo"
+
+
+def test_the_best_effort_chain_refuses_an_inherits_written_below_a_table() -> None:
+    """For protection only, and lenient about every other key, but `inherits` is the one key it
+    reads. Swallowed into a table, it read as "inherits nothing", and protection covered the
+    project vault alone."""
+    root = Path(tempfile.mkdtemp())
+    _core(root)
+    p = root / "demo-vault"
+    p.mkdir()
+    (p / ".substrate.toml").write_text(
+        'name = "demo"\n\n[reference_pins]\ngo = "1.21"\ninherits = ["core-vault"]\n',
+        encoding="utf-8")
+    try:
+        chain = V.chain_best_effort(p)
+    except V.VaultError as e:
+        assert "'inherits'" in str(e) and "[reference_pins]" in str(e), str(e)
+        return
+    raise AssertionError(f"a swallowed inherits read as a chain of {chain}")
+
+
+def test_the_known_keys_include_every_key_another_module_reads() -> None:
+    from substrate import guard, identity
+    assert {guard.GUARD_KEY, identity.IDENTITY_KEY} <= V.TOP_LEVEL_KEYS
+
+
 if __name__ == "__main__":
     _tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     _failed = 0

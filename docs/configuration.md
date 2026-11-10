@@ -28,10 +28,10 @@ go = "1.21"
 | `guard_state` | absolute path | withholds this vault's notes unless the state file vouches for them (see [`security.md`](security.md#the-vault-guard)) |
 | `identity` | absolute path | a JSON file of people and things that notes mention, resolved on every compose |
 
-In TOML, every key written after a `[table]` header belongs to that table. A top-level key written
-below `[reference_pins]` becomes a pin. The engine checks the shape of `name`, `inherits`,
-`reference_domains` and `reference_pins`, and refuses a malformed one, but it doesn't check the
-other keys, so keep every top-level key above `[reference_pins]`.
+In TOML, every key written after a `[table]` header belongs to that table, so keep every top-level
+key above `[reference_pins]`. Any key listed above, found inside a `[table]`, fails the compose
+with a message naming the key and the table. The engine also checks the shape of `name`, `inherits`,
+`reference_domains` and `reference_pins`, and refuses a malformed one.
 
 Where a note sits sets its **tier**: `00-operator/` is tier 1, `10-reference/` is tier 2, and
 everything else is tier 3.
