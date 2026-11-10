@@ -1,7 +1,7 @@
 """Tests for the retrieval result contract (Unit 2).
 
 The contract's whole reason to exist: a mid-run degradation the engine KNOWS about must cross
-the boundary to the caller as a FIELD, not be discarded (PRINCIPLES.md). These pin (a) the
+the boundary to the caller as a FIELD, not be discarded (docs/principles.md). These pin (a) the
 arm-status derivation from the trace's structured flags, (b) the measured-tier envelope
 (exact / lower-bound / honestly-unmeasured), and (c) index_version identity + staleness.
 

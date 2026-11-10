@@ -1,0 +1,62 @@
+name: Bug report
+description: Something the engine does wrong, crashes on, or reports misleadingly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **A security problem doesn't go here.** Report it privately, as SECURITY.md describes.
+
+        Please reproduce the bug on the demo vaults (`vaults/demo-vault`) or on a small synthetic
+        vault you can share. Don't paste real notes, note titles, queries or paths from your own
+        machine: this tracker is public.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran, what the engine did, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands, starting from a fresh clone if you can.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: The command's output or traceback, from the demo vaults or a synthetic vault. For a search, the `--json` envelope helps, since it says which arms ran and what was filtered out. Replace any path under your home folder.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: Engine version
+      description: The release, or the commit (`git rev-parse --short HEAD`), plus the `schema` and `wire` values from `uv run python -m substrate.cli version`. Leave out its `registry` path.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS on Apple silicon
+        - macOS on Intel
+        - Linux
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: models
+    attributes:
+      label: Local models
+      description: Which retrieval arms were on.
+      options:
+        - None (lexical only)
+        - Embedder only
+        - Embedder and HyDE
+        - Embedder, HyDE and reranker
+        - Not relevant

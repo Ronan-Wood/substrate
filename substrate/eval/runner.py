@@ -265,9 +265,10 @@ def run(db: str, gold_path: Path, k: int = K, route: bool = True, embedder=None,
 
     # migrate=False. Eval only reads, and a migrating open dropped the index EMPTY before the
     # first case ran — every case would miss and the run would report a plausible MRR computed
-    # over nothing, the exact shape of the five retracted measurements (HANDOFF §8). The old guard
-    # here read `store.rebuilt` and raised, which detected the destruction one step too late to
-    # stop it; `SchemaMismatch` refuses the open itself and propagates to `cmd_eval`.
+    # over nothing, the exact shape of the five retracted measurements
+    # (docs/history/handoff-2026-07.md §8). The old guard here read `store.rebuilt` and raised,
+    # which detected the destruction one step too late to stop it; `SchemaMismatch` refuses the
+    # open itself and propagates to `cmd_eval`.
     with IndexStore(db, migrate=False) as store:
         docs = resolve_docs(store)
         for case in gold["cases"]:
@@ -369,9 +370,9 @@ def report(summary: Summary, gold: dict, baseline: dict | None) -> bool:
     # against, and the measured tier for the arms that ran — taken from a NON-degraded case so it
     # represents the run's configured stack, not a mid-run casualty. ALWAYS print the tier's
     # cohort AND this run's semantic count side by side, unconditionally: a number measured at 44
-    # cases beside an MRR computed over N≠44 is the cross-cohort comparison HANDOFF §6 forbids, so
-    # the reader must always see both counts (never a substring/equality suppression that a stray
-    # count like 4 ⊂ 44 could defeat).
+    # cases beside an MRR computed over N≠44 is the cross-cohort comparison that
+    # docs/history/handoff-2026-07.md §6 forbids, so the reader must always see both counts (never
+    # a substring/equality suppression that a stray count like 4 ⊂ 44 could defeat).
     rep = next((c for c in summary.cases if not c.degraded and c.expected_mrr is not None), None)
     exp_s = f"~{rep.expected_mrr}" if rep is not None else "unmeasured for this stack"
     n_sem = sum(1 for c in summary.cases if c.cohort == SEMANTIC)

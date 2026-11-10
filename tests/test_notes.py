@@ -108,7 +108,7 @@ def test_the_write_path_requires_a_declared_confidence() -> None:
     """This path is STRICTER than compose, and this test is what pins that.
 
     `compose` accepts a note with no confidence (530 of 657 indexed notes have none, and
-    MIGRATION-VOCABULARY §8 ratifies that), so the gate exists only here — a note authored now has
+    docs/migration-vocabulary.md §8 ratifies that), so the gate exists only here — a note authored now has
     an author present to judge it. Asserted at the `notes.plan` boundary rather than at
     `ingest_markdown`, because the defect being guarded is not "does the flag work" but "does this
     caller still pass it": deleting `require_confidence=True` from `notes._validate` left all 323

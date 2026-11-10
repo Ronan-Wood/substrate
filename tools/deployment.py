@@ -18,7 +18,7 @@ THE OPTION TAKEN, AND THE TWO THAT WERE NOT.
   Refuse on a DIRTY tree. Total, and one line. But this operator edits this tree most days, so the
   refresh would be off most days and all six scopes would sit at `frozen: null`. A guard that is
   usually tripped is a guard that gets commented out — and this one would be tripped by editing
-  HANDOFF.md.
+  a doc.
 
   Refuse when the running code differs from what is COMMITTED. Narrower, and it does close
   2026-08-03. But it makes `git commit` the deployment action, and the log here is a working branch
