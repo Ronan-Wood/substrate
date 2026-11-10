@@ -2172,13 +2172,28 @@ def cmd_eval(args: argparse.Namespace) -> int:
     # need a different command line depending on whether a local daemon happens to be up.
     embedder = None
     if not args.no_vector:
+        from substrate.embed.engine import DEFAULT_MODEL as EMBED_DEFAULT
         from substrate.embed.engine import OllamaEmbedder
+        from substrate.retrieve.local_models import EMBED_SENDS, cloud_message, cloud_refusal
 
         from substrate.embed.engine import AppleEmbedder
 
+        # By name, before the arm is built, as the reranker's check below does. A cloud model only
+        # the listing marks is refused after `available()`: either way the run is refused, not
+        # measured lexical-only under a hybrid label.
+        refusal = cloud_refusal("--embed-model", args.embed_model, sends=EMBED_SENDS)
+        if refusal:
+            print(f"FATAL: {refusal}", file=sys.stderr)
+            return 2
         cand = (AppleEmbedder() if args.embed_model.startswith("apple")
                 else OllamaEmbedder(model=args.embed_model, prefix_style=args.embed_style))
         embedder = cand if cand.available() else None
+        if embedder is None and getattr(cand, "refused_cloud", False):   # by `remote_host`
+            # The default when no flag named it: there is no flag to leave out.
+            flag = "--embed-model" if args.embed_model != EMBED_DEFAULT else None
+            why = cloud_message(flag, args.embed_model, sends=EMBED_SENDS)
+            print(f"FATAL: {why}" if flag else f"FATAL: embedder {why}", file=sys.stderr)
+            return 2
         # GUARD: a vector config with no stored vectors degrades silently to lexical-only and
         # still prints a plausible MRR. That has invalidated three measurements, every time
         # because a key change orphaned the vectors. Refuse to report rather than mislead.
@@ -2407,8 +2422,17 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
 
 def cmd_embed(args: argparse.Namespace) -> int:
-    from substrate.embed.engine import EmbeddingError, OllamaEmbedder
+    from substrate.embed.engine import DEFAULT_MODEL, EmbeddingError, OllamaEmbedder
+    from substrate.retrieve.local_models import EMBED_SENDS, cloud_message, cloud_refusal
     from substrate.store.index_store import IndexStore, SchemaMismatch
+
+    # FIRST: decidable from the name alone, and the request it refuses would carry every note in
+    # the index off this Mac. The refresh pass runs this command with no --model, so only a flag
+    # can name a cloud model here; one the listing alone marks is refused after the probe.
+    refusal = cloud_refusal("--model", args.model, sends=EMBED_SENDS)
+    if refusal:
+        print(f"FATAL: {refusal}", file=sys.stderr)
+        return 2
 
     # `--scope` for a caller that leaves the index's location to the engine (`_index_location`).
     args.db = _resolve_db(args)
@@ -2464,6 +2488,13 @@ def cmd_embed(args: argparse.Namespace) -> int:
     except Exception:
         store_cm.close()
         raise
+    if not reachable and getattr(eng, "refused_cloud", False):
+        # The default when no flag named it (the refresh pass): there is no flag to leave out.
+        flag = "--model" if args.model != DEFAULT_MODEL else None
+        why = cloud_message(flag, args.model, sends=EMBED_SENDS)
+        print(f"FATAL: {why}" if flag else f"FATAL: embedder {why}", file=sys.stderr)
+        store_cm.close()
+        return 2
     if not reachable:
         print(f"FATAL: {args.model!r} not available at {args.host}. "
               "Start `ollama serve` (OLLAMA_MODELS must point at the drive).", file=sys.stderr)
