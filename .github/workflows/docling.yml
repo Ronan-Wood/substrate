@@ -23,6 +23,8 @@ on:
       - ".github/dependabot.yml"
       - ".github/workflows/codeql.yml"
       - ".github/workflows/tests.yml"
+      - ".github/workflows/lean.yml"
+      - "experiments/**"
   workflow_dispatch:
 
 permissions:

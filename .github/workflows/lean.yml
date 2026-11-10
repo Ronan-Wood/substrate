@@ -1,0 +1,82 @@
+# The Lean model of `blobs gc --unreferenced`, against the real planner (experiments/lean-blob-gc).
+#
+# ON PULL REQUESTS THAT TOUCH THE ENGINE OR THE MODEL, and not a required check: a required check
+# behind a path filter never reports on a pull request outside its paths, and a check that never
+# reports blocks every merge. `substrate/**` whole, because the planner reads through more of the
+# package than a hand-kept list would stay in step with. Like `docling.yml`, it does not run again on
+# the merge to `main`; `workflow_dispatch` runs it by hand.
+#
+# ACTIONS ARE PINNED BY COMMIT, as in tests.yml. elan, which installs Lean, is pinned by release and
+# checked against its SHA-256. The Lean toolchain elan then installs is pinned by version only (the
+# one `lean/lean-toolchain` names), and arrives over TLS from Lean's own GitHub releases.
+name: lean
+
+on:
+  pull_request:
+    paths:
+      - "experiments/lean-blob-gc/**"
+      - "substrate/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/lean.yml"
+  workflow_dispatch:
+
+# Read-only. Nothing here publishes, comments or writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: lean-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lean:
+    name: lean
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: elan v4.2.4, checked
+        env:
+          ELAN_URL: https://github.com/leanprover/elan/releases/download/v4.2.4/elan-x86_64-unknown-linux-gnu.tar.gz
+          ELAN_SHA256: 42b94d4244e8353142c456ec0e4ca6528fd898a6c604d4059f494e706e431f63
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/elan.tar.gz" "$ELAN_URL"
+          echo "$ELAN_SHA256  $RUNNER_TEMP/elan.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/elan.tar.gz" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/elan-init" -y --no-modify-path --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: build the model
+        run: cd experiments/lean-blob-gc/lean && lake build
+      - name: every theorem, and only Lean's standard axioms
+        run: python3 experiments/lean-blob-gc/lean/check_axioms.py
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      # The `test` group (hypothesis among it) and pyyaml, which the planner reads frontmatter with,
+      # both exactly as the lock holds them, hashes checked.
+      - run: uv venv --python 3.14
+      - run: |
+          uv export --frozen --only-group test --no-emit-project -o "$RUNNER_TEMP/test-group.txt"
+          uv pip install --require-hashes -r "$RUNNER_TEMP/test-group.txt"
+          uv export --frozen --no-dev --no-emit-project -o "$RUNNER_TEMP/engine.txt"
+          awk '/^pyyaml==/ { take = 1 } take { print } take && !/\\$/ { exit }' "$RUNNER_TEMP/engine.txt" > "$RUNNER_TEMP/pyyaml.txt"
+          grep -q '^pyyaml==' "$RUNNER_TEMP/pyyaml.txt"
+          uv pip install --require-hashes -r "$RUNNER_TEMP/pyyaml.txt"
+      # Faithful spellings only: the model and the real planner must agree on every case.
+      - name: the harness, 2,000 cases
+        run: uv run --no-sync python experiments/lean-blob-gc/harness/run.py agree --cases 2000
+      # A harness that cannot tell a broken planner from a working one passes everything. One planted
+      # regression must be caught, with a disagreement and not a crash.
+      - name: the harness still notices a planted regression
+        run: |
+          if out=$(uv run --no-sync python experiments/lean-blob-gc/harness/run.py agree --mutant six-days --cases 300 2>&1); then
+            echo "$out"
+            echo "the six-days regression went unnoticed: the harness is not testing the planner"
+            exit 1
+          fi
+          echo "$out" | tail -n 5
+          grep -q "minimal disagreement" <<<"$out"
+      # Exits 1 while a spelling's reference is missed by the key scan, 2 if the repro is broken.
+      - name: the repro passes
+        run: uv run --no-sync python experiments/lean-blob-gc/harness/repro_hidden_reference.py
