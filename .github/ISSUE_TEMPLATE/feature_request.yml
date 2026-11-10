@@ -1,0 +1,44 @@
+name: Feature request
+description: Something the engine should do that it doesn't.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you're trying to do, and what stops you today.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+      description: The behaviour you'd like. If it changes a reply, a tool or a flag, say so.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Vaults and composition
+        - Ingestion
+        - Retrieval
+        - MCP server and transports
+        - Refresh and serve
+        - Security
+        - Packaging and platforms
+        - Docs
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contributing
+      options:
+        - label: I'd like to work on this myself.

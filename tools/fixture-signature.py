@@ -4,11 +4,11 @@
     uv run python tools/fixture-signature.py out/substrate.db
 
 The eval fixture has been guarded for months by `4a4f765c9ad75dc9`, quoted in three readouts and
-in SESSION-HANDOFF's "EVAL MUST NOT MOVE". That number's derivation was never written down:
-MIGRATION-VOCABULARY.md records a session trying seventeen plausible constructions over
-`(chunk_id, text_with_path)` and reproducing none of them. So the project's most-cited invariant
-could not be checked by anyone, which makes it the same defect as a docstring asserting a property
-nobody implemented — a claim the next reader trusts instead of testing.
+in a session handoff's "EVAL MUST NOT MOVE". That number's derivation was never written down,
+and one session tried seventeen plausible constructions over `(chunk_id, text_with_path)`
+without reproducing it. So the project's most-cited invariant could not be checked by anyone,
+which makes it the same defect as a docstring asserting a property nobody implemented — a claim the
+next reader trusts instead of testing.
 
 THE DERIVATION IS THE POINT OF THIS FILE. It is stated here, in code, and it is cheap to re-run:
 

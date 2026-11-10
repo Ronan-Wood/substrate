@@ -12,7 +12,7 @@ it — a token this process never issued is refused, and a redeemed one cannot b
 An earlier version derived the token as `sha256(target + content)`. That was worthless as a gate:
 both inputs come from the caller, so anyone could compute a valid token without ever calling
 `plan()`, and a first-call write with a self-computed checksum succeeded. The docstring claimed a
-guarantee the code did not provide, which is the failure PRINCIPLES.md names directly — a stamp
+guarantee the code did not provide, which is the failure docs/principles.md names directly — a stamp
 implying a condition was handled is worse than no stamp, because the next reader trusts it.
 
 Be precise about what this DOES buy, because overstating it once already happened here. It makes

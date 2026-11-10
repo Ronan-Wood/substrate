@@ -23,7 +23,6 @@ out-vault/
 # and vectors.db). A committed `-shm` is a snapshot of one process's shared-memory index, so it
 # is stale for every later reader; a committed `-wal` is worse, because a stale WAL over an
 # already-checkpointed database is a claim about uncommitted transactions that no longer exist.
-# The .db files beside them stay tracked — those are the data.
 *.db-shm
 *.db-wal
 
@@ -31,3 +30,6 @@ bin/
 
 # Release assets, written by tools/publish-engine-release
 dist/
+
+# The README quickstart's registry, index and socket
+.demo/

@@ -1,6 +1,6 @@
 """Has the vault moved since the index was built — the question `index_version` cannot answer.
 
-Doc 2 §5 and PRINCIPLES.md are precise about what the version stamp buys: it converts SILENT
+Doc 2 §5 and docs/principles.md are precise about what the version stamp buys: it converts SILENT
 omission into DETECTABLE omission, and no more. Detection is not freshness. There is no watcher
 on this side, so the discipline is pushed onto every consumer, and a consumer with nothing to
 compare against cannot exercise it — `index_version` alone tells you what the index was built

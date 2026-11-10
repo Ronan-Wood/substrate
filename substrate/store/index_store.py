@@ -812,7 +812,7 @@ class IndexStore:
         changes on a re-chunk or re-extraction, not only a source-file change — 'what the index was
         built from' includes the chunk geometry, not just the source PDF. Falls back to
         source_sha256 for a doc inserted without a ledger row. Travels on the result contract so a
-        caller can DETECT staleness; per PRINCIPLES.md that is surfaced, not solved — this side has
+        caller can DETECT staleness; per docs/principles.md that is surfaced, not solved — this side has
         no FSEvents watcher, so the caller must compare. Cheap: one indexed join over the (small)
         documents table. Vector-space staleness is out of scope — the embed model is a query-time
         choice, and the eval's completeness guard already refuses a partially-embedded corpus."""
@@ -1071,7 +1071,7 @@ class IndexStore:
         wired embedder over an unembedded index produces a lexical-only result set with NO
         degradation recorded anywhere: the trace shows a live embedder, and the capability that
         implies stamps a measured MRR on a run the vector arm never contributed to. That is the
-        second of PRINCIPLES.md's five incidents — the code knew there were zero vectors, and a
+        second of docs/principles.md's five incidents — the code knew there were zero vectors, and a
         plausible number is what crossed the boundary.
 
         Presence is not enough, for the same reason the eval learned it: 256 vectors of 1811 after

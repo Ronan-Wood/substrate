@@ -88,7 +88,7 @@ The result envelope handed to any consumer (skill, CLI, MCP, GUI) carries:
 
 The `expected_quality` numbers here supersede an earlier sketch (`0.698 full · 0.375 no generator ·
 0.21 no embedder`) that was **mixed-cohort** — 0.375 is a 24-case figure and 0.21 a 7-case one, so
-quoting them beside the 44-case 0.698 would be the cross-cohort subtraction HANDOFF §6 forbids. The
+quoting them beside the 44-case 0.698 would be the cross-cohort subtraction docs/history/handoff-2026-07.md §6 forbids. The
 implemented tiers (`retrieve/retriever.py:_STACKS`) are all 44-case and model-specific; a config
 that was never measured at 44 cases returns `None` rather than importing a lower-cohort number.
 
