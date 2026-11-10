@@ -52,7 +52,8 @@ def _strings(node: object):
 
 def test_the_staged_workflows_are_written_for_this_tree_at_the_root() -> None:
     """What they run, not what their comments say about the monorepo."""
-    assert sorted(p.name for p in WORKFLOWS.glob("*.y*ml")) == ["codeql.yml", "docling.yml", "tests.yml"]
+    assert sorted(p.name for p in WORKFLOWS.glob("*.y*ml")) == ["codeql.yml", "docling.yml", "lean.yml",
+                                                             "tests.yml"]
     for path in sorted(WORKFLOWS.glob("*.yml")):
         ran = "\n".join(_strings(_workflow(path.name)))
         for reach in ("engine-alone", "working-directory", "Core/", "project.yml", "Distribution/"):
