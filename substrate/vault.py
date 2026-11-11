@@ -174,7 +174,7 @@ def _read_manifest(vault_dir: Path) -> dict:
     text = _read_capped(path)  # size-checked; raises VaultError on read failure / over-cap
     try:
         manifest = tomllib.loads(text)
-    except tomllib.TOMLDecodeError as e:
+    except (tomllib.TOMLDecodeError, RecursionError) as e:
         raise VaultError(f"malformed manifest {path}: {e}") from e
     misplaced = misplaced_keys(manifest)
     if misplaced:

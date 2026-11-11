@@ -74,8 +74,8 @@ WIRE_OBJECTS: dict[str, tuple[str, str, tuple[int, ...], str | None]] = {
     "arms": ("introspect.py", "arms", (0,), None),
     "vector": ("introspect.py", "vector_status", (0,), None),
     "status": ("introspect.py", "status_payload", (0,), "out"),
-    # `status.drift` when the drift could not be checked: two branches.
-    "drift_unchecked": ("introspect.py", "status_payload", (1, 2), None),
+    # `status.drift` when the drift could not be checked: three branches.
+    "drift_unchecked": ("introspect.py", "status_payload", (1, 2, 3), None),
     "scope_row": ("introspect.py", "scopes_payload", (0,), "row"),
     "scope_list": ("introspect.py", "scopes_payload", (1,), None),
     # The roster an agent-mode server answers with, from its published snapshots.

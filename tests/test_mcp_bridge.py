@@ -124,7 +124,7 @@ def test_reads_are_answered_by_the_shared_server() -> None:
 def test_a_write_is_forwarded_with_who_it_is_from() -> None:
     """The bridge writes nothing itself: `ingest` and `amend`, plan and commit alike, go to the
     engine, each carrying the client's name and its token, read from the token file per call."""
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     rec = _Recorder()
     cfg = _bridge(registry, rec)
@@ -159,7 +159,7 @@ def test_client_overrides_the_declared_name() -> None:
 def test_a_write_with_no_engine_is_refused_and_writes_nothing() -> None:
     """It used to run in the bridge, and still worked with the engine down. Now the engine is the
     one place a write is decided, so no engine means no write, said as such."""
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     cfg = _bridge(registry, bridge.Remote(_no_engine()))
     out = _tools_call(cfg, "ingest", {"scope": "demo", "content": _NOTE, "filename": "d.md"})

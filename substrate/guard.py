@@ -27,7 +27,8 @@ guarded vault's OWN documents; what it inherits was never the guarded party's to
 FAIL CLOSED, ALWAYS. Every way of failing to read, parse or verify produces a withholding verdict —
 never an open one. A guard that fell open when its state file was missing would be defeated by
 deleting a file, which is the one thing a local process certainly can do. An unguarded vault (no
-`guard_state`) is untouched: absence of a declaration is not a failed check.
+`guard_state`) is untouched: absence of a declaration is not a failed check. A manifest that
+cannot be read is not an absent declaration; it is no answer at all, and it withholds.
 
 THE MCP SERVER IS THE ONLY ENFORCEMENT POINT, deliberately. `compose`, `embed` and the refresh agent
 are the operator's own machinery running as the operator; making them refuse because an app is
@@ -40,7 +41,6 @@ from __future__ import annotations
 import json
 import os
 import time
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -78,26 +78,31 @@ class Verdict:
 OPEN = Verdict()
 
 
-def declared_guard(vault_dir: Path) -> Path | None | str:
-    """The state file this vault nominates, `None` when it nominates none, or a `str` DIAGNOSIS when
-    the declaration itself is malformed.
+def declared_guard(vault_dir: Path, scope: str | None = None) -> Path | None | str:
+    """The state file this vault nominates, `None` when its manifest reads and nominates none, or a
+    `str` DIAGNOSIS that withholds the vault.
 
-    A manifest that cannot be read at all reads as "no guard" rather than as a broken one: an
-    unreadable manifest is `vault.compose`'s error to report in its own words, and diagnosing it
-    here would blame the guard for someone else's parse error. A manifest that parses and declares
-    a non-string `guard_state` is different — that is a guard someone tried to write and got wrong,
-    and it must not serve the vault unguarded. So is one written inside a table: compose refuses
-    that manifest, but an index built before the edit is still served.
+    THE MANIFEST IS READ NOW; THE INDEX WAS BUILT FROM IT THEN, and outlives any edit to it. So a
+    manifest compose would refuse cannot say whether the vault is guarded, and the vault's own
+    notes are withheld until it can, guarded or not: missing, unreadable, unparseable, empty, cut
+    short, misshapen, naming another scope than `scope`, or in a directory that is gone. It is read
+    by the function compose reads it with; compose's later checks (inheritance, identity) are not
+    repeated, and a manifest failing only those declares no guard either way.
+    Nothing outside the manifest records whether the vault was guarded: a record kept elsewhere is
+    one an older engine or a deleted file can lose. A non-string `guard_state` is a guard someone
+    tried to write and got wrong, and does not serve the vault unguarded either.
     """
     path = vault_dir / MANIFEST
+    if not vault_dir.is_dir():
+        return _unanswered(f"the vault directory {vault_dir} is not there")
+    if not path.is_file():
+        return _unanswered(f"{path} is missing")
     try:
-        manifest = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
-        return None
-    swallowed = [(k, t) for k, t in _vault.misplaced_keys(manifest) if k == GUARD_KEY]
-    if swallowed:
-        return (f"{_vault.misplaced_refusal(path, swallowed)} Nothing can vouch for this vault, "
-                f"so its own notes are withheld rather than served unguarded.")
+        manifest = _vault._read_manifest(vault_dir)
+    except _vault.VaultError as e:
+        return _unanswered(str(e))
+    if scope is not None and manifest["name"] != scope:
+        return _unanswered(f"{path} names scope {manifest['name']!r}, not {scope!r}")
     declared = manifest.get(GUARD_KEY)
     if declared is None:
         return None
@@ -107,13 +112,19 @@ def declared_guard(vault_dir: Path) -> Path | None | str:
     return Path(declared).expanduser()
 
 
+def _unanswered(what: str) -> str:
+    return (f"{what.rstrip('.')}. So nothing can say whether this vault is guarded, and its own "
+            f"notes are withheld until the manifest reads again. Everything this scope INHERITS "
+            f"still answered.")
+
+
 def check(vault_dir: Path, scope: str, *, now: float | None = None) -> Verdict:
     """What `scope` may answer with.
 
     A withholding verdict names the vault under every name the index may record for it
     (`withheld_names`).
     """
-    declared = declared_guard(vault_dir)
+    declared = declared_guard(vault_dir, scope)
     if declared is None:
         return OPEN
     names = withheld_names(vault_dir, scope)

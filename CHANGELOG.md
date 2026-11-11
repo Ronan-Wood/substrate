@@ -29,6 +29,12 @@ Every release of the engine, newest first. The format follows
   status now says why its block was not read.
 - `frontmatter check` reports a value the engine leaves unread. Before, it called a note whose
   frontmatter the engine dropped clean.
+- A vault whose manifest `compose` would refuse (missing, unreadable, unparseable, empty, naming
+  another scope) or whose folder is gone has its own notes withheld from the MCP server, with the
+  reason, until the manifest reads again. Its inherited vaults keep answering. An agent-mode
+  snapshot of it is withdrawn until then.
+- `status` describes only what a scope may answer: a vault the guard withholds is left out of its
+  counts, its `entities`, its `vectors` coverage and its `drift`.
 
 ### Changed
 
@@ -43,6 +49,8 @@ Every release of the engine, newest first. The format follows
   spine field, as the same file in flow form always was. A note that opens
   with a divider whose block YAML reads as a mapping is frontmatter now, as Obsidian shows it. Run
   `substrate frontmatter check` before upgrading to list them.
+- `status` has a `withheld` key: the guard's reason while a vault is withheld, otherwise null.
+  Additive; the wire version is unchanged.
 
 ### Consented writes
 

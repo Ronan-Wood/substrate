@@ -87,8 +87,9 @@ def _cfg_embedder(registry: Path) -> server.Config:
     return server.Config(str(registry), stack.build(hyde_model=None, rerank_model=None))
 
 
-def _fixture(*, manifest: bool = False) -> tuple[Path, Path]:
-    """A composed-looking scope: one index, one registered name, one note on disk.
+def _fixture() -> tuple[Path, Path]:
+    """A composed-looking scope: one index, one registered name, one note on disk, and the manifest
+    compose requires. A registered vault whose manifest cannot be read withholds its own notes.
 
     Mirrors what `compose` actually stores, which is load-bearing here: `source_path` is the VAULT
     note and `source_sha256` its real digest, while `markdown_path` is the derived artifact in the
@@ -101,8 +102,7 @@ def _fixture(*, manifest: bool = False) -> tuple[Path, Path]:
     vault.mkdir()
     note = vault / "composition.md"
     note.write_text(f"# Composition\n\n{_LONG}\n", encoding="utf-8")
-    if manifest:
-        (vault / ".substrate.toml").write_text('name = "demo"\ninherits = []\n', encoding="utf-8")
+    (vault / ".substrate.toml").write_text('name = "demo"\ninherits = []\n', encoding="utf-8")
 
     derived = root / "demo-index" / "composition"
     derived.mkdir(parents=True)
@@ -910,7 +910,7 @@ def test_lexical_only_stack_reports_no_measured_number() -> None:
 # ---------------------------------------------------------------- discovery and freshness
 
 def test_list_scopes_reports_the_manifest_resolved_sources() -> None:
-    _, registry = _fixture(manifest=True)
+    _, registry = _fixture()
     out = _call("list_scopes", {}, registry)
     row = next(s for s in out["scopes"] if s["scope"] == "demo")
     assert row["sources"] == ["demo-vault"], row
@@ -919,7 +919,8 @@ def test_list_scopes_reports_the_manifest_resolved_sources() -> None:
 
 def test_list_scopes_lists_a_broken_scope_with_its_fault() -> None:
     """Omitting it would read as "that scope was never composed" — the opposite of the truth."""
-    _, registry = _fixture()  # no manifest written: inheritance cannot resolve
+    root, registry = _fixture()
+    (root / "demo-vault" / ".substrate.toml").unlink()   # inheritance cannot resolve
     row = next(s for s in _call("list_scopes", {}, registry)["scopes"] if s["scope"] == "demo")
     assert row["sources"] is None
     assert "error" in row
@@ -932,7 +933,7 @@ def test_an_old_schema_index_is_refused_not_destroyed() -> None:
     survives for `compose` to rebuild deliberately."""
     import sqlite3
 
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     db = scopes.resolve("demo", registry).db
     con = sqlite3.connect(str(db))
     con.execute("PRAGMA user_version = 1")
@@ -954,7 +955,7 @@ def test_an_old_schema_index_is_refused_not_destroyed() -> None:
 def test_status_reports_an_empty_index_while_search_refuses_it() -> None:
     """An index that is current-schema but empty: status answers (that IS the question it exists
     for), search refuses (an empty result is indistinguishable from a genuine no-match)."""
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     with IndexStore(str(scopes.resolve("demo", registry).db)) as s:
         s.clear()
 
@@ -967,7 +968,7 @@ def test_status_reports_an_empty_index_while_search_refuses_it() -> None:
 
 
 def test_status_reports_counts_and_the_spine_distribution() -> None:
-    _, registry = _fixture(manifest=True)
+    _, registry = _fixture()
     out = _call("status", {"scope": "demo"}, registry)
     assert out["documents"] == 1
     assert out["by_confidence"] == {"proposed": 1}
@@ -978,7 +979,7 @@ def test_status_reports_counts_and_the_spine_distribution() -> None:
 def test_status_reports_vector_coverage_as_incomplete() -> None:
     """The condition that made a lexical-only run wear a 0.698 label. A caller must be able to see
     it BEFORE reading a ranking, not only in a per-query degradation."""
-    _, registry = _fixture(manifest=True)
+    _, registry = _fixture()
     cfg = server.Config(str(registry), stack.Stack(embedder=_FakeEmbedder()))
     resp = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                           "params": {"name": "status", "arguments": {"scope": "demo"}}}, cfg)
@@ -990,7 +991,7 @@ def test_status_reports_vector_coverage_as_incomplete() -> None:
 
 def test_status_detects_a_note_the_index_does_not_hold() -> None:
     """An unindexed note looks exactly like a question the corpus cannot answer."""
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "brand-new.md").write_text("# New\n\nunindexed\n", encoding="utf-8")
     d = _call("status", {"scope": "demo"}, registry)["drift"]
     assert d["stale"] is True
@@ -998,7 +999,7 @@ def test_status_detects_a_note_the_index_does_not_hold() -> None:
 
 
 def test_status_detects_an_edited_note() -> None:
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "composition.md").write_text("# Composition\n\nrewritten\n",
                                                         encoding="utf-8")
     d = _call("status", {"scope": "demo"}, registry)["drift"]
@@ -1008,7 +1009,7 @@ def test_status_detects_an_edited_note() -> None:
 
 def test_status_is_clean_when_nothing_moved() -> None:
     """`stale: true` must mean something. Always-true is the same defect as always-false."""
-    _, registry = _fixture(manifest=True)
+    _, registry = _fixture()
     d = _call("status", {"scope": "demo"}, registry)["drift"]
     assert d["stale"] is False, d
     assert d["checked"] == 1 and d["changed"] == [] and d["added"] == []
@@ -1068,7 +1069,7 @@ def test_status_carries_the_same_refresh_block_as_search() -> None:
     have to learn a second dialect on `status`."""
     from substrate import refresh_state
 
-    _, registry = _fixture(manifest=True)
+    _, registry = _fixture()
     refresh_state.record("demo", "embed_failed", registry=registry)
 
     searched = _call("search", {"scope": "demo", "query": "composition"}, registry)["refresh"]
@@ -1101,7 +1102,7 @@ Written through the MCP surface, which is a write and therefore two-phase.
 
 
 def test_ingest_without_a_token_plans_and_writes_nothing() -> None:
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     out = _call("ingest", {"scope": "demo", "content": _NOTE, "filename": "d.md"}, registry)
     assert out["written"] is False
@@ -1117,7 +1118,7 @@ def test_ingest_token_cannot_be_derived_by_the_caller() -> None:
     with no plan ever issued — verified against this dispatcher."""
     import hashlib
 
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     target = (root / "demo-vault" / "04-synthesis" / "d.md").resolve()
     forged = hashlib.sha256(str(target).encode() + b"\0" + _NOTE.encode()).hexdigest()
@@ -1130,7 +1131,7 @@ def test_ingest_token_cannot_be_derived_by_the_caller() -> None:
 def test_ingest_with_the_token_writes_and_declares_the_index_stale() -> None:
     """The note is in the vault and not in the index. Said as a field — and `status` drift will
     list it — because a note that exists but cannot be found is the silent-omission shape."""
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     cfg = _cfg(registry)      # ONE server across both phases, as in production
     plan = _call("ingest", {"scope": "demo", "content": _NOTE, "filename": "d.md"},
@@ -1148,7 +1149,7 @@ def test_ingest_with_the_token_writes_and_declares_the_index_stale() -> None:
 # ---------------------------------------------------------------- amend
 
 def _amend_fixture() -> tuple[Path, Path, Path]:
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     note = root / "demo-vault" / "04-synthesis" / "d.md"
     note.write_text(_NOTE, encoding="utf-8")
@@ -1278,7 +1279,7 @@ def test_ingest_refuses_a_non_regular_source() -> None:
     """A caller-named path is untrusted input. The bound is enforced on the DESCRIPTOR that gets
     read, not by a prior stat — the check-then-act version could be swapped for a FIFO in
     between, and open() on one blocks forever."""
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     fifo = root / "pipe.md"
     os.mkfifo(fifo)
@@ -1288,7 +1289,7 @@ def test_ingest_refuses_a_non_regular_source() -> None:
 
 
 def test_ingest_refuses_an_oversized_source() -> None:
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     big = root / "big.md"
     big.write_bytes(b"x" * (server.MAX_SOURCE_BYTES + 1))
@@ -1300,7 +1301,7 @@ def test_ingest_refuses_an_oversized_source() -> None:
 def test_ingest_refuses_a_pdf_with_the_reason() -> None:
     """Not a capability gap silently hidden: reviewed markdown is what the engine reads, and the
     reference tier is not auto-written (Doc 2 §2, §3b)."""
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     pdf = root / "paper.pdf"
     pdf.write_bytes(b"%PDF-1.4\n")
     body = _call_raw("ingest", {"scope": "demo", "source_path": str(pdf)}, registry)
@@ -1309,14 +1310,14 @@ def test_ingest_refuses_a_pdf_with_the_reason() -> None:
 
 
 def test_ingest_refuses_both_or_neither_source() -> None:
-    _, registry = _fixture(manifest=True)
+    _, registry = _fixture()
     assert _call_raw("ingest", {"scope": "demo"}, registry).get("isError")
     assert _call_raw("ingest", {"scope": "demo", "content": _NOTE, "filename": "d.md",
                                 "source_path": "/tmp/x.md"}, registry).get("isError")
 
 
 def test_ingest_refuses_a_stale_token() -> None:
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     cfg = _cfg(registry)
     plan = _call("ingest", {"scope": "demo", "content": _NOTE, "filename": "d.md"},
@@ -1841,7 +1842,7 @@ def test_ingest_is_refused_over_http_and_the_refusal_is_legible() -> None:
     not exist goes hunting for another way to write, which is the misleading answer this codebase
     refuses. The tool still exists over stdio, which the last assertion holds it to.
     """
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     args = {"scope": "demo", "content": _NOTE, "filename": "d.md"}
     base, stop = _http_server(_cfg(registry, read_only=True))

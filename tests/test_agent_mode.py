@@ -743,6 +743,16 @@ def test_a_guard_written_below_a_table_withdraws_the_snapshot_although_publish_r
     assert not (shared / "demo.snapshot.db").exists()
 
 
+def test_a_snapshot_is_withdrawn_when_its_manifest_cannot_be_read(world):
+    """The snapshot was published unguarded, then the manifest went. Nothing can say whether the
+    vault is guarded now, so its notes leave the snapshot as they leave the server's answers."""
+    shared, registry = world
+    (Path(scopes.resolve("demo", registry).vault) / ".substrate.toml").unlink()
+    with pytest.raises(agent.AgentError):
+        agent.publish("demo", shared, registry=registry)
+    assert not (shared / "demo.snapshot.db").exists()
+
+
 def test_a_new_guard_withdraws_a_snapshot_whose_manifest_is_missing(world):
     shared, registry = world
     (shared / "demo.snapshot.json").unlink()

@@ -221,11 +221,19 @@ def _add_vault_exclusion(where: list[str], args: list[Any], excluded: frozenset[
     vault's, and withholding every unattributed note because one vault is guarded would take the
     corpus down. The guard protects a NAMED vault.
     """
+    clause, values = vault_exclusion(excluded)
+    if values:
+        where.append(clause)
+        args.extend(values)
+
+
+def vault_exclusion(excluded: frozenset[str] | None) -> tuple[str, list[str]]:
+    """The exclusion as one clause over `d`, the documents alias, and its arguments: `("1", [])`
+    when nothing is withheld, so a query can splice it in unconditionally."""
     if not excluded:
-        return
+        return "1", []
     ordered = sorted(excluded)
-    where.append(f"(d.vault IS NULL OR d.vault NOT IN ({','.join('?' * len(ordered))}))")
-    args.extend(ordered)
+    return f"(d.vault IS NULL OR d.vault NOT IN ({','.join('?' * len(ordered))}))", ordered
 
 
 def _add_entity_filter(where: list[str], args: list[Any], entity: str | None) -> None:
@@ -697,14 +705,27 @@ class IndexStore:
         return {r[0] for r in self.db.execute(
             "SELECT doc_id FROM document_entities WHERE entity_id=?", (entity_id,))}
 
-    def entity_roster(self) -> list[dict]:
+    def entity_roster(self, *, withheld_vaults: frozenset[str] | None = None) -> list[dict]:
         """Every entity the index knows, with how many documents mention it — ordered by that count,
-        so the roster reads as "who this corpus is about" rather than alphabetically."""
+        so the roster reads as "who this corpus is about" rather than alphabetically.
+
+        `withheld_vaults` lists only the entities a document still answerable mentions, counting
+        those documents alone. Listing the rest at 0 would name the people on the withheld notes,
+        since the roster may be the withheld vault's own; and listing only the never-mentioned at 0
+        would name them by the gap. So both are left out while anything is withheld."""
+        if not withheld_vaults:
+            return [dict(r) for r in self.db.execute(
+                "SELECT e.entity_id, e.name, e.kind, e.gloss, "
+                "       COUNT(DISTINCT d.doc_id) AS documents "
+                "FROM entities e LEFT JOIN document_entities d ON d.entity_id = e.entity_id "
+                "GROUP BY e.entity_id ORDER BY documents DESC, e.name")]
+        excl, args = vault_exclusion(withheld_vaults)
         return [dict(r) for r in self.db.execute(
             "SELECT e.entity_id, e.name, e.kind, e.gloss, "
             "       COUNT(DISTINCT d.doc_id) AS documents "
-            "FROM entities e LEFT JOIN document_entities d ON d.entity_id = e.entity_id "
-            "GROUP BY e.entity_id ORDER BY documents DESC, e.name")]
+            "FROM entities e JOIN document_entities de ON de.entity_id = e.entity_id "
+            f"JOIN documents d ON d.doc_id = de.doc_id WHERE {excl} "
+            "GROUP BY e.entity_id ORDER BY documents DESC, e.name", args)]
 
     def documents(self) -> list[dict]:
         return [dict(r) for r in self.db.execute("SELECT * FROM documents ORDER BY doc_id")]
@@ -830,13 +851,21 @@ class IndexStore:
         ).hexdigest()[:12]
         return f"v{sv}:{sig}"
 
-    def stats(self) -> dict:
-        q = lambda s: self.db.execute(s).fetchone()[0]  # noqa: E731
+    def stats(self, *, withheld_vaults: frozenset[str] | None = None) -> dict:
+        """Counts over the index. `withheld_vaults` leaves those vaults' documents and chunks out
+        of the three content counts, as every read path does. Without it every count is the whole
+        index's, joined to nothing, as `_refuse_if_empty` has always read it. `chunks` and `vectors`
+        stay whole-index: no caller shows them, and `vector_coverage` is what `status` reports."""
+        excl, args = vault_exclusion(withheld_vaults)
+        q = lambda s, a=(): self.db.execute(s, a).fetchone()[0]  # noqa: E731
+        kind = ("SELECT COUNT(*) FROM chunks c JOIN documents d ON d.doc_id = c.doc_id "
+                f"WHERE c.kind = ? AND {excl}" if args else
+                "SELECT COUNT(*) FROM chunks c WHERE c.kind = ?")
         return {
-            "documents": q("SELECT COUNT(*) FROM documents"),
+            "documents": q(f"SELECT COUNT(*) FROM documents d WHERE {excl}", args),
             "chunks": q("SELECT COUNT(*) FROM chunks"),
-            "passages": q("SELECT COUNT(*) FROM chunks WHERE kind='passage'"),
-            "outlines": q("SELECT COUNT(*) FROM chunks WHERE kind='outline'"),
+            "passages": q(kind, ["passage", *args]),
+            "outlines": q(kind, ["outline", *args]),
             "vectors": q("SELECT COUNT(*) FROM chunk_vectors"),
             "schema_version": q("PRAGMA user_version"),
         }
@@ -849,7 +878,7 @@ class IndexStore:
     # eventually wires a caller-supplied axis into a status payload.
     _GROUPABLE = frozenset({"vault", "tier", "status", "doc_type", "confidence"})
 
-    def counts_by(self, column: str) -> dict:
+    def counts_by(self, column: str, *, withheld_vaults: frozenset[str] | None = None) -> dict:
         """Document count per value of one spine axis.
 
         One owner for a grouping that had five hand-rolled copies disagreeing about the
@@ -867,9 +896,11 @@ class IndexStore:
         if column not in self._GROUPABLE:
             raise ValueError(
                 f"{column!r} is not a groupable column; known {sorted(self._GROUPABLE)}")
+        excl, args = vault_exclusion(withheld_vaults)
         return {r[0] if r[0] is not None else "(none)": r[1]
                 for r in self.db.execute(
-                    f"SELECT {column}, COUNT(*) FROM documents GROUP BY {column}")}
+                    f"SELECT d.{column}, COUNT(*) FROM documents d WHERE {excl} "
+                    f"GROUP BY d.{column}", args)}
 
     def _count_status_filtered(self, statuses: frozenset[str] | None) -> int:
         """Count chunks the PRODUCTION filter builder selects for a status set — the same
@@ -1064,7 +1095,8 @@ class IndexStore:
 
     # ------------------------------------------------------- vector slot
 
-    def vector_coverage(self, model: str) -> tuple[int, int]:
+    def vector_coverage(self, model: str, *,
+                        withheld_vaults: frozenset[str] | None = None) -> tuple[int, int]:
         """(vectors stored under `model`, total chunks) — COMPLETENESS, not presence.
 
         `vector_search` on a model with no stored vectors returns [] rather than raising, so a
@@ -1088,7 +1120,19 @@ class IndexStore:
         correctness depend on every future delete path remembering to, and the failure it would
         produce is the one this whole function exists to stop: enough orphans to satisfy
         `n >= total` on a partly-embedded index, reported as complete, with a measured MRR on top.
+
+        `withheld_vaults` counts only chunks still answerable, for `status`: beside its other counts,
+        a whole-index total would give a withheld vault's size away as the difference. Without it
+        the two counts are the whole index's, as retrieval's coverage check needs.
         """
+        if withheld_vaults:
+            excl, args = vault_exclusion(withheld_vaults)
+            join = f"JOIN documents d ON d.doc_id = c.doc_id WHERE {excl}"
+            n = self.db.execute(
+                "SELECT COUNT(*) FROM chunk_vectors v JOIN chunks c ON c.chunk_id = v.chunk_id "
+                f"{join} AND v.embed_model = ?", (*args, model)).fetchone()[0]
+            total = self.db.execute(f"SELECT COUNT(*) FROM chunks c {join}", args).fetchone()[0]
+            return n, total
         n = self.db.execute(
             "SELECT COUNT(*) FROM chunk_vectors v JOIN chunks c ON c.chunk_id = v.chunk_id "
             "WHERE v.embed_model=?",

@@ -364,7 +364,8 @@
       "schema_version",
       "scope",
       "vault",
-      "vectors"
+      "vectors",
+      "withheld"
     ],
     "vector": [
       "chunks",

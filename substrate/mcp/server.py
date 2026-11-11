@@ -1020,7 +1020,7 @@ def _tool_status(args: dict, cfg: Config) -> dict:
     try:
         return introspect.status_payload(store, entry, stack=cfg.stack, registry=cfg.registry,
                                          refresh=_refresh(cfg, name),
-                                         drift=cfg.agent is None)
+                                         drift=cfg.agent is None, verdict=verdict)
     finally:
         store.close()
 

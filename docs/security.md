@@ -130,6 +130,12 @@ report anything that gets past it privately, as [`SECURITY.md`](../SECURITY.md) 
 
 - **It is built to fail closed.** A missing, unreadable or malformed state file withholds the vault.
   So does a `guard_state` written inside a table, which `compose` also refuses.
+- **A manifest that `compose` would refuse withholds too**, guarded or not: missing, unreadable,
+  unparseable, empty, naming another scope, or the vault folder gone. Nothing else records whether
+  the vault was guarded, so its own notes wait until the manifest reads again.
+- **`status` describes only what may be answered.** A withheld vault is left out of its counts,
+  `entities`, `vectors` and `drift`, and `withheld` says why. `index_version` still covers the
+  whole index.
 - **It withholds a vault, not a scope.** The vaults the guarded one inherits stay readable.
 - **Only what the MCP server returns is guarded.** The CLI, `query` included, and anything that
   opens the index read the guarded notes. `compose`, `embed` and the refresh loop are your own tools

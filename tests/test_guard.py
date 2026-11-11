@@ -159,14 +159,18 @@ def test_a_guard_declared_as_a_non_string_refuses(tmp_path: Path) -> None:
     assert _withheld(guard.check(vault, "acme"))
 
 
-def test_an_unreadable_manifest_is_not_this_modules_error(tmp_path: Path) -> None:
-    """Compose reports a malformed manifest in its own words; diagnosing it here would blame the
-    guard for someone else's parse error."""
+def test_a_manifest_that_cannot_be_read_withholds(tmp_path: Path) -> None:
+    """A manifest that cannot be read cannot say whether the vault is guarded, so its own notes
+    are withheld."""
     vault = tmp_path / "acme"
     vault.mkdir()
     (vault / ".substrate.toml").write_text("this is not toml = = =", encoding="utf-8")
-    assert guard.declared_guard(vault) is None
-    assert guard.check(vault, "acme").vouched
+    v = guard.check(vault, "acme")
+    assert _withheld(v) and "malformed manifest" in v.reason
+    (vault / ".substrate.toml").unlink()
+    assert "is missing" in guard.check(vault, "acme").reason
+    vault.rmdir()
+    assert "not there" in guard.check(vault, "acme").reason
 
 
 def test_a_guard_written_below_a_table_refuses(tmp_path: Path) -> None:

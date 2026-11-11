@@ -21,7 +21,7 @@ simply an edit made since the last tick.
 
 from __future__ import annotations
 
-from substrate import freshness, private, refresh_state, scopes
+from substrate import freshness, guard, private, refresh_state, scopes
 from substrate import vault as _vault
 
 
@@ -42,7 +42,7 @@ def arms(stack) -> dict:
     }
 
 
-def vector_status(store, stack) -> dict | None:
+def vector_status(store, stack, *, withheld_vaults: frozenset[str] | None = None) -> dict | None:
     """Coverage for the CONFIGURED embedder, or null when no vector arm is wired.
 
     COMPLETENESS, not presence: a partially-embedded index answers lexically while a wired
@@ -53,13 +53,15 @@ def vector_status(store, stack) -> dict | None:
     if stack.embedder is None:
         return None
     key = getattr(stack.embedder, "key", getattr(stack.embedder, "model", ""))
-    n, total = store.vector_coverage(key)
+    n, total = store.vector_coverage(key, withheld_vaults=withheld_vaults)
     # An EMPTY index satisfies `n >= total` as 0 >= 0. Reporting that as complete claimed full
     # vector coverage over a store with nothing in it — zero chunks is the absence of coverage,
     # not the completion of it. Same correction as the per-query guard in _retrieve.
     complete = total > 0 and n >= total
     if complete:
         note = None
+    elif total == 0 and withheld_vaults:
+        note = "nothing answerable is left: the scope's own vault is withheld (see `withheld`)"
     elif total == 0:
         note = "the index holds no chunks — recompose this scope"
     else:
@@ -68,7 +70,8 @@ def vector_status(store, stack) -> dict | None:
 
 
 def status_payload(store, entry, *, stack, registry: str | None = None,
-                   refresh: dict | None = None, drift: bool = True) -> dict:
+                   refresh: dict | None = None, drift: bool = True,
+                   verdict: guard.Verdict = guard.OPEN) -> dict:
     """Everything `status` reports for one composed scope.
 
     The `refresh` block is the SAME shape `render.search_payload` emits — one reader, one key set,
@@ -76,8 +79,14 @@ def status_payload(store, entry, *, stack, registry: str | None = None,
     here. It carries no clock-derived field for the reason given in `render`: the envelope is
     compared as a whole object across two processes, and a shape that varied between the two
     payloads would put that comparison back where it started.
+
+    `verdict` is the guard's (`guard.check`). A withheld vault is left out of the counts, the
+    roster, the vector coverage and drift, as it is from every read path, and `withheld` says why:
+    status describing it would name its notes and the people in them. `index_version` still hashes
+    the whole index.
     """
-    s = store.stats()
+    withheld = verdict.withhold
+    s = store.stats(withheld_vaults=withheld)
     out = {
         "scope": entry.name,
         "db": str(entry.db),
@@ -91,17 +100,17 @@ def status_payload(store, entry, *, stack, registry: str | None = None,
         "passages": s["passages"],
         "outlines": s["outlines"],
         "schema_version": s["schema_version"],
-        "by_vault": store.counts_by("vault"),
-        "by_tier": store.counts_by("tier"),
-        "by_status": store.counts_by("status"),
-        "by_doc_type": store.counts_by("doc_type"),
-        "by_confidence": store.counts_by("confidence"),
+        "by_vault": store.counts_by("vault", withheld_vaults=withheld),
+        "by_tier": store.counts_by("tier", withheld_vaults=withheld),
+        "by_status": store.counts_by("status", withheld_vaults=withheld),
+        "by_doc_type": store.counts_by("doc_type", withheld_vaults=withheld),
+        "by_confidence": store.counts_by("confidence", withheld_vaults=withheld),
         # WHO THIS CORPUS IS ABOUT, ordered by how many notes name each. Empty when the scope's
         # vault declares no identity roster, which is most of them — an absent list here means
         # "nobody was resolved", never "nobody was mentioned".
-        "entities": store.entity_roster(),
+        "entities": store.entity_roster(withheld_vaults=withheld),
         "retrieval_arms": arms(stack),
-        "vectors": vector_status(store, stack),
+        "vectors": vector_status(store, stack, withheld_vaults=withheld),
         "refresh": refresh if refresh is not None else refresh_state.report(entry.name, registry),
         # Each index path another local user can read or list, the folders holding it included.
         # Empty is the only safe value. The next compose seals what the engine owns; a folder
@@ -109,6 +118,7 @@ def status_payload(store, entry, *, stack, registry: str | None = None,
         # until the operator changes it. Null in agent mode: a snapshot is 0640 by design, shared
         # with its folder's group, and not this process's to judge.
         "exposed": (private.exposed_index(entry.db, entry.index_root) if drift else None),
+        "withheld": verdict.reason,
     }
     if not drift:
         # Agent mode: the vault is not this process's to read, so drift is UNCHECKED and says so in
@@ -118,14 +128,21 @@ def status_payload(store, entry, *, stack, registry: str | None = None,
                                  "and cannot read the vault it was built from."}
         return out
     try:
-        notes = [n.path for n in _vault.resolve_scope(entry.vault).notes]
-        out["drift"] = freshness.drift(store, notes)
+        notes = [n.path for n in _vault.resolve_scope(entry.vault).notes
+                 if n.vault not in withheld]
+        out["drift"] = freshness.drift(store, notes, withheld_vaults=withheld)
     except _vault.VaultError as e:
         # A scope that cannot be RESOLVED cannot be drift-checked — the vault is gone, a manifest
         # is malformed, or a skip-list file declares a spine (`_refuse_skipped_note_with_a_spine`).
         # Reported as an error IN the drift slot rather than omitted: a missing key reads as
         # "nothing has changed". Note the coarseness — the whole added/changed/removed breakdown is
         # replaced by the message, so `status` says UNCHECKABLE for an authoring fault too.
+        if withheld:
+            # The error can name a note (two byte-identical notes, a skipped file with a spine),
+            # and a withheld vault's notes are not this reply's to name.
+            out["drift"] = {"error": "the scope cannot be resolved, and the reason is withheld "
+                                     "with the vault's own notes, since it may name them."}
+            return out
         out["drift"] = {"error": str(e)}
     return out
 

@@ -225,9 +225,10 @@ class _NoteCopy:
 
 
 def _withheld(scope: str, project_vault: Path) -> frozenset[str]:
-    """Fail closed: a declared guard, well-formed or not, withholds the project vault's own notes,
-    under the same names the server's verdict carries (`guard.withheld_names`)."""
-    if guard.declared_guard(project_vault) is None:
+    """Fail closed: a declared guard, well-formed or not, or a manifest that cannot be read,
+    withholds the project vault's own notes, under the same names the server's verdict carries
+    (`guard.withheld_names`)."""
+    if guard.declared_guard(project_vault, scope) is None:
         return frozenset()
     return guard.withheld_names(project_vault, scope)
 
@@ -371,7 +372,8 @@ def _fill(tmp: Path, withheld: frozenset[str], excluded: frozenset[str],
 
 def _withdraw_if_newly_guarded(withheld: frozenset[str], db_path: Path, manifest_path: Path,
                                prior: dict | None) -> bool:
-    """Remove a published snapshot built WITHOUT a guard the scope now declares. True if removed.
+    """Remove a published snapshot built WITHOUT a guard the scope now declares, or from a vault
+    whose manifest no longer reads (`guard.declared_guard`). True if removed.
 
     Run before anything that can fail, by every path that touches a published scope: a snapshot
     that outlives a newly declared guard serves that vault's notes for as long as the rebuild that
@@ -540,7 +542,8 @@ def annotate(scope: str, directory: str | Path, *,
     as it was, and its manifest now says the live scope is frozen.
 
     Returns what happened: `absent` (nothing published to annotate), `marked`, or `withdrawn` —
-    the scope has gained a guard since the snapshot was built, and a failed refresh does not
+    the scope has gained a guard since the snapshot was built (or its manifest no longer reads, which
+    withholds the same way), and a failed refresh does not
     republish, so the snapshot is removed instead (`_withdraw_if_newly_guarded`). The agent then
     reads "no published snapshot", which is true, and the next successful refresh publishes it
     stripped."""
@@ -573,7 +576,8 @@ def after_refresh_record(scope: str, outcome: str, *,
         return f"{scope}: snapshot {'published' if p.rewrote else 'verified'} -> {p.db}"
     done = annotate(scope, target, registry=registry)
     if done == "withdrawn":
-        return f"{scope}: snapshot WITHDRAWN — the scope declares a guard it was not built with"
+        return (f"{scope}: snapshot WITHDRAWN — the scope declares a guard it was not built with, "
+                f"or its manifest no longer reads")
     if done == "marked":
         return f"{scope}: snapshot manifest marked {outcome}"
     return None

@@ -68,7 +68,7 @@ def _plan_and_commit(cfg: server.Config, tool: str, args: dict) -> tuple[dict, d
 
 @contextlib.contextmanager
 def _world(*, writes: str = "granted"):
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     with _socket_dir() as d, _engine(d / "s.sock", _engine_cfg(registry, writes)):
         yield root / "demo-vault" / "04-synthesis", registry, d / "s.sock"
@@ -278,7 +278,7 @@ def test_a_second_clients_amend_replaces_the_stamp_in_place() -> None:
 
 def test_the_engine_reads_no_source_path_for_a_granted_client() -> None:
     """Its file access is its host's, not the client's; the bridge sends the file as content."""
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     src = root / "outside.md"
     src.write_text(_NOTE, encoding="utf-8")
@@ -319,7 +319,7 @@ def test_the_owner_is_never_stamped() -> None:
     from test_mcp_server import _call as _stdio_call
     from test_mcp_server import _cfg
 
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     cfg = _cfg(registry)
     plan = _stdio_call("ingest", _ARGS, registry, cfg)
@@ -335,7 +335,7 @@ def test_a_write_asks_the_refresh_loop_for_a_pass() -> None:
             self.asked += 1
             return "after_gap", 4.2
 
-    root, registry = _fixture(manifest=True)
+    root, registry = _fixture()
     (root / "demo-vault" / "04-synthesis").mkdir()
     cfg = _engine_cfg(registry, "open")
     cfg.refresh_loop = loop = _Loop()

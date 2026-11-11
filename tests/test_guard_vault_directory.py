@@ -18,6 +18,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 import shutil
 import sys
 import time
@@ -323,3 +324,181 @@ def test_a_guard_moved_below_a_table_after_compose_still_withholds(world: _World
                 world)
     assert {p["vault"] for p in hit["passages"]} == {INHERITED}
     assert any("guard_state" in n for n in hit["filters"]["notes"]), hit["filters"]["notes"]
+
+
+# ---------------------------------------------------------------------- a manifest that cannot answer
+#
+# The manifest is read at query time, and the index built from it outlives any edit to it. A
+# manifest that cannot be read cannot say whether the vault is guarded, so the vault's own notes
+# are withheld until it can, guarded or not. What the scope inherits keeps answering.
+
+def _manifest(w: _World) -> Path:
+    return w.vault / ".substrate.toml"
+
+
+def _syntax_error(w: _World) -> None:
+    _manifest(w).write_text(_manifest(w).read_text(encoding="utf-8") + "[[\n", encoding="utf-8")
+
+
+def _duplicate_key(w: _World) -> None:
+    _manifest(w).write_text(f'name = "{SCOPE}"\n' + _manifest(w).read_text(encoding="utf-8"),
+                            encoding="utf-8")
+
+
+def _bad_utf8(w: _World) -> None:
+    _manifest(w).write_bytes(_manifest(w).read_bytes() + b"# \xff\n")
+
+
+def _unreadable(w: _World) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root reads a file whatever its mode")
+    _manifest(w).chmod(0)
+
+
+def _deleted(w: _World) -> None:
+    _manifest(w).unlink()
+
+
+def _vault_moved(w: _World) -> None:
+    w.vault.rename(w.vault.with_name("moved-away"))
+
+
+def _emptied(w: _World) -> None:
+    """What a `>` redirect or a non-atomic save leaves for a moment. It parses."""
+    _manifest(w).write_text("", encoding="utf-8")
+
+
+def _renamed(w: _World) -> None:
+    """It parses and reads as a manifest, but of another scope than the one composed."""
+    text = _manifest(w).read_text(encoding="utf-8")
+    _manifest(w).write_text(text.replace(f'name = "{SCOPE}"', 'name = "decoy"'), encoding="utf-8")
+
+
+def _too_deep(w: _World) -> None:
+    _manifest(w).write_text("x = " + "[" * 3000 + "]" * 3000 + "\n", encoding="utf-8")
+
+
+BREAKS = {"syntax-error": _syntax_error, "duplicate-key": _duplicate_key, "bad-utf8": _bad_utf8,
+          "unreadable": _unreadable, "deleted": _deleted, "vault-moved": _vault_moved,
+          "emptied": _emptied, "renamed": _renamed, "too-deep": _too_deep}
+
+_SEARCH = {"scope": SCOPE, "query": QUERY, "k": 20, "include_sources": True,
+           "include_archived": True}
+
+
+def _assert_own_notes_withheld(w: _World, how: str) -> None:
+    hit = _call("search", _SEARCH, w)
+    assert {p["vault"] for p in hit["passages"]} == {INHERITED}, how
+    assert any("manifest" in n or "vault directory" in n for n in hit["filters"]["notes"]), \
+        (how, hit["filters"]["notes"])
+    browsed = _call("documents", {"scope": SCOPE, "vault": GUARDED, "include_sources": True,
+                                  "include_archived": True}, w)
+    assert browsed["documents"] == [], how
+    st = _status(w)
+    assert GUARDED not in st["by_vault"] and "nothing can say" in st["withheld"], (how, st)
+    assert "error" not in st["drift"] or "reason is withheld" in st["drift"]["error"], \
+        (how, st["drift"])
+    assert f"/{GUARDED}/" not in json.dumps(st["drift"]), (how, st["drift"])
+
+
+def _restore(w: _World) -> None:
+    if _manifest(w).exists():
+        _manifest(w).chmod(0o644)
+
+
+@pytest.mark.parametrize("how", sorted(BREAKS))
+def test_a_manifest_that_cannot_be_read_withholds_a_guarded_vault(world: _World, how: str) -> None:
+    """A fresh beat is written first: the vault stays withheld because nothing can say the beat
+    is for it, not because the beat lapsed."""
+    world.vouch()
+    BREAKS[how](world)
+    try:
+        _assert_own_notes_withheld(world, how)
+    finally:
+        _restore(world)
+
+
+@pytest.mark.parametrize("how", sorted(BREAKS))
+def test_a_manifest_that_cannot_be_read_withholds_an_unguarded_vault_too(
+        world: _World, how: str) -> None:
+    """THE COST OF NOT RECORDING THE GUARD. Nothing outside the manifest says whether the vault
+    was guarded, so a broken one withholds either way. The scope's compose is refused in that
+    state anyway; its inherited vaults keep answering."""
+    text = _manifest(world).read_text(encoding="utf-8")
+    _manifest(world).write_text(text.replace(f'guard_state = "{world.state}"\n', ""),
+                                encoding="utf-8")
+    assert GUARDED in {p["vault"] for p in _call("search", _SEARCH, world)["passages"]}, \
+        "with the guard line gone and the manifest readable, the vault answers"
+    BREAKS[how](world)
+    try:
+        _assert_own_notes_withheld(world, how)
+    finally:
+        _restore(world)
+
+
+# ---------------------------------------------------------------------- status
+
+def _status(w: _World) -> dict:
+    return _call("status", {"scope": SCOPE}, w)
+
+
+def _mention(w: _World) -> None:
+    """One person named only in a guarded note, one only in an inherited note, one in none."""
+    with IndexStore(str(w.db)) as s:
+        rows = {v: s.db.execute("SELECT doc_id FROM documents WHERE vault = ? ORDER BY doc_id "
+                                "LIMIT 1", (v,)).fetchone()[0] for v in (GUARDED, INHERITED)}
+        s.replace_identity([("zqxj-guarded-person", "Zqxj Guarded", "person", None),
+                            ("zqxj-inherited-person", "Zqxj Inherited", "person", None),
+                            ("zqxj-nobody", "Zqxj Nobody", "person", None)])
+        s.set_document_entities(rows[GUARDED], [("zqxj-guarded-person", "Zqxj Guarded")])
+        s.set_document_entities(rows[INHERITED], [("zqxj-inherited-person", "Zqxj Inherited")])
+
+
+def _late_notes(w: _World) -> tuple[Path, Path]:
+    """A note in each vault that the index does not hold yet, so drift lists both as added."""
+    guarded = w.vault / "02-areas" / "zqxj-call-with-someone.md"
+    inherited = w.root / INHERITED / "00-operator" / "zqxj-late-inherited.md"
+    for p in (guarded, inherited):
+        p.write_text(f"---\nstatus: active\ndoc_type: reference\n---\n\n# {p.stem}\n\nLate.\n",
+                     encoding="utf-8")
+    return guarded, inherited
+
+
+def test_status_does_not_describe_a_withheld_vault(world: _World) -> None:
+    _mention(world)
+    guarded_note, inherited_note = _late_notes(world)
+    counts = lambda st: {e["entity_id"]: e["documents"] for e in st["entities"]}  # noqa: E731
+
+    world.vouch()
+    opened = _status(world)
+    assert GUARDED in opened["by_vault"]
+    assert counts(opened) == {"zqxj-guarded-person": 1, "zqxj-inherited-person": 1,
+                              "zqxj-nobody": 0}
+    assert any("zqxj-call-with-someone" in p for p in opened["drift"]["added"])
+
+    world.lapse()
+    st = _status(world)
+    assert GUARDED not in st["by_vault"], st["by_vault"]
+    assert INHERITED in st["by_vault"]
+    # The person named only on the withheld notes reads exactly like the one named nowhere: absent.
+    assert counts(st) == {"zqxj-inherited-person": 1}
+    assert not any("zqxj-call-with-someone" in p for p in json.dumps(st["drift"]).split('"'))
+    assert any("zqxj-late-inherited" in p for p in st["drift"]["added"])
+    assert st["documents"] == opened["by_vault"][INHERITED]
+    assert "zqxj" not in json.dumps({k: st[k] for k in ("by_tier", "by_status")})
+    assert opened["withheld"] is None
+    assert st["withheld"] and "not reporting" in st["withheld"]
+
+
+def test_vector_coverage_counts_only_what_may_be_answered(world: _World) -> None:
+    """`status.vectors` beside the filtered counts would give the withheld vault's chunk count
+    away as a difference."""
+    withheld = _verdict(world).withhold
+    with IndexStore(str(world.db), migrate=False) as s:
+        whole = s.vector_coverage(KEY)
+        answerable = s.vector_coverage(KEY, withheld_vaults=withheld)
+        chunks = s.db.execute(
+            "SELECT COUNT(*) FROM chunks c JOIN documents d ON d.doc_id = c.doc_id "
+            "WHERE d.vault = ?", (INHERITED,)).fetchone()[0]
+    assert answerable == (chunks, chunks)
+    assert whole[1] > chunks

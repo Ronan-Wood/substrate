@@ -117,7 +117,7 @@ def read_bounded(src: Path, cap: int, *, nofollow: bool = False,
         os.close(fd)
 
 
-def drift(store, note_paths: list[Path]) -> dict:
+def drift(store, note_paths: list[Path], *, withheld_vaults: frozenset[str] | None = None) -> dict:
     """Compare the notes on disk against what this index holds.
 
     `note_paths` is the composed scope's note set (`vault.resolve_scope(...).notes`), so "added"
@@ -125,15 +125,23 @@ def drift(store, note_paths: list[Path]) -> dict:
     most needs, since it looks identical to a question the corpus simply cannot answer.
 
     Returns counts plus the paths involved, and `stale` — true if ANY of the three differ.
+
+    `withheld_vaults` leaves those vaults' indexed rows out. The caller leaves their notes out of
+    `note_paths`: a note's path names it, and a withheld vault's notes are not this reply's to name.
     """
+    from substrate.store.index_store import vault_exclusion
+
     # BOTH sides are resolved through the same call. They are written by different code paths —
     # the index stores whatever path ingest was handed, the walk produces whatever rglob yields —
     # and on macOS a temp dir alone differs (`/var/...` vs `/private/var/...`). Comparing them
     # unnormalized reported every single note as simultaneously added AND removed: a drift check
     # that cries wolf on a clean vault is worse than none, because its reader learns to ignore it.
+    excl, args = vault_exclusion(withheld_vaults)
     indexed: dict[str, tuple[str, str | None]] = {
         str(Path(r["source_path"]).resolve()): (r["source_sha256"] or "", r["note_sha256"])
-        for r in store.db.execute("SELECT source_path, source_sha256, note_sha256 FROM documents")
+        for r in store.db.execute(
+            f"SELECT d.source_path, d.source_sha256, d.note_sha256 FROM documents d WHERE {excl}",
+            args)
     }
     on_disk = {str(p.resolve()): p for p in note_paths}
 
