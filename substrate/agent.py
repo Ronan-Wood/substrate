@@ -225,11 +225,11 @@ class _NoteCopy:
 
 
 def _withheld(scope: str, project_vault: Path) -> frozenset[str]:
-    """Fail closed: a declared guard, well-formed or not, withholds the project vault's own notes.
-    Both names, because the guard keys on the scope and the index on the vault directory."""
+    """Fail closed: a declared guard, well-formed or not, withholds the project vault's own notes,
+    under the same names the server's verdict carries (`guard.withheld_names`)."""
     if guard.declared_guard(project_vault) is None:
         return frozenset()
-    return frozenset({scope, project_vault.name})
+    return guard.withheld_names(project_vault, scope)
 
 
 def _doc_rows(store) -> list[tuple]:
@@ -445,14 +445,19 @@ def _publish(scope: str, directory: Path, *, registry: str | Path | None,
     _trusted_dir(directory)
     try:
         entry = scopes.resolve(scope, registry)
-        chain = _vault.resolve_vaults(Path(entry.vault))
-    except (scopes.ScopeError, _vault.VaultError) as e:
+    except scopes.ScopeError as e:
         raise AgentError(str(e)) from e
-    roots = {v.name: v.path.resolve() for v in chain}
+    # Withdrawn BEFORE the chain is resolved: a guard written below a `[table]` makes the manifest
+    # refuse, and the unguarded snapshot must not keep serving for as long as it does.
     withheld = _withheld(scope, Path(entry.vault))
     prior, _ = _read_manifest(manifest_path)
     if _withdraw_if_newly_guarded(withheld, db_path, manifest_path, prior):
         prior = None
+    try:
+        chain = _vault.resolve_vaults(Path(entry.vault))
+    except _vault.VaultError as e:
+        raise AgentError(str(e)) from e
+    roots = {v.name: v.path.resolve() for v in chain}
 
     stamp = _stamp(now or _now())
     try:

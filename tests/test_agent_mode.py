@@ -730,6 +730,19 @@ def test_a_new_guard_withdraws_the_snapshot_even_when_the_successful_publish_fai
     assert not (shared / "demo.snapshot.db").exists()
 
 
+def test_a_guard_written_below_a_table_withdraws_the_snapshot_although_publish_refuses(world):
+    """The manifest now refuses a `guard_state` swallowed into a table, so the publish fails. The
+    snapshot built without that guard must go first, not outlive the refusal."""
+    shared, registry = world
+    vault = Path(scopes.resolve("demo", registry).vault)
+    manifest = vault / ".substrate.toml"
+    manifest.write_text(manifest.read_text(encoding="utf-8") + '\n[reference_pins]\n'
+                        + f'guard_state = "{registry.parent / "state.json"}"\n', encoding="utf-8")
+    with pytest.raises(agent.AgentError, match="guard_state"):
+        agent.publish("demo", shared, registry=registry)
+    assert not (shared / "demo.snapshot.db").exists()
+
+
 def test_a_new_guard_withdraws_a_snapshot_whose_manifest_is_missing(world):
     shared, registry = world
     (shared / "demo.snapshot.json").unlink()

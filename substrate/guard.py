@@ -38,10 +38,13 @@ down rather than protect it. What this gates is the surface a MODEL reaches.
 from __future__ import annotations
 
 import json
+import os
 import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+from substrate import vault as _vault
 
 # Three missed beats at the 20-second cadence the guarded app publishes on. Long enough that a
 # stalled main thread does not lock the operator out mid-question; short enough that "the app is
@@ -83,13 +86,18 @@ def declared_guard(vault_dir: Path) -> Path | None | str:
     unreadable manifest is `vault.compose`'s error to report in its own words, and diagnosing it
     here would blame the guard for someone else's parse error. A manifest that parses and declares
     a non-string `guard_state` is different — that is a guard someone tried to write and got wrong,
-    and it must not serve the vault unguarded.
+    and it must not serve the vault unguarded. So is one written inside a table: compose refuses
+    that manifest, but an index built before the edit is still served.
     """
     path = vault_dir / MANIFEST
     try:
         manifest = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return None
+    swallowed = [(k, t) for k, t in _vault.misplaced_keys(manifest) if k == GUARD_KEY]
+    if swallowed:
+        return (f"{_vault.misplaced_refusal(path, swallowed)} Nothing can vouch for this vault, "
+                f"so its own notes are withheld rather than served unguarded.")
     declared = manifest.get(GUARD_KEY)
     if declared is None:
         return None
@@ -102,71 +110,84 @@ def declared_guard(vault_dir: Path) -> Path | None | str:
 def check(vault_dir: Path, scope: str, *, now: float | None = None) -> Verdict:
     """What `scope` may answer with.
 
-    THE VAULT'S OWN NAME IS THE SCOPE NAME. A project vault's manifest `name` is what `compose`
-    registers the scope as and what `documents.vault` records for the notes it contributed — so
-    withholding `{scope}` is exactly "this vault's own content, not what it inherits".
+    A withholding verdict names the vault under every name the index may record for it
+    (`withheld_names`).
     """
     declared = declared_guard(vault_dir)
     if declared is None:
         return OPEN
+    names = withheld_names(vault_dir, scope)
     if isinstance(declared, str):
-        return _withhold(scope, declared)
+        return Verdict(names, declared)
 
     try:
         raw = declared.read_bytes()
     except OSError:
-        return _withhold(scope,
-                         f"the application that vouches for {scope!r} is not reporting, so this "
-                         f"vault's own notes are withheld. Open it and select this workspace. "
-                         f"Nothing is wrong with the index, and everything this scope INHERITS "
-                         f"still answered.")
+        return Verdict(names,
+                       f"the application that vouches for {scope!r} is not reporting, so this "
+                       f"vault's own notes are withheld. Open it and select this workspace. "
+                       f"Nothing is wrong with the index, and everything this scope INHERITS "
+                       f"still answered.")
     if len(raw) > MAX_STATE_BYTES:
-        return _withhold(scope, f"the guard state for {scope!r} is implausibly large to be a "
-                                f"handshake; withholding this vault's own notes.")
+        return Verdict(names, f"the guard state for {scope!r} is implausibly large to be a "
+                              f"handshake; withholding this vault's own notes.")
     try:
         state = json.loads(raw)
     except ValueError:
-        return _withhold(scope, f"the guard state for {scope!r} is not readable JSON; withholding "
-                                f"this vault's own notes.")
+        return Verdict(names, f"the guard state for {scope!r} is not readable JSON; withholding "
+                              f"this vault's own notes.")
     if not isinstance(state, dict):
-        return _withhold(scope, f"the guard state for {scope!r} is not an object; withholding this "
-                                f"vault's own notes.")
+        return Verdict(names, f"the guard state for {scope!r} is not an object; withholding this "
+                              f"vault's own notes.")
 
     beat = state.get("heartbeat")
     # `bool` is an `int` in Python; a `True` heartbeat would otherwise arithmetic to 1 and read as
     # an epoch in 1970 — stale, so it would happen to fail safe. It must fail for being the wrong
     # TYPE rather than by luck.
     if isinstance(beat, bool) or not isinstance(beat, (int, float)):
-        return _withhold(scope, f"the guard state for {scope!r} carries no numeric heartbeat; "
-                                f"withholding this vault's own notes.")
+        return Verdict(names, f"the guard state for {scope!r} carries no numeric heartbeat; "
+                              f"withholding this vault's own notes.")
 
     age = (time.time() if now is None else now) - float(beat)
     if age > STALE_AFTER_SECONDS:
-        return _withhold(scope,
-                         f"the application that vouches for {scope!r} last reported {int(age)}s "
-                         f"ago, longer than the {STALE_AFTER_SECONDS}s this guard allows, so this "
-                         f"vault's own notes are withheld. The wall cannot be one process-death "
-                         f"deep.")
+        return Verdict(names,
+                       f"the application that vouches for {scope!r} last reported {int(age)}s "
+                       f"ago, longer than the {STALE_AFTER_SECONDS}s this guard allows, so this "
+                       f"vault's own notes are withheld. The wall cannot be one process-death "
+                       f"deep.")
     # A beat from the future is a clock this side cannot reason about, not a very fresh app.
     if age < -STALE_AFTER_SECONDS:
-        return _withhold(scope,
-                         f"the guard state for {scope!r} reports a heartbeat {int(-age)}s in the "
-                         f"future; withholding this vault's own notes rather than trusting a clock "
-                         f"this side cannot check.")
+        return Verdict(names,
+                       f"the guard state for {scope!r} reports a heartbeat {int(-age)}s in the "
+                       f"future; withholding this vault's own notes rather than trusting a clock "
+                       f"this side cannot check.")
 
     active = state.get("activeScope")
     if not isinstance(active, str) or not active:
-        return _withhold(scope,
-                         f"the application vouching for {scope!r} is running but has not said "
-                         f"which corpus it is vouching for, so this vault's own notes are "
-                         f"withheld.")
+        return Verdict(names,
+                       f"the application vouching for {scope!r} is running but has not said "
+                       f"which corpus it is vouching for, so this vault's own notes are "
+                       f"withheld.")
     if active != scope:
-        return _withhold(scope,
-                         f"the application is currently vouching for {active!r}, not {scope!r}, so "
-                         f"{scope!r}'s own notes are withheld. Select it there and ask again — one "
-                         f"partition answers at a time, which is what the guard is for.")
+        return Verdict(names,
+                       f"the application is currently vouching for {active!r}, not {scope!r}, so "
+                       f"{scope!r}'s own notes are withheld. Select it there and ask again — one "
+                       f"partition answers at a time, which is what the guard is for.")
     return OPEN
 
 
-def _withhold(scope: str, reason: str) -> Verdict:
-    return Verdict(frozenset({scope}), reason)
+def withheld_names(vault_dir: Path, scope: str) -> frozenset[str]:
+    """Every name a withholding verdict for this vault carries: the scope and the directory.
+
+    THE GUARD AND THE INDEX NAME A VAULT DIFFERENTLY. The guard is asked about a SCOPE, the
+    manifest's `name`. `documents.vault` records the vault's DIRECTORY name, deliberately
+    (`vault.Scope`), and every exclusion matches on that column. Withholding the scope alone
+    withheld a name no document carries wherever the two differ, and the demo vault is that case:
+    `demo-vault` composes scope `demo`. The directory is taken as given and resolved, because
+    compose records the name of the directory a link resolves to.
+
+    The scope name matches no note compose writes today. It stays because agent mode has withheld
+    it since it shipped. Its one effect is to over-withhold an inherited vault whose directory has
+    the scope's name, and withholding too much is the direction this module fails in.
+    """
+    return frozenset({scope, vault_dir.name, Path(os.path.realpath(vault_dir)).name})

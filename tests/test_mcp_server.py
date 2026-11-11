@@ -531,8 +531,8 @@ def _guard_fixture(state: dict | None) -> tuple[Path, Path]:
     THE SECOND NOTE IS THE WHOLE TEST. A guard that shuts the scope and a guard that withholds one
     vault are indistinguishable on a corpus with only one vault in it — which is what the first
     version of this fixture had, so it could not have caught the scope-wide refusal it was written
-    to replace. `demo` is the scope AND the guarded vault's own name (compose registers a scope as
-    its project vault's manifest `name`, and records that name on the notes it contributed).
+    to replace. `demo` is the scope and `demo-vault` the directory, which is the name compose
+    records on the notes the vault contributed (`tests/test_guard_vault_directory.py`).
     """
     import hashlib
     import json as _json
@@ -549,7 +549,7 @@ def _guard_fixture(state: dict | None) -> tuple[Path, Path]:
     db = root / "demo.db"
     with IndexStore(str(db)) as s:
         for doc_id, owning_vault, text in (
-            ("mine", "demo", _LONG),                 # the guarded vault's own
+            ("mine", "demo-vault", _LONG),           # the guarded vault's own
             ("inherited", "core-vault", _LONG),      # a tier it composes from
         ):
             note = vault / f"{doc_id}.md"
@@ -598,7 +598,7 @@ def test_a_fresh_beat_returns_the_guarded_vaults_own_notes() -> None:
 
     _, registry = _guard_fixture({"heartbeat": _time.time(), "activeScope": "demo"})
     hit = _call("search", {"scope": "demo", "query": "composition"}, registry)
-    assert _vaults_of(hit["passages"]) == {"demo", "core-vault"}
+    assert _vaults_of(hit["passages"]) == {"demo-vault", "core-vault"}
     assert hit["filters"]["notes"] == [], "a satisfied guard says nothing"
 
 
@@ -658,8 +658,8 @@ def test_expand_refuses_a_passage_of_a_vault_the_guard_withholds() -> None:
     root, registry = _guard_fixture({"heartbeat": _time.time(), "activeScope": "demo"})
     hits = _call("search", {"scope": "demo", "query": "composition"}, registry)["passages"]
     refs = {p["vault"]: p["expand_ref"] for p in hits}
-    assert set(refs) == {"demo", "core-vault"}, "both refs are issued while the guard vouches"
-    assert refs["demo"] == render.expand_ref("demo", "mine#c00000"), \
+    assert set(refs) == {"demo-vault", "core-vault"}, "both refs are issued while the guard vouches"
+    assert refs["demo-vault"] == render.expand_ref("demo", "mine#c00000"), \
         "the guarded note is one passage, so the probe below is of an absent one"
 
     # The app moves to another workspace. A clock-free lapse: a stale beat's reason carries its
@@ -670,7 +670,7 @@ def test_expand_refuses_a_passage_of_a_vault_the_guard_withholds() -> None:
     assert reason, "the fixture must actually be withholding now"
 
     for mode in ("passage", "note"):
-        refused = _call_raw("expand", {"expand_ref": refs["demo"], "mode": mode}, registry)
+        refused = _call_raw("expand", {"expand_ref": refs["demo-vault"], "mode": mode}, registry)
         assert refused.get("isError"), mode
         text = refused["content"][0]["text"]
         assert reason in text, (mode, text[:300])
