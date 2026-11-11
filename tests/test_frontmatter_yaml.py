@@ -200,7 +200,7 @@ def test_check_leaves_yaml_that_reads_alike_and_notes_with_no_frontmatter(tmp_pa
 
 
 @pytest.mark.parametrize("block, why", [
-    ("title: x\n  nested: \"a: \"b\"\"", "not a first-column"),
+    ("title: x\n  nested: \"a: \"b\"\"", "is not YAML"),  # not a top-level `nested`
     ("- item: \"a: \"b\"\"", "not a first-column"),
     ("title: \"a: \"b\"\"\n---x: y", "closing"),
 ])
@@ -491,10 +491,11 @@ def test_a_note_that_is_not_utf8_is_named_not_silently_skipped(tmp_path):
 ])
 def test_a_note_gc_admits_only_through_its_allowance_is_counted(tmp_path, text):
     """gc finds the block by its own fences (`...` closes one, a `#` line is a comment), where the
-    engine reads no frontmatter at all. Deleting the allowance would refuse these notes, so `check`
+    engine reads none of it. Deleting the allowance would refuse these notes, so `check`
     must not call them clean, and `fix` refuses them rather than guessing."""
     assert blob_lifecycle.admitted_only_by_dialect(text.encode())
-    assert fm.assess(text) == (fm.NOT_YAML, [fm._GC_ONLY])
+    kind, reasons = fm.assess(text)
+    assert kind == fm.NOT_YAML and reasons[-1] == fm._GC_ONLY
     v = _vault(tmp_path, {"n.md": text})
     rep = fm.check([v], fix=True, write=True)
     assert rep.written == [] and rep.findings[0].refused

@@ -7,6 +7,43 @@ Every release of the engine, newest first. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- A YAML block list in frontmatter (`key:` then `  - item` lines, which Obsidian's Properties panel
+  writes) no longer makes the reader drop the note's whole frontmatter. Before, the note lost its
+  `status` and every other field, and `compose` refused it as having no status, which froze its
+  whole scope.
+- The reader now reads any frontmatter block that is not flat `key: value` lines through YAML
+  (PyYAML, already a dependency, resolving no types). A flat block, which every engine and app
+  writer emits, is read line by line exactly as before. So a block list, a comment, an indented
+  key, a folded or quoted value over two lines all read as YAML reads them, to ingest, `amend`, a
+  `_meta.md`, the skipped-file gate and `frontmatter check`.
+- A value YAML reads that one line can't hold (a nested mapping, a multi-line scalar, a list of
+  mappings), or that the line readers would read otherwise (an alias, a tag, a merge key `<<`, a
+  key written twice), is left out. Under a key the engine reads, vault ingest refuses the note,
+  and compose a `_meta.md` its passages inherit from, naming the key and the line. Before, an
+  indented `key:` under another key was read as a top-level one, so `  status: archived` under
+  `meta:` set the status.
+- A block YAML can't read that names a key the engine reads is refused naming YAML's line. One that
+  names none is body text, as a divider always was, and a vault note refused for its missing
+  status now says why its block was not read.
+- `frontmatter check` reports a value the engine leaves unread. Before, it called a note whose
+  frontmatter the engine dropped clean.
+
+### Changed
+
+- **Note format 2** (`notes.version`; `min_version` stays 1, since a flat block, the only shape a
+  format-1 writer emits, reads exactly as before): a writer may use block lists and any YAML that
+  holds one-line values.
+- Newly refused on the vault path, each naming the file and the line: a note or `_meta.md` with
+  such a value under a key the engine reads; a note whose non-flat block YAML can't read (or is
+  over 1 MiB, or holds a NEL, LS or PS) and that names such a key; `amend` of a note whose
+  unreadable value is its `doc_id`, `status`, `superseded_by` or class; and a navigation file
+  (`MEMORY.md`, `log.md`, `structure.md`, `WRITING.md`) whose non-flat frontmatter declares a
+  spine field, as the same file in flow form always was. A note that opens
+  with a divider whose block YAML reads as a mapping is frontmatter now, as Obsidian shows it. Run
+  `substrate frontmatter check` before upgrading to list them.
+
 ## 0.1.0
 
 The first release from this repository. The engine was developed inside

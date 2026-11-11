@@ -61,12 +61,22 @@ def test_a_fresh_beat_naming_this_scope_passes(tmp_path: Path) -> None:
 # --------------------------------------------------------------- everything else refuses
 
 def test_the_withheld_set_names_the_guarded_vault_and_nothing_else(tmp_path: Path) -> None:
-    """The vault's own name IS the scope name — `compose` registers the scope as the manifest's
-    `name` and records that same name on the notes it contributed. So withholding `{scope}` is
-    exactly "this vault's own content", and the inherited tiers are untouched."""
-    v = guard.check(_vault(tmp_path, guard_state=str(tmp_path / "nope.json")), "acme")
-    assert v.withhold == frozenset({"acme"})
+    """The scope AND the directory. `compose` registers the scope as the manifest's `name` but
+    records the vault DIRECTORY on the notes it contributed, so withholding the scope alone missed
+    every note of a vault whose directory is named otherwise. The inherited tiers are untouched."""
+    vault = _vault(tmp_path, guard_state=str(tmp_path / "nope.json"), name="acme")
+    v = guard.check(vault.rename(tmp_path / "acme-workspace"), "acme")
+    assert v.withhold == frozenset({"acme", "acme-workspace"})
     assert "core-vault" not in v.reason
+
+
+def test_the_withheld_set_names_the_directory_a_link_resolves_to(tmp_path: Path) -> None:
+    """Compose resolves the vault before recording its name, so a registry row naming a link
+    must withhold the name of the directory behind it."""
+    real = _vault(tmp_path, guard_state=str(tmp_path / "nope.json"), name="acme")
+    link = tmp_path / "acme-link"
+    link.symlink_to(real, target_is_directory=True)
+    assert "acme" in guard.check(link, "workspace").withhold
 
 
 def test_a_missing_state_file_refuses(tmp_path: Path) -> None:
@@ -157,3 +167,32 @@ def test_an_unreadable_manifest_is_not_this_modules_error(tmp_path: Path) -> Non
     (vault / ".substrate.toml").write_text("this is not toml = = =", encoding="utf-8")
     assert guard.declared_guard(vault) is None
     assert guard.check(vault, "acme").vouched
+
+
+def test_a_guard_written_below_a_table_refuses(tmp_path: Path) -> None:
+    """TOML puts a key written after a `[table]` header inside that table, so `guard_state` below
+    `[reference_pins]` was absent at top level and the vault read as unguarded. A guard someone
+    wrote in the wrong place is a guard, not its absence."""
+    for i, tail in enumerate(('\n[reference_pins]\ngo = "1.21"\nguard_state = "{s}"\n',
+                              '\n[extra]\nguard_state = "{s}"\n',
+                              'reference_pins.guard_state = "{s}"\n',
+                              '\n[""]\nguard_state = "{s}"\n')):
+        vault = tmp_path / f"acme-{i}"
+        vault.mkdir()
+        state = _state(tmp_path, heartbeat=time.time(), activeScope="acme")
+        (vault / ".substrate.toml").write_text(
+            'name = "acme"\ninherits = []\n' + tail.format(s=state), encoding="utf-8")
+        v = guard.check(vault, "acme")
+        assert _withheld(v), tail
+        assert "guard_state" in v.reason and "table" in v.reason, v.reason
+
+
+def test_a_misplaced_guard_withholds_even_beside_a_valid_one(tmp_path: Path) -> None:
+    """Two declarations, one of them in a table: which one was meant is not this module's guess."""
+    state = _state(tmp_path, heartbeat=time.time(), activeScope="acme")
+    vault = tmp_path / "acme"
+    vault.mkdir()
+    (vault / ".substrate.toml").write_text(
+        f'name = "acme"\ninherits = []\nguard_state = "{state}"\n\n[extra]\n'
+        f'guard_state = "{state}"\n', encoding="utf-8")
+    assert _withheld(guard.check(vault, "acme"))

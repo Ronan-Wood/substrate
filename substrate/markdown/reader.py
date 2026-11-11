@@ -6,8 +6,9 @@ re-runs detection. It produces the same Document/Block shape DoclingExtractor pr
 emit(), chunk(), the store and retrieval all run UNCHANGED: the reader's only job is
 markdown-text → list[Block]; the existing emitter fills char offsets and renders the body.
 
-Stdlib only; no Docling, no torch. That is the point — a project vault must ingest on a fresh
-download with nothing installed.
+No Docling, no torch. That is the point — a project vault must ingest on a fresh download with
+nothing installed but the engine's own small dependencies. The one it uses is PyYAML, and only for
+a frontmatter block that is not flat `key: value` lines (`_yaml_scan`).
 
 Supported markdown subset (the vault format + the engine's own emitted markdown): ATX headings
 (``#``…``######`` with optional space-preceded closing hashes), fenced code (``` / ~~~, with an
@@ -32,6 +33,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 from substrate.extract.base import doc_id_for  # stdlib-only; no Docling/torch pulled in
@@ -147,20 +149,36 @@ def _bounded_int(v: str, lo: int, hi: int) -> int | None:
     return n if lo <= n <= hi else None
 
 
-def _parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
+def _parse_frontmatter(text: str, *, strict: bool = False,
+                       keys: frozenset[str] | None = None) -> tuple[dict[str, str], str]:
     """Split leading YAML frontmatter (the emit() format) from the body. Round-tripping the
     engine's own markdown recovers the ORIGINAL doc_id/sha/version, so re-ingesting it keeps
     the same chunk_ids and reconcile sees the same document rather than a new one.
 
-    A leading ``---`` is only frontmatter if EVERY non-blank line in the block is ``key: value``
-    shaped. Otherwise it is an ordinary thematic break (a note opening with a divider), and
-    treating it as frontmatter would silently swallow the prose between the two rules — a
-    dropped-content bug the A18 check, which runs on the post-frontmatter body, could not see.
+    A leading ``---`` block is frontmatter when every non-blank line is a first-column ``key:
+    value`` line (read line by line, as every engine and app writer emits it), or when YAML reads
+    the block as a mapping of keys (`_raw_scan`). Otherwise it is an ordinary thematic break (a
+    note opening with a divider), and treating it as frontmatter would silently swallow the prose
+    between the two rules — a dropped-content bug the A18 check, which runs on the body after the
+    frontmatter, could not see.
+
+    A value the reader cannot read (`_raw_scan` says why) is left out, and every other key is read.
+    When `strict`, as ingest is on the vault path, such a value under one of `keys` (`READ_KEYS` by
+    default) raises FrontmatterError instead, because leaving it out would withhold a field that is
+    read.
     """
-    pairs, end = _frontmatter_scan(text)
+    front, body, _ = _read_frontmatter(text, strict, keys)
+    return front, body
+
+
+def _read_frontmatter(text: str, strict: bool = False, keys: frozenset[str] | None = None,
+                      ) -> tuple[dict[str, str], str, str | None]:
+    """`_parse_frontmatter`'s (front, body), and why a leading `---` block was read as body text,
+    from one scan."""
+    pairs, end, scan = _frontmatter_scan(text, strict, READ_KEYS if keys is None else keys)
     if pairs is None:
-        return {}, text
-    return dict(pairs), text[end:]
+        return {}, text, scan.prose
+    return dict(pairs), text[end:], None
 
 
 def normalized_text(data: bytes) -> str:
@@ -177,39 +195,237 @@ def frontmatter_pairs(text: str) -> list[tuple[str, str]] | None:
     built from this. A caller that must see what the dict collapses (a repeated key: the dict keeps
     the last) reads this instead of re-splitting the block itself; a second splitter, one that broke
     lines on `\\n` while this breaks on everything `splitlines` does, let a key hidden behind U+2028
-    go uncounted (crosscheck, 2026-11-04)."""
+    go uncounted (crosscheck, 2026-11-04). In a block read through YAML a repeated key is a value
+    the reader cannot read, so it is left out rather than kept twice."""
     return _frontmatter_scan(text)[0]
 
 
 def raw_frontmatter(text: str) -> tuple[str, list[tuple[str, str]]] | None:
-    """(the block between the fences, its (key, value) pairs with each value exactly as written
-    after the colon, stripped), or None when `text` has no frontmatter. The one splitter: the
-    readers above decode these values, and `substrate frontmatter` compares them with YAML."""
-    pairs, _, block = _raw_scan(text)
-    return None if pairs is None else (block, pairs)
+    """(the block between the fences, its (key, value) pairs with each value as written after the
+    colon, stripped; for a block read through YAML, each value as the line readers would read it
+    back), or None when `text` has no frontmatter. Raises FrontmatterError when a value cannot be
+    read, whichever key. The one splitter: the readers above decode these values, and `substrate
+    frontmatter` compares them with YAML."""
+    scan = _raw_scan(text)
+    if scan.problems:
+        raise FrontmatterError(scan.problems[0][1])
+    return None if scan.pairs is None else (scan.block, scan.pairs)
 
 
-def _raw_scan(text: str) -> tuple[list[tuple[str, str]] | None, int, str]:
+def unread_keys(text: str) -> list[tuple[str, str]]:
+    """Each frontmatter key YAML reads whose value the reader cannot, and why, naming the line.
+    Empty for a block YAML cannot read either: that declares nothing to anyone."""
+    scan = _raw_scan(text)
+    return list(scan.problems) if scan.pairs is not None else []
+
+
+class FrontmatterError(ValueError):
+    """A frontmatter value the reader cannot read, naming the key and the note's line. A ValueError,
+    which every ingest caller already turns into a refusal."""
+
+
+# Every frontmatter key the engine reads from a note (`read_markdown`) or a source's `_meta.md`
+# (`vault._source_meta`). Strict reading refuses a value it cannot read under one of these, and
+# leaves one under any other key out, since nothing reads it. A key added to either reader belongs
+# here, which `tests/test_frontmatter_block_lists.py` checks.
+READ_KEYS = frozenset({
+    "doc_id", "title", "class", "document_class", "status", "doc_type", "confidence", "domains",
+    "supersedes", "superseded_by", "source_sha256", "source_pages", "version", "version_date",
+    "page_label_offset", "raw", "raw_sha256", "raw_location",
+})
+
+# Past this a `---` block is not read through YAML: no frontmatter needs it, and a divider can open
+# a long note. The same bound `blobs gc` and `frontmatter check` hold.
+_MAX_YAML_BLOCK = 1024 * 1024
+_KEY_LINE = re.compile(r"[ \t]*([\"']?)([A-Za-z_][\w-]*)\1[ \t]*:")
+_STR_TAG = "tag:yaml.org,2002:str"
+# A node written with a tag (`!!null x`, `!t x`), behind its anchor if it has one.
+_TAGGED = re.compile(r"(?:&[^\s,\[\]{}]+[ \t]+)?!")
+# Line breaks to YAML 1.1 (PyYAML) that YAML 1.2 (Obsidian) reads as ordinary characters, so a block
+# holding one is two different blocks to the two.
+_ODD_BREAKS = "\x85\u2028\u2029"
+
+
+@dataclass(frozen=True)
+class _Scan:
+    pairs: list[tuple[str, str]] | None  # None: no frontmatter the reader reads
+    end: int = 0
+    block: str = ""
+    problems: tuple[tuple[str, str], ...] = ()  # (key, why) for each value left out of `pairs`
+    prose: str | None = None  # a leading `---` block read as body text: why
+
+
+def _shown(text: str, cap: int = 60) -> str:
+    """Note text for a message: at most `cap` characters, anything unprintable (a terminal escape,
+    a bidi override) spelled as its code point, so a crafted note cannot write to the terminal."""
+    out = "".join(ch if ch.isprintable() else f"\\u{ord(ch):04x}" for ch in text[:cap])
+    return out + ("…" if len(text) > cap else "")
+
+
+def _raw_scan(text: str) -> _Scan:
+    """The frontmatter's (key, value) pairs, two ways.
+
+    A block whose every non-blank line is a first-column `key: value` is read line by line, each
+    value as written after the colon. That is what every writer of the engine and the app emits,
+    and the old unescaped dialect those writers left in the vaults is not always YAML, so this path
+    is exactly the reader it always was.
+
+    Any other block (a block list, which Obsidian writes; a nested mapping; a comment; an indented
+    key) is YAML's to read, so it is read by YAML: `_yaml_scan`.
+    """
     m = _FRONTMATTER.match(text)
     if not m:
-        return None, 0, ""
+        return _Scan(None)
+    block = m.group(1)
     pairs: list[tuple[str, str]] = []
-    for line in m.group(1).splitlines():
+    for line in block.splitlines():
         if not line.strip():
             continue
-        if ":" not in line:
-            return None, 0, ""  # a prose line → this is a thematic break, not frontmatter
+        if ":" not in line or line[:1] in " \t":
+            return _yaml_scan(block, m.end())
         k, _, v = line.partition(":")
         pairs.append((k.strip(), v.strip()))
-    return pairs, m.end(), m.group(1)
+    return _Scan(pairs, m.end(), block)
 
 
-def _frontmatter_scan(text: str) -> tuple[list[tuple[str, str]] | None, int]:
-    """(pairs or None, offset where the body starts). One regex match serves both callers."""
-    pairs, end, _ = _raw_scan(text)
-    if pairs is None:
-        return None, 0
-    return [(k, yaml_scalar.decode(v)) for k, v in pairs], end
+def _text(node) -> str | None:
+    """A scalar's text as a line reader can hold it, or None when it holds a line break. The one
+    break allowed is the one a one-line `|` or `>` block scalar ends with."""
+    v = node.value
+    if node.style in ("|", ">") and v.endswith("\n"):
+        v = v[:-1]
+    return None if any(ch in v for ch in "\n\r" + _ODD_BREAKS) else v
+
+
+def _as_written(node, v: str, flow: bool) -> str:
+    """`v`, the text of a scalar YAML read, as a line reader reads it back: a plain one as written,
+    unless a flow list would split or end it there; any other through `yaml_scalar.encode`, or
+    single-quoted with every character kept where `encode` would replace one."""
+    if node.style is None and v == v.strip() and not (
+            flow and any(ch in yaml_scalar._FLOW for ch in v)):
+        return v  # (a line reader trims what YAML keeps, a no-break space, so that is quoted)
+    if yaml_scalar.sanitize(v) == v:
+        return yaml_scalar.encode(v, flow=flow)
+    return "'" + v.replace("'", "''") + "'"
+
+
+def _yaml_scan(block: str, end: int) -> _Scan:
+    """`block` read by YAML, every scalar as the string written (`BaseLoader` resolves no types).
+
+    Each value comes back as the line readers read it: a plain scalar as written, any other through
+    `yaml_scalar.encode`, and a list of one-line scalars as the same list in flow form. Anything
+    else is left out and named in `problems` with its line, because the line readers would read it
+    differently from YAML's own loaders or not at all:
+      * a nested mapping or list, or a value over more than one line;
+      * an alias, a tag, or a merge key `<<` (each key a merge would set is named too);
+      * a key written more than once, which YAML 1.2 refuses and 1.1 reads as its last.
+    Each node is read at most once, so an alias cannot make the work grow past the block.
+
+    A block YAML does not read as a mapping is body text. When it is not YAML at all (or is past
+    `_MAX_YAML_BLOCK`, or holds a break only YAML 1.1 takes) and a line in it names one of
+    `READ_KEYS`, each such key is a problem too, so strict reading refuses the note rather than
+    read a field it declares as absent.
+    """
+    import yaml  # here, not at the top: a flat block, which every writer emits, never needs it
+
+    def unreadable(why: str) -> _Scan:
+        named = []
+        for line in block.splitlines():
+            km = _KEY_LINE.match(line)
+            if km and km.group(2) in READ_KEYS and km.group(2) not in named:
+                named.append(km.group(2))
+        whole = f"the block between the two `---` lines {why}"
+        if named:
+            return _Scan(None, block=block, problems=tuple(
+                (k, f"`{k}`: {whole}, so the engine reads none of it") for k in named))
+        return _Scan(None, block=block, prose=(f"{whole}, so it is read as body text, not "
+                                               f"frontmatter") if ":" in block else None)
+
+    if len(block) > _MAX_YAML_BLOCK:
+        return unreadable(f"is over {_MAX_YAML_BLOCK // 1024} KiB")
+    if any(ch in block for ch in _ODD_BREAKS):
+        return unreadable("holds a NEL, LS or PS, a line break to YAML 1.1 and not to YAML 1.2")
+    try:
+        root = yaml.compose(block, Loader=yaml.BaseLoader)
+    except Exception as e:  # noqa: BLE001 — any failure is "not YAML": deep nesting, bad escapes
+        mark = getattr(e, "problem_mark", None)
+        problem = _shown(str(getattr(e, "problem", None) or type(e).__name__))
+        return unreadable(f"is not YAML ({problem}"
+                          + (f", line {mark.line + 2}" if mark is not None else "") + ")")
+    if not isinstance(root, yaml.MappingNode) or not root.value:
+        return unreadable("is not a mapping of keys")
+
+    pairs: list[tuple[str, str]] = []
+    problems: dict[str, str] = {}
+    keys_seen: set[str] = set()
+    nodes_seen: set[int] = set()
+
+    def left_out(key: str, node, why: str) -> None:
+        pairs[:] = [p for p in pairs if p[0] != key]
+        problems.setdefault(key, f"`{_shown(key)}`, line {node.start_mark.line + 2}: {why}, which "
+                                 f"the engine's reader does not read")
+
+    def odd(node) -> str | None:
+        """Why the line readers cannot take `node` as YAML's loaders do, if they cannot."""
+        if id(node) in nodes_seen:
+            return "an alias"
+        nodes_seen.add(id(node))
+        if _TAGGED.match(block, node.start_mark.index):
+            return "a YAML tag"
+        return None
+
+    for knode, vnode in root.value:
+        if not isinstance(knode, yaml.ScalarNode) or odd(knode):
+            left_out("?", knode, "a key that is not plain text")
+            continue
+        key = knode.value
+        if key in keys_seen:
+            left_out(key, knode, "a key written more than once")
+            continue
+        keys_seen.add(key)
+        if key == "<<" and knode.style is None:  # before the alias test: a merge is often `<<: *d`
+            merged = vnode.value if isinstance(vnode, yaml.SequenceNode) else [vnode]
+            for m in merged:
+                for k, _ in m.value if isinstance(m, yaml.MappingNode) else ():
+                    if isinstance(k, yaml.ScalarNode):
+                        left_out(k.value, k, "set through a merge key `<<`")
+            left_out(key, vnode, "a merge key")
+        elif (why := odd(vnode)) is not None:
+            left_out(key, vnode, why)
+        elif isinstance(vnode, yaml.ScalarNode):
+            if (v := _text(vnode)) is None:
+                left_out(key, vnode, "a value over more than one line")
+            else:
+                pairs.append((key, _as_written(vnode, v, flow=False)))
+        elif isinstance(vnode, yaml.SequenceNode):
+            items = []
+            for n in vnode.value:
+                why = odd(n) or (None if isinstance(n, yaml.ScalarNode) and _text(n) is not None
+                                 else "a list item that is not one line of text")
+                if why is not None:
+                    left_out(key, n, why)
+                    break
+                items.append(_as_written(n, _text(n), flow=True))
+            else:
+                pairs.append((key, "[" + ", ".join(items) + "]"))
+        else:
+            left_out(key, vnode, "a nested mapping")
+    return _Scan(pairs, end, block, tuple(problems.items()))
+
+
+def _frontmatter_scan(text: str, strict: bool = False, keys: frozenset[str] = READ_KEYS,
+                      ) -> tuple[list[tuple[str, str]] | None, int, _Scan]:
+    """(pairs or None, offset where the body starts, the scan). One regex match serves every
+    caller. A value the reader cannot read under one of `keys` raises FrontmatterError when
+    `strict`."""
+    scan = _raw_scan(text)
+    if strict:
+        for key, why in scan.problems:
+            if key in keys:
+                raise FrontmatterError(why)
+    if scan.pairs is None:
+        return None, 0, scan
+    return [(k, yaml_scalar.decode(v)) for k, v in scan.pairs], scan.end, scan
 
 
 def _is_close_fence(line: str, ch: str, n: int) -> bool:
@@ -385,13 +601,15 @@ def uncovered_content_blocks(
     return bad
 
 
-def read_markdown(path: Path, doc_class: str | None = None) -> tuple[Document, str, dict]:
+def read_markdown(path: Path, doc_class: str | None = None, *,
+                  strict: bool = True) -> tuple[Document, str, dict]:
     """Read a markdown file into a canonical Document. Returns (doc, body_md, reader_stats).
 
     body_md (source minus frontmatter) is handed back so the ingest pipeline can run the A18
     end-to-end coverage checks against it after chunking — the reader itself is a pure parser.
-    Raises ValueError on an over-size file or non-UTF-8 bytes (cmd_ingest_md turns these into a
-    clean FATAL rather than an unhandled traceback).
+    Raises ValueError on an over-size file or non-UTF-8 bytes, and its FrontmatterError on a value
+    it cannot read under one of `READ_KEYS` unless `strict` is off (cmd_ingest_md turns these into
+    a clean FATAL rather than an unhandled traceback).
     """
     data = path.read_bytes()
     if len(data) > _MAX_MD_BYTES:
@@ -406,7 +624,9 @@ def read_markdown(path: Path, doc_class: str | None = None) -> tuple[Document, s
         raise ValueError(f"{path} is not valid UTF-8: {e}") from e
     sha = hashlib.sha256(data).hexdigest()
 
-    front, body_md = _parse_frontmatter(raw)
+    # `unread`: why a leading `---` block was read as body text, for ingest to name if the note is
+    # then refused for a spine it shows written; popped there, never reported.
+    front, body_md, unread = _read_frontmatter(raw, strict=strict)
     blocks = _blocks(body_md)
     anchors = [b.page for b in blocks if b.page is not None]
 
@@ -487,5 +707,6 @@ def read_markdown(path: Path, doc_class: str | None = None) -> tuple[Document, s
         "status": doc.status,
         "domains": list(doc.domains),
         "doc_type": doc.doc_type,
+        "frontmatter_unread": unread,
     }
     return doc, body_md, stats

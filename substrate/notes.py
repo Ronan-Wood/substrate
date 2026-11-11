@@ -559,6 +559,10 @@ def _visible(text: str) -> tuple[str, int, int]:
     return "".join(out), hidden, literal
 
 
+# The fields amend's own gates read from the current note: identity, supersession, the frozen class.
+_GUARDED = frozenset({"doc_id", "status", "superseded_by", "document_class", "class"})
+
+
 def _spine_of(staged: Path) -> tuple[dict, str]:
     """The DECLARED spine of a staged note, and its declared `doc_id` line ("" if none).
 
@@ -571,8 +575,12 @@ def _spine_of(staged: Path) -> tuple[dict, str]:
         _parse_frontmatter, doc_id_list, normalized_text, read_markdown,
     )
 
-    doc, _body, _stats = read_markdown(staged)
-    front, _ = _parse_frontmatter(normalized_text(staged.read_bytes()))
+    # A field the reader cannot read is left out, so amend can repair such a note, except where a
+    # gate below rests on it: those refuse, rather than judge the note as if it declared nothing.
+    text = normalized_text(staged.read_bytes())
+    _parse_frontmatter(text, strict=True, keys=_GUARDED)
+    doc, _body, _stats = read_markdown(staged, strict=False)
+    front, _ = _parse_frontmatter(text)
     return {
         "doc_id": doc.doc_id,
         "status": doc.status,
@@ -936,8 +944,9 @@ def _pin(content: bytes, doc_id: str) -> bytes:
     content with no frontmatter, an empty block, or a block the reader takes for a thematic break
     (the spine gate refuses it); and content whose first frontmatter line starts with `---`, which
     a line inserted above it would turn into a closing fence (`_pin_declined` says where to write
-    the line instead). The note's own line ending is used, so a CRLF or CR note does not gain one LF
-    line.
+    the line instead). A value the reader cannot read is left out of the pairs compared below, and
+    the strict gate refuses it when the engine reads that key. The note's own line ending is used,
+    so a CRLF or CR note does not gain one LF line.
     """
     from substrate.markdown.reader import frontmatter_pairs, normalized_text
 
@@ -956,7 +965,12 @@ def _pin(content: bytes, doc_id: str) -> bytes:
     if not pairs or any(k == "doc_id" for k, _ in pairs):
         return content
     eol = opener[3:]
-    pinned = opener + b"doc_id: " + doc_id.encode("ascii") + eol + content[len(opener):]
+    # At the block's own key indent, a comment's aside: a line left of it would make every key
+    # below it indented.
+    block = text.split("\n---", 1)[0].split("\n")[1:]
+    first = next((ln for ln in block if ln.strip() and not ln.lstrip().startswith("#")), "")
+    indent = first[:len(first) - len(first.lstrip(" \t"))].encode()
+    pinned = opener + indent + b"doc_id: " + doc_id.encode("ascii") + eol + content[len(opener):]
     # The reader must see EXACTLY the old keys plus this one. A first line that itself starts
     # with `---` (`---title: x` is a legal key) becomes a closing fence once a line sits above it,
     # and the block would end at the pin (crosscheck, 2026-11-04). Unpinned, the spine gate

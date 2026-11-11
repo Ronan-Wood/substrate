@@ -53,12 +53,16 @@ rename the key, **and** replace a `[[wikilink]]` value with the target's `doc_id
 Upstream `supersedes` values tend to be empty or free prose rather than links. Decision history in
 such a vault lives in bodies, so WRITING.md rule 5 has to be satisfied by reading them.
 
-### One block list loses the whole frontmatter
+### Frontmatter the reader cannot read
 
-`tags:` written as a YAML block list puts a non-blank line without a `:` in the frontmatter, which
-makes `_parse_frontmatter` return `{}` and treat the block as body (`reader.py`). The note's
-declared `status` never reaches the validator and it refuses as *"no status"*, which names the
-wrong cause. A one-line pre-flight grep for block lists is worth running before any migration.
+A block of first-column `key: value` lines is read line by line, as it always was. Any other block
+(a block list, a comment, an indented key) is read by YAML. A value YAML holds that one line cannot
+(a nested mapping, a multi-line scalar, a list of mappings), or that a line reader would read
+otherwise (an alias, a tag, a merge key, a key written twice), is left out: under a key the engine
+reads, the note is refused naming the key and the line. A block YAML cannot read is body text,
+and a note that names a key the engine reads in it is refused naming YAML's line.
+`substrate frontmatter check` lists every such note, so it is the pre-flight to run before a
+migration.
 
 ### Thin margins
 

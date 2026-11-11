@@ -98,6 +98,7 @@ heartbeat from the last 60 seconds naming the scope being asked for
 report anything that gets past it privately, as [`SECURITY.md`](../SECURITY.md) describes.
 
 - **It is built to fail closed.** A missing, unreadable or malformed state file withholds the vault.
+  So does a `guard_state` written inside a table, which `compose` also refuses.
 - **It withholds a vault, not a scope.** The vaults the guarded one inherits stay readable.
 - **Only what the MCP server returns is guarded.** The CLI, `query` included, and anything that
   opens the index read the guarded notes. `compose`, `embed` and the refresh loop are your own tools

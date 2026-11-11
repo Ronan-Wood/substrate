@@ -200,11 +200,28 @@ def assess(text: str | None, data: bytes | None = None) -> tuple[str, list[str]]
     return NOT_YAML, (found[1] if found else []) + [_GC_ONLY]
 
 
-def _assess(text: str) -> tuple[str, list[str]] | None:
-    got = reader.raw_frontmatter(text)
-    if got is None or not got[1]:
+def _unread(scan) -> tuple[str, list[str]] | None:
+    """A finding for a note with a value the engine leaves unread (`scan.problems`): read
+    differently where YAML, as Obsidian and gc do, reads the block, not YAML otherwise. A block
+    the engine reads as body text is one YAML reads no keys in either, so it is no finding."""
+    why = [w for _, w in scan.problems]
+    if not why:
         return None
-    block, raw = got
+    if len(scan.block) > blob_lifecycle._MAX_FRONTMATTER:
+        return NOT_YAML, why
+    loaded, not_yaml = _load(scan.block)
+    if isinstance(loaded, dict) and loaded:
+        return READS_DIFFERENTLY, why
+    return NOT_YAML, why + ([not_yaml] if not_yaml else [])
+
+
+def _assess(text: str) -> tuple[str, list[str]] | None:
+    scan = reader._raw_scan(text)
+    if scan.problems or scan.pairs is None:
+        return _unread(scan)
+    if not scan.pairs:
+        return None
+    block, raw = scan.block, scan.pairs
     if len(block) > blob_lifecycle._MAX_FRONTMATTER:
         return NOT_YAML, [f"longer than {blob_lifecycle._MAX_FRONTMATTER // 1024} KiB, more than "
                           f"any frontmatter needs"]

@@ -12,7 +12,7 @@ mark, U+FFFE, U+FFFF and lone surrogates. The app's `ScriptaShared/Frontmatter` 
 character rule and the same single-quoted form; it quotes every free-text value, where the engine
 leaves one plain when it can, so emitted bytes that were already YAML do not move.
 
-Stdlib only, like the reader.
+Stdlib only.
 """
 
 from __future__ import annotations
