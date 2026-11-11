@@ -308,88 +308,102 @@ def test_an_unchanged_note_with_a_bad_doc_id_line_is_told_the_line_to_write() ->
 
 
 def test_a_pin_that_would_end_the_block_early_is_not_written() -> None:
-    """A first frontmatter line that starts with `---` is a legal key, but once a line sits above
-    it, it reads as the closing fence and the block ends at the pin, moving every key into the
-    body. Unpinned, the caller's own content is judged instead (crosscheck, 2026-11-04)."""
-    content = b"---\n---title: x\nstatus: active\n---\n\n# Body\n"
+    """A first line inside the block that is itself `---` (YAML's document marker) reads as the
+    closing fence once a line sits above it, and the block would end at the pin, moving every key
+    into the body. Unpinned, the caller's own content is judged instead (crosscheck, 2026-11-04)."""
+    content = b"---\n---\nstatus: active\n---\n\n# Body\n"
     assert notes._pin(content, "pinned-x") == content
 
 
+def test_a_first_key_that_only_starts_with_dashes_is_pinned() -> None:
+    """`---title: x` is a key, and a line above it no longer closes the block: the frontmatter ends
+    only at a whole `---` line. The pin used to be declined here, because the old fence closed at
+    any line starting with `---`."""
+    content = b"---\n---title: x\nstatus: active\n---\n\n# Body\n"
+    pinned = notes._pin(content, "pinned-x")
+    assert pinned == b"---\ndoc_id: pinned-x\n---title: x\nstatus: active\n---\n\n# Body\n"
+    assert notes._pairs(pinned) == [("doc_id", "pinned-x"), ("---title", "x"),
+                                    ("status", "active")]
+
+
+_MARKER = b"---\n---\n"  # a frontmatter block whose first line is YAML's `---` document marker
+
+
 def test_a_pin_amend_could_not_write_says_where_to_write_it() -> None:
-    """`_pin` declines when the first frontmatter line starts with `---`. The content still has a
-    status, so it reached the identity gate, which called the line "empty" and said to leave it out
-    — advice that refuses again forever (adversary, 2026-11-04)."""
+    """`_pin` declines when a line above the block's first line would change it. The content still
+    has a status, so it reached the identity gate, which called the line "empty" and said to leave
+    it out — advice that refuses again forever (adversary, 2026-11-04)."""
     from substrate.extract.base import doc_id_for
 
     v = _vault()
-    odd = b"---\n---title: x\n" + CURRENT[len(b"---\n"):]
+    odd = _MARKER + CURRENT[len(b"---\n"):]
     p = _note(v, data=odd)
     now = doc_id_for(p)
     _refuses(lambda: _plan(v, notes.PlanBook(), content=odd + b"\nedited\n"),
-             containing="directly below the '---title: x' line (the first key")
-    written_below = odd.replace(b"---title: x\n", f"---title: x\ndoc_id: {now}\n".encode(), 1)
+             containing="directly below the '---' line (the first line inside the block")
+    written_below = odd.replace(_MARKER, _MARKER + f"doc_id: {now}\n".encode(), 1)
     plan = _plan(v, notes.PlanBook(), content=written_below + b"\nedited\n")
     assert plan.pinned_doc_id == now
 
 
 def test_an_unchanged_note_amend_could_not_pin_says_where_to_write_it() -> None:
     v = _vault()
-    odd = b"---\n---title: x\n" + CURRENT[len(b"---\n"):]
+    odd = _MARKER + CURRENT[len(b"---\n"):]
     _note(v, data=odd)
     _refuses(lambda: _plan(v, notes.PlanBook(), content=odd),
-             containing="directly below the '---title: x' line (the first key")
+             containing="directly below the '---' line (the first line inside the block")
 
 
 def test_the_declined_pin_advice_is_accepted_even_with_a_later_fence_like_line() -> None:
-    """Advice to write the line "before the closing `---`" pointed at body text when a later key
-    also started with `---` (the reader ends the block at the first `\\n---`), and the same refusal
-    came back. Directly after the first line is a place a new line cannot move the end."""
+    """Advice to write the line "before the closing `---`" pointed at body text when a later line
+    also started with `---`, and the same refusal came back. Directly after the first line is a
+    place a new line cannot move the end."""
     from substrate.extract.base import doc_id_for
 
     v = _vault()
-    odd = (b"---\n---title: x\nstatus: active\ndoc_type: decision\nconfidence: proposed\n"
+    odd = (_MARKER + b"status: active\ndoc_type: decision\nconfidence: proposed\n"
            b"---note: y\n---\n\n# Retrieval stack decision\n\nThe MCP surface runs the measured "
            b"stack, so a caller can tell a 0.698 answer from a lexical one.\n")
     p = _note(v, data=odd)
     now = doc_id_for(p)
     _refuses(lambda: _plan(v, notes.PlanBook(), content=odd + b"\nedited\n"),
-             containing="directly below the '---title: x' line (the first key")
-    followed = odd.replace(b"---title: x\n", f"---title: x\ndoc_id: {now}\n".encode(), 1)
+             containing="directly below the '---' line (the first line inside the block")
+    followed = odd.replace(_MARKER, _MARKER + f"doc_id: {now}\n".encode(), 1)
     assert _plan(v, notes.PlanBook(), content=followed + b"\nedited\n").pinned_doc_id == now
 
 
-def test_the_declined_pin_names_the_key_line_not_the_fence() -> None:
+def test_the_declined_pin_names_the_line_not_the_fence() -> None:
     """"The first line" also reads as the opening `---` fence, and a line written directly under
-    the fence is exactly the placement that closes the block, so the refusal names the key line by
-    its content, and the placement it rules out is refused (crosscheck, 2026-11-04)."""
+    the fence is exactly the placement that closes the block, so the refusal names the line by its
+    content, and the placement it rules out is refused (crosscheck, 2026-11-04)."""
     from substrate.extract.base import doc_id_for
 
     v = _vault()
-    odd = b"---\n---title: x\n" + CURRENT[len(b"---\n"):]
+    odd = _MARKER + CURRENT[len(b"---\n"):]
     p = _note(v, data=odd)
     now = doc_id_for(p)
     msg = _refuses(lambda: _plan(v, notes.PlanBook(), content=odd + b"\nedited\n"),
-                   containing="directly below the '---title: x' line (the first key")
+                   containing="directly below the '---' line (the first line inside the block")
     assert "not the opening `---` fence" in msg
     under_fence = odd.replace(b"---\n", f"---\ndoc_id: {now}\n".encode(), 1)
     _refuses(lambda: _plan(v, notes.PlanBook(), content=under_fence + b"\nedited\n"),
              containing="no status")
 
 
-def test_the_named_key_line_is_marked_quoted_and_bounded() -> None:
-    """The first key line is note content echoed into an error. Raw, a backtick broke the quoting,
-    a bidi override or escape sequence reached the reader as-is, and a long line came back twice
-    (crosscheck, 2026-11-05)."""
+def test_the_named_line_is_marked_quoted_and_bounded() -> None:
+    """The first line is note content echoed into an error. Raw, a backtick broke the quoting,
+    a bidi override reached the reader as-is, and a long line came back twice (crosscheck,
+    2026-11-05). A `---` document marker with a comment after it declines the pin, and YAML reads
+    the comment, so the line can carry anything printable."""
     v = _vault()
-    first = "---title: `a` b \u202e x \x1b[2J " + "y" * 5_000
+    first = "--- # `a` b \u202e x " + "y" * 5_000
     odd = b"---\n" + first.encode() + b"\n" + CURRENT[len(b"---\n"):]
     _note(v, data=odd)
     msg = _refuses(lambda: _plan(v, notes.PlanBook(), content=odd + b"\nedited\n"),
-                   containing="(the first key, not the opening `---` fence)")
+                   containing="(the first line inside the block, not the opening `---` fence)")
     assert len(msg) < 1_000, len(msg)
-    assert "\u202e" not in msg and "\x1b" not in msg
-    assert "\u27e8U+202E\u27e9" in msg and "\u27e8U+001B\u27e9" in msg
-    assert "'---title: `a` b" in msg
+    assert "\u202e" not in msg and "\u27e8U+202E\u27e9" in msg
+    assert "'--- # `a` b" in msg
 
 
 def test_an_unchanged_note_with_no_keys_has_nothing_to_amend() -> None:

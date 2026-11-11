@@ -29,6 +29,17 @@ Every release of the engine, newest first. The format follows
   status now says why its block was not read.
 - `frontmatter check` reports a value the engine leaves unread. Before, it called a note whose
   frontmatter the engine dropped clean.
+- **Frontmatter ends only at a whole `---` line**, with nothing after it but spaces or tabs. A line
+  that merely starts with `---` (`---x: 1`, `----`, `--- x`) is inside the block, as Obsidian
+  reads it. Before, it ended the block for the engine, so the lines after it were body to the
+  engine and properties to Obsidian, and a granted client could put a stamp key there unchecked.
+  `--- ` still closes for the engine while Obsidian reads on past it, so that one fence still
+  reads differently. `frontmatter check` and `fix` use the reader's own rule, so `fix` no longer
+  refuses a `--- ` fence.
+- A note whose block ended only at such a line now reads the longer block when a whole `---` line
+  follows, and has no frontmatter when none does. If that block names a key the engine reads,
+  vault ingest refuses the note and `frontmatter check` lists it, naming the line. Run `substrate
+  frontmatter check` after upgrading: the older check uses the old fence and can't see them.
 
 ### Changed
 
@@ -61,7 +72,8 @@ Every release of the engine, newest first. The format follows
 - A granted write is stamped in the note's frontmatter, `written_by: <client>` on a new note and
   `amended_by: <client>` on an edit, before it is planned, so the plan's diff and checksum include
   it. A note declaring another value is refused. A plan is bound to the client's grant token, so
-  a rotation, or a revoke and a new grant, leaves no old plan redeemable.
+  a rotation, or a revoke and a new grant, leaves no old plan redeemable. The stamp is a label,
+  not proof: anyone who can edit the file can change it (`docs/security.md`).
 - After a write, an engine that refreshes runs a pass for it, and the reply says when the note
   will be found, instead of telling the reader to compose.
 - `--client NAME` on `--connect` names the client a write is granted and stamped as, where two

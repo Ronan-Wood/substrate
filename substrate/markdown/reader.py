@@ -40,7 +40,12 @@ from substrate.extract.base import doc_id_for  # stdlib-only; no Docling/torch p
 from substrate.markdown import yaml_scalar
 from substrate.models import Block, Document, Kind
 
-_FRONTMATTER = re.compile(r"\A---\n(.*?)\n---\n?", re.DOTALL)
+# The one rule for where frontmatter ends, which `substrate frontmatter check` and `fix` read too:
+# a line of `---` with nothing after it but spaces or tabs, after at least one line of block. A
+# line that only STARTS with `---` (`---x: 1`, `----`, `--- x`) is inside the block, as Obsidian
+# reads it. `--- ` closes here, but Obsidian reads on past it: there the two still differ.
+_FRONTMATTER = re.compile(r"\A---\n(.*?)\n---[ \t]*(?:\n|\Z)", re.DOTALL)
+_UNCLOSED = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)  # where the old rule closed it
 _PAGE = re.compile(r"^<!--\s*page:(\d+)\s*-->\s*$")
 _PAGE_ANCHOR = re.compile(r"<!--\s*page:\d+\s*-->")  # linear; strips anchors for coverage
 # Loose ATX match — closing-hash trimming is done in Python (a regex that trims it backtracks
@@ -262,6 +267,22 @@ def _shown(text: str, cap: int = 60) -> str:
     return out + ("…" if len(text) > cap else "")
 
 
+def _unreadable(block: str, whole: str) -> _Scan:
+    """No frontmatter, for a `---` block the reader cannot read (`whole` says why): each line in it
+    naming one of `READ_KEYS` is a problem, so strict reading refuses the note rather than read a
+    field it declares as absent; with none, the block is body text."""
+    named = []
+    for line in block.splitlines():
+        km = _KEY_LINE.match(line)
+        if km and km.group(2) in READ_KEYS and km.group(2) not in named:
+            named.append(km.group(2))
+    if named:
+        return _Scan(None, block=block, problems=tuple(
+            (k, f"`{k}`: {whole}, so the engine reads none of it") for k in named))
+    return _Scan(None, block=block, prose=(f"{whole}, so it is read as body text, not "
+                                           f"frontmatter") if ":" in block else None)
+
+
 def _raw_scan(text: str) -> _Scan:
     """The frontmatter's (key, value) pairs, two ways.
 
@@ -275,7 +296,15 @@ def _raw_scan(text: str) -> _Scan:
     """
     m = _FRONTMATTER.match(text)
     if not m:
-        return _Scan(None)
+        # A block that never closes, but used to at a line only starting with `---`: its keys
+        # would otherwise vanish without a word, a note's status and doc_id with them.
+        old = _UNCLOSED.match(text)
+        if old is None:
+            return _Scan(None)
+        line = text[old.end() - 3:].split("\n", 1)[0]
+        return _unreadable(old.group(1), f"the `---` block never closes: {_shown(line)!r} only "
+                                         f"starts with `---`, and frontmatter ends at a line of "
+                                         f"`---` alone")
     block = m.group(1)
     pairs: list[tuple[str, str]] = []
     for line in block.splitlines():
@@ -329,17 +358,7 @@ def _yaml_scan(block: str, end: int) -> _Scan:
     import yaml  # here, not at the top: a flat block, which every writer emits, never needs it
 
     def unreadable(why: str) -> _Scan:
-        named = []
-        for line in block.splitlines():
-            km = _KEY_LINE.match(line)
-            if km and km.group(2) in READ_KEYS and km.group(2) not in named:
-                named.append(km.group(2))
-        whole = f"the block between the two `---` lines {why}"
-        if named:
-            return _Scan(None, block=block, problems=tuple(
-                (k, f"`{k}`: {whole}, so the engine reads none of it") for k in named))
-        return _Scan(None, block=block, prose=(f"{whole}, so it is read as body text, not "
-                                               f"frontmatter") if ":" in block else None)
+        return _unreadable(block, f"the block between the two `---` lines {why}")
 
     if len(block) > _MAX_YAML_BLOCK:
         return unreadable(f"is over {_MAX_YAML_BLOCK // 1024} KiB")
