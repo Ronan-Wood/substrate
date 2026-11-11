@@ -70,11 +70,16 @@ for a client you granted by name ([`substrate/grants.py`](../substrate/grants.py
   note, `amended_by: <client>` on an edit. A note that claims a different value is refused. A plan
   is bound to the client's grant token, so another client can't redeem it, and neither can this
   one after a rotation, or after a revoke and a new grant.
+- **The stamp is a label, not proof.** Anyone who can edit the file can add, change or remove
+  `written_by` and `amended_by`: you in Obsidian, any process running as you, and a granted client
+  that finds a spelling some reader takes for a stamp key and the engine's check misses. Read it
+  as who the engine last wrote the note for, not as who wrote what. An engine write log, outside
+  the vault, is planned as the record.
 - Every other rule still applies after the grant: the vault guard, the project vault only, the
   writable folders, and `amend`'s refusals. Each write is still a plan, then a commit.
 
 **What a grant does:** a client writes only after you said yes to that client name, every write it
-makes carries that name, and a revoke stops it at its next write.
+makes is labelled with that name, and a revoke stops it at its next write.
 
 **What it doesn't do:** any process running as you can read a token file, claim a client's name
 (`clientInfo.name` is whatever the client says it is), or write vault files directly if it can

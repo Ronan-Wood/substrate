@@ -358,8 +358,15 @@ def test_a_name_yaml_would_read_as_something_else_is_quoted() -> None:
     assert stamped.startswith(b"---\nwritten_by: 'true'\n"), stamped
 
 
-def test_a_block_the_stamp_cannot_enter_is_refused() -> None:
+def test_a_first_key_that_only_starts_with_dashes_is_stamped() -> None:
+    """The stamp used to be refused here: the old fence closed at any line starting with `---`."""
     content = b"---\n---title: x\nstatus: active\n---\nbody\n"
+    assert notes.stamp_new(content, "claude-code") == (
+        b"---\nwritten_by: claude-code\n---title: x\nstatus: active\n---\nbody\n")
+
+
+def test_a_block_the_stamp_cannot_enter_is_refused() -> None:
+    content = b"---\n---\nstatus: active\n---\nbody\n"
     with pytest.raises(notes.NoteError, match="cannot put that line"):
         notes.stamp_new(content, "claude-code")
     with pytest.raises(notes.NoteError, match="no frontmatter block"):

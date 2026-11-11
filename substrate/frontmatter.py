@@ -269,7 +269,8 @@ def rewrite(data: bytes) -> bytes:
         text = data.decode("utf-8")
     except UnicodeDecodeError as e:
         raise ValueError("the note is not UTF-8") from e
-    if reader.raw_frontmatter(reader.normalized_text(data)) is None:
+    normalized = reader.normalized_text(data)
+    if reader.raw_frontmatter(normalized) is None:
         raise ValueError("the engine reads no frontmatter here, so it has no reading to keep; "
                          "edit it by hand")
     for eol in ("\r\n", "\n", "\r"):
@@ -278,13 +279,11 @@ def rewrite(data: bytes) -> bytes:
     else:
         raise ValueError("the frontmatter does not open on a line of its own")
     lines = text.split(eol)
-    # Where the reader ends the block: the first later line that STARTS with `---`.
-    close = next((i for i in range(1, len(lines)) if lines[i].startswith("---")), None)
-    if close is None or lines[close] != "---":
-        raise ValueError("the frontmatter's closing `---` is not on a line of its own")
-    block = lines[1:close]
-    if any(("\r" in ln or "\n" in ln) for ln in block):
+    # Where the reader ends the block, by the reader's own rule rather than a copy of it.
+    close = reader._FRONTMATTER.match(normalized).group(1).count("\n") + 2
+    if lines[:close + 1] != normalized.split("\n")[:close + 1]:
         raise ValueError("the frontmatter mixes line endings")
+    block = lines[1:close]
     out = []
     for ln in block:
         if not ln.strip():
