@@ -19,10 +19,12 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from substrate.net import EgressRefused, RedirectRefused, open_local, require_loopback
+from substrate.retrieve.local_models import (CLOUD, EMBED_SENDS, LOCAL, cloud_message, is_cloud,
+                                             locality)
 
 DEFAULT_HOST = "http://127.0.0.1:11434"
 # MEASURED. qwen3-embedding is LLM-derived (built on Qwen3) rather than a BERT-family
@@ -55,8 +57,8 @@ class EmbeddingError(RuntimeError):
 
 
 class EmbeddingRefused(EmbeddingError):
-    """The transport refused the request (a non-loopback URL, or a redirect). Never retried: no
-    smaller input changes where a request is allowed to go."""
+    """The request was refused: a non-loopback URL or a cloud model before it is sent, or a redirect
+    in reply. Never retried: no smaller input changes where a request is allowed to go."""
 
 
 class EmbeddingEngine(Protocol):
@@ -100,12 +102,15 @@ QWEN3_QUERY_INSTRUCT = (
 
 @dataclass
 class OllamaEmbedder:
-    """Local Ollama embeddings. Loopback only — never carries the corpus off the machine."""
+    """Local Ollama embeddings. Loopback only, and never a cloud model: Ollama serves those through
+    the loopback daemon, so the loopback guard passes and the corpus still leaves the machine."""
 
     model: str = DEFAULT_MODEL
     host: str = DEFAULT_HOST
     dim: int = 0
     prefix_style: str = "auto"
+    # Which False `available()` was, so a caller can say "cloud" rather than "unreachable".
+    refused_cloud: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:  # noqa: D105
         require_loopback(self.host, sends="the corpus", exc=EmbeddingError, suggest=DEFAULT_HOST)
@@ -130,6 +135,11 @@ class OllamaEmbedder:
         return f"{self.model}#{doc_side}"
 
     def _post(self, path: str, payload: dict) -> dict:
+        # The one place a request is sent, so no caller that skips `available()` sends a note to a
+        # model whose name says cloud. One only the listing marks (`remote_host`) is `available()`'s
+        # to refuse: every caller asks it before embedding.
+        if is_cloud({"name": self.model}):
+            raise EmbeddingRefused(cloud_message(None, self.model, sends=EMBED_SENDS))
         req = urllib.request.Request(
             f"{self.host}{path}",
             data=json.dumps(payload).encode(),
@@ -248,12 +258,10 @@ class OllamaEmbedder:
         return self._embed([text])[0]
 
     def available(self) -> bool:
-        try:
-            with open_local(f"{self.host}/api/tags", timeout=30) as r:
-                names = {m["name"].split(":")[0] for m in json.loads(r.read()).get("models", [])}
-            return self.model.split(":")[0] in names
-        except Exception:
-            return False
+        """Listed, and not a cloud model (`local_models.locality`, HyDE's and the reranker's rule)."""
+        verdict = locality(self.model, self.host)
+        self.refused_cloud = verdict == CLOUD
+        return verdict == LOCAL
 
 
 @dataclass

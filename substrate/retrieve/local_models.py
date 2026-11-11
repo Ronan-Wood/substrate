@@ -1,13 +1,14 @@
-"""Which Ollama models count as local, for every generator arm (HyDE, the rerankers).
+"""Which Ollama models count as local, for every model arm (the embedder, HyDE, the rerankers).
 
-`is_cloud` is the cloud test all of them share. `locality` is the matching HyDE and the listwise
-reranker use (exact name, else family); the cross-encoder matches exact tags itself, since its
-quant is its identity, and applies `is_cloud` to what it finds.
+`is_cloud` is the cloud test all of them share. `locality` is the matching the embedder, HyDE and
+the listwise reranker use (exact name, else family); the cross-encoder matches exact tags itself,
+since its quant is its identity, and applies `is_cloud` to what it finds.
 
 Ollama serves its cloud models through the local daemon. The socket is loopback, so the loopback
 guard in `substrate.net` passes, and the request still leaves the machine. Whatever these arms send
-is what the caller is searching their vault for — the query, and for a reranker the passages too —
-so a cloud model is never used, picked or named. Same test as the app's `ModelResolver.isRemote`.
+is the caller's vault or what they are searching it for — every note the embedder indexes, the
+query, and for a reranker the passages too — so a cloud model is never used, picked or named. Same
+test as the app's `ModelResolver.isRemote`.
 """
 
 from __future__ import annotations
@@ -24,6 +25,8 @@ CLOUD = "cloud"
 
 # What a reranker sends a model, for its refusals.
 RERANK_SENDS = "every query and the passages it reorders"
+# What an embedder sends: `embed` and the refresh pass index with it, and search embeds each query.
+EMBED_SENDS = "the text of every note it indexes and every query"
 
 # Why any cloud model is refused, in every refusal: the command lines' and `stack`'s alike.
 CLOUD_REASON = "search never uses a model that runs in Ollama's cloud"

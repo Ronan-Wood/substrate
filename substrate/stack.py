@@ -212,7 +212,8 @@ def build(
         embedder = cand if cand.available() else None
         if embedder is None:
             unavailable.append(_unreachable("embedder", embed_model,
-                                            getattr(cand, "host", "the local daemon")))
+                                            getattr(cand, "host", "the local daemon"),
+                                            cloud=getattr(cand, "refused_cloud", False)))
 
     expander = None
     if hyde_model:
