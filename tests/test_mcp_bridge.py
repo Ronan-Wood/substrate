@@ -1,12 +1,12 @@
-"""`--connect`: one shared server for the reads, and `ingest` kept off its socket.
+"""`--connect`: one shared server for every tool, the writes included, and none run here.
 
 Each stdio client used to spawn a full engine of its own. The bridge replaces that with a process
-that builds no stack and forwards reads to the server Scripta hosts on a Unix socket. These tests
-check the four properties the design rests on:
+that builds no stack and forwards every call to the shared engine on a Unix socket. These tests
+check the properties the design rests on:
   * reads really are answered by the shared server;
-  * the write never travels over the socket;
-  * a closed Scripta is an error the model can read, not a dead tool list;
-  * a listener that is not this user's engine is sent nothing, and nothing it says is relayed.
+  * a write is forwarded with who it is from, and never runs in the bridge;
+  * a closed engine is an error the model can read, not a dead tool list, and writes nothing;
+  * a listener that is not this user's engine is sent nothing, a grant token least of all.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from substrate import local_socket, stack  # noqa: E402
+from substrate import grants, local_socket, stack, wire  # noqa: E402
 from substrate.mcp import bridge, server  # noqa: E402
 from test_local_socket import OTHER_UID, _engine, _patched, _socket_dir  # noqa: E402
 from test_mcp_server import _NOTE, REPO, _call, _cfg, _fixture  # noqa: E402
@@ -47,16 +47,16 @@ def _tools_call(cfg: server.Config, name: str, args: dict, rid: int = 7) -> dict
 
 
 class _Recorder:
-    """A stand-in for `bridge.Remote` that records what reached the socket."""
+    """A stand-in for `bridge.Remote` that records what reached the socket, and who each call said
+    it was from."""
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.callers: list[grants.Caller | None] = []
 
-    def registry_disagreement(self, local, *, tool: str = "ingest") -> None:
-        return None
-
-    def __call__(self, rid, name, arguments) -> dict:
+    def __call__(self, rid, name, arguments, caller=None) -> dict:
         self.calls.append(name)
+        self.callers.append(caller)
         return {"jsonrpc": "2.0", "id": rid, "result": {"content": [{"type": "text",
                                                                      "text": "{}"}]}}
 
@@ -65,13 +65,20 @@ class _UnixStub(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
 
 
-def _stub(handler_body):
+def _stub(handler_body, *, headers: list | None = None):
     """An HTTP listener on a fresh private socket that answers every POST with
-    `handler_body(handler)`. Returns (server, socket path, the bodies it was sent)."""
+    `handler_body(handler)`, stating this client's wire version as an engine would. Returns
+    (server, socket path, the bodies it was sent). `headers` collects each request's headers."""
     seen: list[bytes] = []
 
     class H(http.server.BaseHTTPRequestHandler):
+        def send_response(self, *a, **kw):
+            super().send_response(*a, **kw)
+            self.send_header(wire.HEADER, str(wire.VERSION))
+
         def do_POST(self):  # noqa: N802
+            if headers is not None:
+                headers.append(dict(self.headers))
             seen.append(self.rfile.read(int(self.headers.get("Content-Length") or 0)))
             handler_body(self)
 
@@ -98,131 +105,88 @@ def test_reads_are_answered_by_the_shared_server() -> None:
         assert cfg.stack is None, "the bridge must not have answered from a stack of its own"
 
 
-def test_ingest_never_crosses_the_socket() -> None:
-    """The control in Doc 3 §3 is that the write is OFF the socket. A forwarded ingest would
-    land on a read-only server and be refused, and a server that accepted it would be the
-    hole itself. So plan and commit both run in the bridge, against its own PlanBook."""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def test_a_write_is_forwarded_with_who_it_is_from() -> None:
+    """The bridge writes nothing itself: `ingest` and `amend`, plan and commit alike, go to the
+    engine, each carrying the client's name and its token, read from the token file per call."""
     root, registry = _fixture(manifest=True)
     (root / "demo-vault" / "04-synthesis").mkdir()
     rec = _Recorder()
     cfg = _bridge(registry, rec)
+    server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                   "params": {"clientInfo": {"name": "Claude Code", "version": "9.9"}}}, cfg)
     args = {"scope": "demo", "content": _NOTE, "filename": "d.md"}
-    plan = json.loads(_tools_call(cfg, "ingest", args)["result"]["content"][0]["text"])["plan"]
-    out = _tools_call(cfg, "ingest", {**args, "confirm_token": plan["confirm_token"]})
+    out = _tools_call(cfg, "ingest", args)
     assert not out["result"].get("isError"), out
-    assert json.loads(out["result"]["content"][0]["text"])["written"] is True
-    assert (root / "demo-vault" / "04-synthesis" / "d.md").exists()
-    assert rec.calls == [], f"ingest reached the socket: {rec.calls}"
-
+    assert rec.calls == ["ingest"]
+    assert rec.callers[0] == grants.Caller("claude-code", None, {"name": "Claude Code",
+                                                               "version": "9.9"})
+    _, token_file = grants.issue("claude-code")
+    _tools_call(cfg, "amend", {"scope": "demo", "path": "04-synthesis/d.md", "content": _NOTE})
+    assert rec.calls == ["ingest", "amend"]
+    assert rec.callers[1].token == token_file.read_text().strip()
+    assert not (root / "demo-vault" / "04-synthesis" / "d.md").exists(), "the bridge wrote"
     _tools_call(cfg, "search", {"scope": "demo", "query": "x"})
-    assert rec.calls == ["search"], "every read tool must be forwarded"
+    assert rec.callers[2] is None, "a read carries no grant token"
 
 
-def test_amend_never_crosses_the_socket() -> None:
-    """`amend` is a write, so the same control applies: plan and commit run in the bridge."""
-    from test_mcp_server import _AMENDED, _amend_fixture
-
-    _, registry, note = _amend_fixture()
+def test_client_overrides_the_declared_name() -> None:
+    _, registry = _fixture()
     rec = _Recorder()
     cfg = _bridge(registry, rec)
-    args = {"scope": "demo", "path": "04-synthesis/d.md", "content": _AMENDED}
-    plan = json.loads(_tools_call(cfg, "amend", args)["result"]["content"][0]["text"])["plan"]
-    out = _tools_call(cfg, "amend", {**args, "confirm_token": plan["confirm_token"]})
-    assert not out["result"].get("isError"), out
-    assert note.read_text(encoding="utf-8").endswith(_AMENDED.split("---\n", 2)[2])
-    assert "doc_id: " + plan["pinned_doc_id"] in note.read_text(encoding="utf-8")
-    assert rec.calls == [], f"amend reached the socket: {rec.calls}"
+    cfg.client = "zed-work"
+    server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                   "params": {"clientInfo": {"name": "Zed"}}}, cfg)
+    _tools_call(cfg, "ingest", {"scope": "demo", "content": _NOTE, "filename": "d.md"})
+    assert rec.callers[0].client == "zed-work"
 
 
-def test_amend_refusal_names_amend_when_the_engine_reads_another_registry() -> None:
-    """The refusal used to be a fixed string naming `ingest`. Sent for an `amend`, it would name a
-    tool the caller never called."""
-    from test_mcp_server import _AMENDED, _amend_fixture
-
-    _, registry, note = _amend_fixture()
-    _, other = _fixture()
-    with _socket_dir() as d, _engine(d / "s.sock", _cfg(other)):
-        cfg = _bridge(registry, bridge.Remote(d / "s.sock"))
-        out = _tools_call(cfg, "amend", {"scope": "demo", "path": "04-synthesis/d.md",
-                                         "content": _AMENDED})
-        text = out["result"]["content"][0]["text"]
-        assert out["result"]["isError"] is True
-        assert text.startswith("`amend` is refused"), text
-    assert note.read_text(encoding="utf-8") != _AMENDED
-
-
-def test_a_registry_refusal_burns_the_amend_token() -> None:
-    """Refused before the handler runs, so the handler's own burn never saw it."""
-    from test_mcp_server import _AMENDED, _amend_fixture
-
-    _, registry, note = _amend_fixture()
-    _, other = _fixture()
-    args = {"scope": "demo", "path": "04-synthesis/d.md", "content": _AMENDED}
-    cfg = _bridge(registry, _Recorder())
-    token = json.loads(_tools_call(cfg, "amend", args)["result"]["content"][0]["text"])[
-        "plan"]["confirm_token"]
-    with _socket_dir() as d, _engine(d / "s.sock", _cfg(other)):
-        cfg.remote = bridge.Remote(d / "s.sock")
-        assert _tools_call(cfg, "amend", {**args, "confirm_token": token})["result"]["isError"]
-    cfg.remote = _Recorder()
-    out = _tools_call(cfg, "amend", {**args, "confirm_token": token})["result"]
-    assert out["isError"] and "not issued" in out["content"][0]["text"], out
-    assert note.read_text(encoding="utf-8") != _AMENDED
-
-
-def test_a_registry_check_that_raises_burns_the_amend_token() -> None:
-    """A raise from the check reached only the dispatcher's fault handler, never `_tool_amend`, so
-    the token survived for a retry once the check stopped raising (adversary, 2026-11-04)."""
-    from test_mcp_server import _AMENDED, _amend_fixture
-
-    class _Raising(_Recorder):
-        def registry_disagreement(self, local, *, tool="ingest"):
-            raise RuntimeError("check blew up")
-
-    _, registry, note = _amend_fixture()
-    args = {"scope": "demo", "path": "04-synthesis/d.md", "content": _AMENDED}
-    cfg = _bridge(registry, _Recorder())
-    token = json.loads(_tools_call(cfg, "amend", args)["result"]["content"][0]["text"])[
-        "plan"]["confirm_token"]
-    cfg.remote = _Raising()
-    assert _tools_call(cfg, "amend", {**args, "confirm_token": token})["result"]["isError"]
-    cfg.remote = _Recorder()
-    out = _tools_call(cfg, "amend", {**args, "confirm_token": token})["result"]
-    assert out["isError"] and "not issued" in out["content"][0]["text"], out
-    assert note.read_text(encoding="utf-8") != _AMENDED
-
-
-def test_ingest_works_while_scripta_is_closed() -> None:
+def test_a_write_with_no_engine_is_refused_and_writes_nothing() -> None:
+    """It used to run in the bridge, and still worked with the engine down. Now the engine is the
+    one place a write is decided, so no engine means no write, said as such."""
     root, registry = _fixture(manifest=True)
     (root / "demo-vault" / "04-synthesis").mkdir()
     cfg = _bridge(registry, bridge.Remote(_no_engine()))
     out = _tools_call(cfg, "ingest", {"scope": "demo", "content": _NOTE, "filename": "d.md"})
-    assert not out["result"].get("isError"), out
+    assert out["result"]["isError"] is True, out
+    assert "Nothing was written" in out["result"]["content"][0]["text"]
+    assert not (root / "demo-vault" / "04-synthesis" / "d.md").exists()
 
 
-def test_ingest_is_refused_when_the_engine_reads_another_registry() -> None:
-    """`search` comes from the engine's registry and `ingest` writes through the bridge's. If the
-    two differ, the note lands in a vault the session's reads may never cover."""
-    root, registry = _fixture(manifest=True)
-    (root / "demo-vault" / "04-synthesis").mkdir()
-    _, other = _fixture()
-    with _socket_dir() as d, _engine(d / "s.sock", _cfg(other)):
-        cfg = _bridge(registry, bridge.Remote(d / "s.sock"))
-        out = _tools_call(cfg, "ingest", {"scope": "demo", "content": _NOTE, "filename": "d.md"})
-        assert out["result"]["isError"] is True
-        text = out["result"]["content"][0]["text"]
-        assert str(other.resolve()) in text and "refused" in text, text
+def test_source_path_is_read_by_the_bridge_and_sent_as_content() -> None:
+    """The engine reads with its own file access, which on macOS is its host app's, not the
+    client's. So the bridge reads the file, with the client's, and the engine never sees a path."""
+    _, registry = _fixture()
+    rec = _Recorder()
+    sent: list = []
 
+    def _seen(rid, name, arguments, caller=None):
+        sent.append(arguments)
+        return rec(rid, name, arguments, caller)
 
-def test_ingest_proceeds_when_the_engine_reads_the_same_registry() -> None:
-    root, registry = _fixture(manifest=True)
-    (root / "demo-vault" / "04-synthesis").mkdir()
-    with _socket_dir() as d, _engine(d / "s.sock", _cfg(registry)):
-        cfg = _bridge(registry, bridge.Remote(d / "s.sock"))
-        args = {"scope": "demo", "content": _NOTE, "filename": "d.md"}
-        out = _tools_call(cfg, "ingest", args)
-        assert not out["result"].get("isError"), out
-        assert json.loads(out["result"]["content"][0]["text"])["plan"]["confirm_token"]
+    cfg = _bridge(registry, _seen)
+    src = Path(tempfile.mkdtemp()) / "from-disk.md"
+    src.write_text(_NOTE, encoding="utf-8")
+    _tools_call(cfg, "ingest", {"scope": "demo", "source_path": str(src)})
+    assert sent == [{"scope": "demo", "content": _NOTE, "filename": "from-disk.md"}], sent
+    out = _tools_call(cfg, "ingest", {"scope": "demo", "source_path": str(src.with_suffix(".pdf"))})
+    assert out["result"]["isError"] and "PDF ingestion" in out["result"]["content"][0]["text"]
+    assert len(sent) == 1, "a refused source was forwarded"
 
 
 def test_the_bridge_lists_every_tool_without_reaching_the_server() -> None:
@@ -257,7 +221,7 @@ def test_an_absent_engine_is_a_readable_tool_error() -> None:
     body = resp["result"]
     assert body["isError"] is True
     text = body["content"][0]["text"]
-    assert "Start the engine" in text and "ingest" in text, text
+    assert "Start the engine" in text and "still works" not in text, text
 
 
 def test_a_null_id_refusal_comes_back_under_the_callers_id() -> None:
@@ -401,32 +365,6 @@ def test_the_bridge_process_exits_when_its_client_goes() -> None:
     assert "ingest" in names
 
 
-def test_the_registry_is_asked_again_on_every_write() -> None:
-    """The engine restarts without touching its clients, and can come back on another registry. An
-    agreement remembered from before the restart would wave that write through."""
-    root, registry = _fixture(manifest=True)
-    (root / "demo-vault" / "04-synthesis").mkdir()
-    reported = {"registry": str(registry)}
-
-    def answer(h):
-        text = json.dumps({"scopes": [], "registry": reported["registry"]})
-        out = json.dumps({"jsonrpc": "2.0", "id": 0, "result": {
-            "content": [{"type": "text", "text": text}]}}).encode()
-        h.send_response(200)
-        h.send_header("Content-Type", "application/json")
-        h.send_header("Content-Length", str(len(out)))
-        h.end_headers()
-        h.wfile.write(out)
-
-    httpd, path, _ = _stub(answer)
-    try:
-        cfg = _bridge(registry, bridge.Remote(path))
-        args = {"scope": "demo", "content": _NOTE, "filename": "d.md"}
-        assert not _tools_call(cfg, "ingest", args)["result"].get("isError")
-        reported["registry"] = "/somewhere/else/scopes.toml"
-        assert _tools_call(cfg, "ingest", args)["result"]["isError"] is True
-    finally:
-        httpd.shutdown()
 
 
 def test_a_lone_surrogate_is_forwarded_not_fatal() -> None:
@@ -442,11 +380,8 @@ def test_a_fault_in_the_forward_is_a_tool_fault() -> None:
     """Anything the forward raises comes back as an isError result under the caller's id, the
     same as a fault inside a tool, rather than escaping the dispatcher."""
     class _Broken(_Recorder):
-        def __call__(self, rid, name, arguments):
+        def __call__(self, rid, name, arguments, caller=None):
             raise RuntimeError("forward blew up")
-
-        def registry_disagreement(self, local, *, tool="ingest"):
-            raise RuntimeError("check blew up")
 
     _, registry = _fixture()
     cfg = _bridge(registry, _Broken())
@@ -489,20 +424,24 @@ def test_a_squatter_of_another_uid_is_sent_no_query() -> None:
         httpd.shutdown()
 
 
-def test_a_squatter_cannot_vouch_for_a_registry() -> None:
-    """A squatter that answers `list_scopes` with a DIFFERENT registry would refuse the write if
-    it were believed. It is not even asked: the write goes ahead on this process's own registry,
-    exactly as when Scripta is closed, and the squatter sees nothing."""
-    root, registry = _fixture(manifest=True)
-    (root / "demo-vault" / "04-synthesis").mkdir()
-    httpd, path, seen = _stub(_registry_answer("/somewhere/else/scopes.toml"))
+
+
+def test_a_squatter_of_another_uid_is_sent_no_grant_token() -> None:
+    """The token is the one secret that crosses the socket, so it is checked for hardest: a
+    listener that is not this user's never gets the request, its headers least of all."""
+    _, registry = _fixture()
+    grants.issue("claude-code")
+    seen_headers: list = []
+    httpd, path, seen = _stub(_registry_answer(str(registry)), headers=seen_headers)
     try:
         cfg = _bridge(registry, bridge.Remote(path))
+        cfg.client = "claude-code"
         with _patched(local_socket, "peer_uid", lambda sock: OTHER_UID):
-            out = _tools_call(cfg, "ingest", {"scope": "demo", "content": _NOTE,
-                                              "filename": "d.md"})
-        assert not out["result"].get("isError"), out
-        assert seen == [], f"the squatter was asked {seen}"
+            resp = _tools_call(cfg, "ingest", {"scope": "demo", "content": _NOTE,
+                                               "filename": "d.md"})
+        assert resp["result"]["isError"] is True and "NOT sent" in \
+            resp["result"]["content"][0]["text"], resp
+        assert seen == [] and seen_headers == [], "the squatter was sent the write"
     finally:
         httpd.shutdown()
 

@@ -107,7 +107,7 @@ EXTENDS: dict[str, tuple[tuple[str, str], ...]] = {
 MODULES = ("agent.py", "markdown/yaml_scalar.py", "wire.py", "local_socket.py", "refresh.py",
            "spine.py", "classes.py", "stack.py",
            "retrieve/retriever.py", "refresh_state.py", "render.py", "introspect.py",
-           "freshness.py", "mcp/server.py")
+           "freshness.py", "mcp/server.py", "grants.py")
 
 
 class ExportError(Exception):
@@ -732,6 +732,12 @@ def _export(root: Path) -> dict:
             "lock_suffix": _lock_suffix(m["local_socket.py"]),
         },
         "cli": {"declined_exit": m["refresh.py"].integer("EX_DECLINED")},
+        # What a forwarded write says about who sent it, and the modes a shared engine runs writes
+        # in (`substrate.grants`). The server block's `writes` is one of the modes.
+        "grants": {"client_header": m["grants.py"].string("CLIENT_HEADER"),
+                   "grant_header": m["grants.py"].string("GRANT_HEADER"),
+                   "client_info_header": m["grants.py"].string("CLIENT_INFO_HEADER"),
+                   "writes_modes": m["grants.py"].members("WRITES_MODES")},
         # The note format a writer must produce for this engine to index it, as a range
         # (`spine.NOTES_VERSION`): an attached client writes notes, and this engine indexes them.
         "notes": {"version": spine.integer("NOTES_VERSION"),

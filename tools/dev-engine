@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""Run the engine from a source tree as the shared engine, and point the MCP helper at it.
+
+    dev-engine start [--tree PATH]          sync the tree, then serve it: `serve --writes=granted`
+    dev-engine stop                         stop the engine `start` started
+    dev-engine status                       that engine, the socket's occupant, the helper's mode
+    dev-engine helper dev|app [--tree PATH] switch `~/.local/bin/substrate-mcp`
+
+WHAT IT IS FOR. Testing a build of the engine against the real app, and running a released engine
+before the app that bundles it ships. An app that finds an engine already answering on the socket
+attaches to it instead of spawning its own, so: quit the app, `dev-engine start`, open the app.
+
+`--tree` defaults to this clone, because testing what is checked out is the point. While real work
+depends on the engine, run a worktree pinned to a tag instead, so a branch switch in the clone
+cannot change the code behind it on the next start. Keep it under this tool's own folder, never
+under `~/.substrate/engine`, which `substrate-deploy` replaces wholesale:
+
+    git -C <clone> worktree add ~/.substrate/dev-engine/trees/v0.2.0 v0.2.0
+    dev-engine start --tree ~/.substrate/dev-engine/trees/v0.2.0
+
+RUN IT FROM TERMINAL. The engine reads and writes the vaults with the file access of whatever
+started it. On macOS a Claude Code shell cannot reach an OneDrive folder, and a launchd job has no
+app for macOS to attribute the access to. Started from Terminal, it has Terminal's access and runs
+until stopped, whether or not that Terminal window stays open.
+
+Stdlib only, and nothing from the tree it runs: the tree may not be synced yet.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import difflib
+import http.client
+import json
+import os
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+CLONE = Path(__file__).resolve().parent.parent
+HOME = Path.home()
+STATE = HOME / ".substrate" / "dev-engine"
+PIDFILE = STATE / "serve.pid"
+LOG = STATE / "serve.log"
+SOCKET = HOME / ".substrate" / "run" / "substrate.sock"
+HELPER = HOME / ".local" / "bin" / "substrate-mcp"
+APP_BRIDGE = "/Applications/Scripta.app/Contents/Resources/substrate-engine/bin/substrate-mcp"
+MARKER = "# written by substrate tools/dev-engine:"
+STOP_GRACE = 4.0
+READY_WAIT = 60.0
+
+# The helper as it was before this tool existed. It is recognised, so the first switch needs no
+# hand edit; any other helper is shown as a diff and left alone.
+ORIGINAL_HELPER = """#!/usr/bin/env bash
+# substrate MCP over stdio, bridged to the ONE engine Scripta runs (--connect), so every client shares
+# it instead of spawning its own. Needs Scripta open. The old per-client dev shim is in
+# substrate-mcp.dev-shim.bak beside this file.
+set -euo pipefail
+exec "/Applications/Scripta.app/Contents/Resources/substrate-engine/bin/substrate-mcp" \\
+  --connect "$HOME/Library/Application Support/Scripta/engine/substrate.sock" "$@"
+"""
+
+APP_WARNING = (
+    "note: in `app` mode the bridge is the app's bundled one. An app that bundles engine v0.1.x "
+    "(Scripta 0.3.5) writes notes in that bridge's own process, with no grant check; the gated "
+    "write is `dev` mode, or an app that bundles v0.2.0 or later.")
+
+
+def die(message: str, code: int = 1) -> None:
+    print(f"dev-engine: {message}", file=sys.stderr)
+    raise SystemExit(code)
+
+
+# --------------------------------------------------------------------------- the socket
+
+class _UnixConnection(http.client.HTTPConnection):
+    def __init__(self, path: Path, timeout: float) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self._path = path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        try:
+            sock.connect(str(self._path))
+        except BaseException:
+            sock.close()
+            raise
+        self.sock = sock
+
+
+def occupant_pid(path: Path) -> int | None:
+    """The pid listening on `path`, from the kernel (macOS LOCAL_PEERPID), or None when nothing
+    answers or the platform cannot say."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(2)
+    try:
+        sock.connect(str(path))
+        if sys.platform == "darwin":
+            return struct.unpack("i", sock.getsockopt(0, 0x002, 4))[0]
+        if hasattr(socket, "SO_PEERCRED"):
+            return struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED,
+                                                       struct.calcsize("3i")))[0]
+        return None
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
+def server_block(path: Path, timeout: float = 10) -> dict | None:
+    """The `server` block of `list_scopes` from whatever answers on `path`, or None."""
+    frame = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": "list_scopes", "arguments": {}}}).encode()
+    conn = _UnixConnection(path, timeout)
+    try:
+        conn.request("POST", "/", body=frame, headers={"Content-Type": "application/json",
+                                                        "Substrate-Wire": "1"})
+        payload = json.loads(conn.getresponse().read())
+        return json.loads(payload["result"]["content"][0]["text"])["server"]
+    except (OSError, http.client.HTTPException, ValueError, KeyError, IndexError, TypeError):
+        return None
+    finally:
+        conn.close()
+
+
+def command_of(pid: int) -> str | None:
+    out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True)
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
+# --------------------------------------------------------------------------- start / stop
+
+def _tree(raw: str | None) -> Path:
+    tree = Path(raw).expanduser().resolve() if raw else CLONE
+    if not (tree / "substrate" / "mcp" / "server.py").is_file():
+        die(f"{tree} is not a substrate engine tree")
+    return tree
+
+
+def _recorded() -> dict | None:
+    try:
+        return json.loads(PIDFILE.read_text())
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        die(f"cannot read {PIDFILE}: {e}")
+    return None
+
+
+def _ours(record: dict) -> bool:
+    """Whether the pid in `record` is still the process `start` started: alive, and running the
+    command line it recorded. A pid the system has since reused is never signalled."""
+    command = command_of(int(record["pid"]))
+    return command is not None and record["command"] in command
+
+
+def cmd_start(args: argparse.Namespace) -> int:
+    if os.environ.get("SUBSTRATE_REGISTRY"):
+        die("SUBSTRATE_REGISTRY is set in this shell. An app attaches only to an engine on its "
+            "own registry, the default one; unset it and run this again.")
+    if os.environ.get("CLAUDECODE"):
+        print("dev-engine: warning: this looks like a Claude Code shell. The engine gets this "
+              "shell's file access, which on macOS may not reach your vaults; start it from "
+              "Terminal.", file=sys.stderr)
+    tree = _tree(args.tree)
+    record = _recorded()
+    if record is not None and _ours(record):
+        die(f"the engine it started is still running (pid {record['pid']}, {record['tree']}); "
+            f"`dev-engine stop` first")
+    pid = occupant_pid(SOCKET)
+    if pid is not None or server_block(SOCKET, timeout=3) is not None:
+        who = command_of(pid) if pid else None
+        die(f"something already answers on {SOCKET}"
+            + (f": pid {pid}, {who}" if who else "")
+            + ". If it is the app's own engine, quit the app first; it attaches to this one when "
+              "it opens again.")
+
+    # IN THE FOREGROUND, and its status checked: a sync killed half way leaves an environment the
+    # next build trips over, so a failed one stops here rather than serving it.
+    print(f"dev-engine: uv sync --frozen --project {tree}", file=sys.stderr)
+    if subprocess.run(["uv", "sync", "--frozen", "--project", str(tree)]).returncode != 0:
+        die("`uv sync` failed; nothing was started")
+    python = tree / ".venv" / "bin" / "python"
+    if not python.is_file():
+        die(f"{python} is missing after the sync")
+
+    STATE.mkdir(mode=0o700, parents=True, exist_ok=True)
+    argv = [str(python), "-m", "substrate.cli", "serve", "--writes=granted"]
+    command = " ".join(argv)
+    env = {**os.environ, "PYTHONPATH": str(tree)}
+    with open(LOG, "ab") as log:
+        os.chmod(LOG, 0o600)
+        log.write(f"\n--- dev-engine start {time.strftime('%Y-%m-%dT%H:%M:%S')} {tree}\n".encode())
+        log.flush()
+        # Its own session, so it has no controlling terminal to lose (what `nohup` is for) and its
+        # own process group, which `stop` signals whole: the refresh pass's children included.
+        proc = subprocess.Popen(argv, cwd=tree, env=env, stdin=subprocess.DEVNULL, stdout=log,
+                                stderr=subprocess.STDOUT, start_new_session=True)
+    PIDFILE.write_text(json.dumps({"pid": proc.pid, "pgid": proc.pid, "command": command,
+                                   "tree": str(tree), "log": str(LOG)}))
+    os.chmod(PIDFILE, 0o600)
+
+    deadline = time.monotonic() + READY_WAIT
+    block = None
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            with contextlib.suppress(OSError):
+                PIDFILE.unlink()
+            tail = LOG.read_text(errors="replace").splitlines()[-15:]
+            die(f"the engine exited ({proc.returncode}) before it answered:\n  "
+                + "\n  ".join(tail))
+        block = server_block(SOCKET, timeout=3)
+        if block is not None:
+            break
+        time.sleep(0.5)
+    if block is None:
+        die(f"the engine (pid {proc.pid}) did not answer within {READY_WAIT:.0f}s; see {LOG}")
+    print(f"dev-engine: serving {tree} as pid {proc.pid}, writes={block.get('writes')}, "
+          f"read_only={block.get('read_only')}; log {LOG}")
+    return 0
+
+
+def cmd_stop(args: argparse.Namespace) -> int:
+    record = _recorded()
+    if record is None:
+        print("dev-engine: no engine of its own is recorded; nothing to stop")
+        return 0
+    if not _ours(record):
+        PIDFILE.unlink()
+        print(f"dev-engine: pid {record['pid']} is no longer the engine it started; nothing was "
+              f"signalled, and the record is removed")
+        return 0
+    pgid = int(record["pgid"])
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(pgid, signal.SIGTERM)
+    deadline = time.monotonic() + STOP_GRACE
+    while time.monotonic() < deadline and _ours(record):
+        time.sleep(0.1)
+    if _ours(record):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pgid, signal.SIGKILL)
+        print(f"dev-engine: pid {record['pid']} did not stop within {STOP_GRACE:.0f}s; killed")
+    else:
+        print(f"dev-engine: stopped pid {record['pid']}")
+    PIDFILE.unlink()
+    return 0
+
+
+# --------------------------------------------------------------------------- the helper
+
+def _helper_text(mode: str, tree: Path | None) -> str:
+    if mode == "app":
+        line = f'exec "{APP_BRIDGE}" --connect "$@"'
+    else:
+        assert tree is not None
+        line = (f'PYTHONPATH="{tree}" exec "{tree}/.venv/bin/python" -m substrate.mcp.server '
+                f'--connect "$@"')
+    return (f"#!/usr/bin/env bash\n{MARKER} mode={mode}\n"
+            f"# substrate MCP over stdio, bridged to the one shared engine (--connect). Switch it\n"
+            f"# with `dev-engine helper dev|app`; a running client keeps the bridge it spawned.\n"
+            f"set -euo pipefail\n{line}\n")
+
+
+def helper_mode(text: str | None) -> str:
+    if text is None:
+        return "absent"
+    if text == ORIGINAL_HELPER:
+        return "app (the original helper)"
+    for line in text.splitlines():
+        if line.startswith(MARKER):
+            return line[len(MARKER):].strip().removeprefix("mode=")
+    return "unrecognised"
+
+
+def cmd_helper(args: argparse.Namespace) -> int:
+    tree = _tree(args.tree) if args.mode == "dev" else None
+    if tree is not None and not (tree / ".venv" / "bin" / "python").is_file():
+        die(f"{tree} has no .venv yet; `dev-engine start --tree {tree}` syncs it")
+    try:
+        current = HELPER.read_text()
+    except FileNotFoundError:
+        current = None
+    new = _helper_text(args.mode, tree)
+    if current is not None and current != ORIGINAL_HELPER and MARKER not in current:
+        sys.stdout.writelines(difflib.unified_diff(
+            current.splitlines(keepends=True), new.splitlines(keepends=True),
+            fromfile=str(HELPER), tofile=f"{HELPER} ({args.mode})"))
+        die(f"{HELPER} is not one this tool wrote, nor the original helper, so it is left as it "
+            f"is. The change it would make is above; make it by hand if it is what you want.")
+    if current == new:
+        print(f"dev-engine: the helper is already in {args.mode} mode")
+    else:
+        HELPER.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(HELPER.parent), prefix=".substrate-mcp-")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(new)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, HELPER)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp)
+            raise
+        print(f"dev-engine: {HELPER} is in {args.mode} mode"
+              + (f", running {tree}" if tree else ""))
+        print("dev-engine: client sessions started from now on use it; running ones keep the "
+              "bridge they spawned")
+    if args.mode == "app":
+        print(f"dev-engine: {APP_WARNING}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    record = _recorded()
+    if record is None:
+        print("own engine: none recorded")
+    else:
+        alive = _ours(record)
+        print(f"own engine: pid {record['pid']} {'running' if alive else 'NOT running'}, "
+              f"{record['tree']}, log {record['log']}")
+    pid = occupant_pid(SOCKET)
+    block = server_block(SOCKET, timeout=5)
+    if pid is None and block is None:
+        print(f"socket: nothing answers on {SOCKET}")
+    else:
+        who = command_of(pid) if pid else None
+        print(f"socket: {SOCKET}, pid {pid}" + (f" ({who})" if who else ""))
+        if block is None:
+            print("  it did not answer `list_scopes`")
+        else:
+            print("  " + ", ".join(f"{k}={block.get(k)!r}" for k in
+                                   ("writes", "read_only", "agent_mode", "refresh_every",
+                                    "notes_version", "notes_min_version")))
+    try:
+        text = HELPER.read_text()
+    except FileNotFoundError:
+        text = None
+    print(f"helper: {HELPER}: {helper_mode(text)}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(prog="dev-engine", description=__doc__.split("\n\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    st = sub.add_parser("start", help="sync a tree and serve it with --writes=granted")
+    st.add_argument("--tree", default=None, help=f"the engine tree (default {CLONE})")
+    st.set_defaults(func=cmd_start)
+    sub.add_parser("stop", help="stop the engine `start` started").set_defaults(func=cmd_stop)
+    sub.add_parser("status", help="what runs, and the helper's mode").set_defaults(func=cmd_status)
+    hp = sub.add_parser("helper", help="point ~/.local/bin/substrate-mcp at a tree, or the app")
+    hp.add_argument("mode", choices=("dev", "app"))
+    hp.add_argument("--tree", default=None, help=f"dev: the engine tree (default {CLONE})")
+    hp.set_defaults(func=cmd_helper)
+    args = ap.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,27 +1,27 @@
-"""`substrate-mcp --connect`: a stdio face on the ONE server Scripta runs, holding no stack.
+"""`substrate-mcp --connect`: a stdio face on the ONE shared engine, holding no stack.
 
 Every stdio client spawns its own server, so N clients meant N engines. Each served whatever
-commit was checked out when it started, and each probed Ollama for itself. Scripta already hosts
-the shared engine (`SubstrateEngine`, `--socket <path> --read-only`). This process is what a stdio
-client spawns instead: the reads go to that engine, and nothing heavier than the stdlib lives here.
+commit was checked out when it started, and each probed Ollama for itself. One shared engine
+serves them all (`substrate serve`, or the app that hosts it). This process is what a stdio client
+spawns instead: every tool call goes to that engine, and nothing heavier than the stdlib lives here.
 
 **The engine is trusted only once it is proven to be this user's** (`local_socket`). It listens
 on a Unix socket in a 0700 directory, and before a byte of a query is written, this side checks
 that directory and the uid of the process on the far end. It used to be 127.0.0.1:8765. Any
-process could bind that while Scripta was closed and be sent every query. It could even answer
-`list_scopes` with a matching registry and wave a write through `registry_disagreement`.
+process could bind that while the engine was down and be sent every query.
 
-**The writes (`ingest`, `amend`) are not forwarded, and that is the design.** The shared socket is read-only because
-every process this user runs can reach it (Doc 3 §3). Forwarding the write would put it back on
-that socket. Instead the write runs HERE, through the same `handle()` and the same PlanBook a stdio
-server uses, so it stays exactly as reachable as it is today: you can only reach it by spawning
-this process. `ingest` needs only the registry and the vault, never the retrieval stack, which is
-why it can run in a process that has no stack.
+**The writes (`ingest`, `amend`) are forwarded too, and the engine decides them.** A write carries
+the client's name (`--client`, else its own `clientInfo.name`) and the grant token from
+`~/.substrate/clients/<client>.token`, read on every write so a rotation reaches a running session.
+An engine started `--writes=granted` runs it only for a client the user granted, and stamps the
+note with that name (`substrate.grants`). With no grant, or no engine, nothing is written: this
+process writes nothing itself, so a write is exactly as reachable as the engine's grants allow,
+whatever host spawned this bridge. `--read-only` here means a write is neither listed nor sent.
 
-Answered locally: `initialize`, `tools/list` and the write tools. A client therefore connects and keeps
-its full tool list even while Scripta is closed. Forwarded: every other `tools/call`. Each one
-opens a fresh connection, because the server closes a connection after it has been idle for a
-while, and an agent's next call can arrive minutes later.
+Answered locally: `initialize` and `tools/list`. A client therefore connects and keeps its full tool
+list even while no engine runs. Forwarded: every `tools/call`. Each one opens a fresh connection,
+because the server closes a connection after it has been idle for a while, and an agent's next
+call can arrive minutes later.
 """
 
 from __future__ import annotations
@@ -32,16 +32,12 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from substrate import local_socket, wire
+from substrate import grants, local_socket, wire
 
 # One forwarded call, end to end. The shared server serializes every tool call on one lock, so this
 # covers waiting behind other clients' calls as well as a wired `search` (HyDE plus a cross-encoder
 # rerank, several seconds alone). It bounds a hung engine, and is not sized for a fast reply.
 TIMEOUT_SECONDS = 300.0
-
-# The registry comparison before a write. Short, because it delays the write, and a busy server is
-# not a reason to hold a note back (see `registry_disagreement`).
-REGISTRY_CHECK_SECONDS = 10.0
 
 
 def _tool_error(rid: Any, text: str) -> dict:
@@ -85,58 +81,26 @@ class Remote:
         return (f"{command}; this client is registered with {endpoint}, not the engine's default "
                 f"{default}, so re-register it with `substrate-mcp --connect` and no path")
 
-    def __call__(self, rid: Any, name: str, arguments: dict) -> dict:
+    def __call__(self, rid: Any, name: str, arguments: dict,
+                 caller: grants.Caller | None = None) -> dict:
+        """`caller` is set for a write: who it is from, sent as headers for the engine's gate. A
+        missing token is sent as no token, and the engine refuses it in its own words."""
         frame = {"jsonrpc": "2.0", "id": rid, "method": "tools/call",
                  "params": {"name": name, "arguments": arguments}}
         # ASCII-escaped: a lone surrogate is legal in a JSON string, and `encode("utf-8")` of the
         # unescaped form raises on it.
         body = json.dumps(frame).encode("ascii")
         try:
-            status, raw = self._post(body)
+            status, raw = self._post(body, headers=_caller_headers(caller))
         except (OSError, http.client.HTTPException) as e:
             return self._unreachable(rid, name, e)
         return self._relay(rid, name, status, raw)
 
-    def registry_disagreement(self, local: Path, *, tool: str = "ingest") -> str | None:
-        """Why a write here would land outside what the reads see, or None.
-
-        One session answers from TWO registries under `--connect`. `ingest` resolves its scope
-        against this process's registry, and every read resolves against the shared server's.
-        A shell that exports SUBSTRATE_REGISTRY, against a Scripta launched from Finder, makes
-        them differ. `search` would then show one vault while `ingest` writes into another, which
-        is the silent-omission shape.
-
-        Unknown is not a disagreement. A closed or busy Scripta is the case `ingest` must still
-        serve, so only a server that ANSWERS with a different registry refuses the write. A
-        listener that is not this user's never gets to answer: `local_socket` refuses it before the
-        question is sent, so it cannot vouch for a registry either. An engine from another release
-        (`wire.WireMismatch`) is unknown too, deliberately: its registry cannot be read, and every
-        read in this session already fails loudly saying so, so no search is silently narrowed.
-
-        Asked on EVERY write, never cached. The engine is restartable without touching its
-        clients, and a restart can come up on another registry.
-        """
-        frame = {"jsonrpc": "2.0", "id": 0, "method": "tools/call",
-                 "params": {"name": "list_scopes", "arguments": {}}}
-        try:
-            _, raw = self._post(json.dumps(frame).encode("utf-8"), REGISTRY_CHECK_SECONDS)
-            text = json.loads(raw)["result"]["content"][0]["text"]
-            theirs = Path(json.loads(text)["registry"]).expanduser().resolve()
-        except (OSError, http.client.HTTPException, ValueError, KeyError, IndexError, TypeError):
-            return None
-        if theirs == local.expanduser().resolve():
-            return None
-        return (f"`{tool}` is refused: this process resolves scopes against {local}, but the "
-                f"shared engine on {self.endpoint} reads {theirs}. Every search in this session "
-                f"comes from the engine, so a note written here would go to a vault those reads "
-                f"may never cover. Start this client with the same registry as the shared engine "
-                f"(unset SUBSTRATE_REGISTRY, or pass --registry {theirs}).")
-
-    def _post(self, body: bytes, timeout: float | None = None) -> tuple[int, bytes]:
+    def _post(self, body: bytes, *, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
         """One POST to this user's engine, whatever the status. A refusal (the 503 at the
         connection ceiling, a guard's 4xx) carries a JSON-RPC body, and that body is the message
         worth relaying."""
-        return local_socket.post(self.path, body, timeout=timeout or self.timeout)
+        return local_socket.post(self.path, body, timeout=self.timeout, headers=headers)
 
     def _unreachable(self, rid: Any, name: str, reason: object) -> dict:
         if isinstance(reason, wire.WireMismatch):
@@ -146,15 +110,14 @@ class Remote:
                 f"`{name}` was NOT sent: the path to the substrate engine's socket, "
                 f"{self.endpoint}, did not pass this user's trust checks ({reason}). Nothing was "
                 f"sent, so no answer can be relayed. Make what that names this user's, or remove "
-                f"it, then start the engine ({self.start_hint}). `ingest` does not need the engine "
-                f"and still works."))
+                f"it, then start the engine ({self.start_hint})."))
         # No socket file is the ordinary state while no engine is running; a refused connection is
         # a crashed engine's leftover. Both mean the same thing to the reader.
         if isinstance(reason, (ConnectionRefusedError, FileNotFoundError)):
             return _tool_error(rid, (
                 f"`{name}` runs in the shared substrate engine, and nothing is listening on "
                 f"{self.endpoint}. Start the engine ({self.start_hint}) and call again. "
-                f"`ingest` does not need it and still works."))
+                f"Nothing was written: the write tools run in the engine too."))
         if isinstance(reason, TimeoutError):
             return _tool_error(rid, (
                 f"the shared substrate engine on {self.endpoint} did not answer `{name}` within "
@@ -169,7 +132,7 @@ class Remote:
         return _tool_error(rid, (
             f"`{name}` was not answered in a format this client reads: {why}. This client and "
             f"the shared engine on {self.endpoint} come from releases that do not share a reply "
-            f"format. `ingest` does not need the engine and still works."))
+            f"format."))
 
     def _relay(self, rid: Any, name: str, status: int, raw: bytes) -> dict:
         try:
@@ -189,3 +152,23 @@ class Remote:
         # its own id. Passing null through would leave the call to hang until the client's timeout.
         payload["id"] = rid
         return payload
+
+
+
+
+def _caller_headers(caller: grants.Caller | None) -> dict[str, str] | None:
+    """The headers a forwarded write carries: who it is from, and its grant token when it has one.
+    A name or info that will not fit a header is left out rather than sent mangled."""
+    if caller is None:
+        return None
+    out: dict[str, str] = {}
+    if caller.client:
+        out[grants.CLIENT_HEADER] = caller.client
+    if caller.token:
+        out[grants.GRANT_HEADER] = caller.token
+    if caller.info:
+        info = json.dumps({k: v for k, v in caller.info.items() if k in ("name", "version")
+                           and isinstance(v, str)}, ensure_ascii=True, separators=(",", ":"))
+        if len(info) <= grants.MAX_HEADER_CHARS and info.isprintable():
+            out[grants.CLIENT_INFO_HEADER] = info
+    return out

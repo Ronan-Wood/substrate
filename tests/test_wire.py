@@ -179,16 +179,24 @@ def _canned(headers: str, body: bytes = b'{"jsonrpc":"2.0","id":1,"result":{}}')
 
 
 def test_the_client_states_its_version() -> None:
-    with _canned(f"{wire.HEADER}: 1\r\n") as (path, seen):
+    with _canned(f"{wire.HEADER}: {wire.VERSION}\r\n") as (path, seen):
         local_socket.post(path, b"{}", timeout=5)
         assert f"\r\n{wire.HEADER}: {wire.VERSION}\r\n".encode() in bytes(seen), bytes(seen)
 
 
 def test_an_engine_that_states_no_version_is_read_as_version_one() -> None:
-    """Every engine before the header existed."""
-    with _canned("") as (path, _):
+    """Every engine before the header existed: read by a wire-1 client, and refused by a newer one
+    as the older release it is."""
+    with mock.patch.object(wire, "VERSION", 1), _canned("") as (path, _):
         status, _ = local_socket.post(path, b"{}", timeout=5)
         assert status == 200
+    with _canned("") as (path, _):
+        try:
+            local_socket.post(path, b"{}", timeout=5)
+        except wire.WireMismatch as e:
+            assert "speaks substrate wire 1" in str(e), e
+        else:
+            raise AssertionError("a wire-2 client read a reply stating no version")
 
 
 def test_a_reply_in_a_version_the_client_does_not_read_is_refused_before_decoding() -> None:
@@ -234,26 +242,20 @@ def test_the_bridge_says_the_two_releases_do_not_share_a_format() -> None:
         reply = bridge.Remote(path)(3, "search", {"scope": "demo", "query": "x"})
     assert reply["id"] == 3 and reply["result"]["isError"] is True
     text = reply["result"]["content"][0]["text"]
-    assert "speaks substrate wire 2" in text and "ingest" in text, text
+    assert "speaks substrate wire 2" in text and "still works" not in text, text
 
 
 def test_the_engines_refusal_of_this_client_reads_the_same_as_an_unread_reply() -> None:
     """The same fact from the other side: an engine that will not serve this client's version."""
     refusal = json.dumps(wire.refusal({"id": 1}, "this engine speaks substrate wire 2 and the "
                                                  "client speaks 1")).encode()
-    with _canned(f"{wire.HEADER}: 1\r\n", body=refusal) as (path, _):
+    with _canned(f"{wire.HEADER}: {wire.VERSION}\r\n", body=refusal) as (path, _):
         reply = bridge.Remote(path)(5, "search", {"scope": "demo", "query": "x"})
     assert reply["id"] == 5 and reply["result"]["isError"] is True, reply
     text = reply["result"]["content"][0]["text"]
     assert "speaks substrate wire 2" in text and "do not share a reply format" in text, text
 
 
-def test_an_engine_of_another_release_does_not_block_a_local_write() -> None:
-    """Deliberate: its registry cannot be read, so it is unknown, and unknown is not a
-    disagreement (`Remote.registry_disagreement`). Every read in that session already fails
-    loudly, so no search is silently narrowed."""
-    with _canned(f"{wire.HEADER}: 2\r\n") as (path, _):
-        assert bridge.Remote(path).registry_disagreement(Path("/tmp/any.toml")) is None
 
 
 def test_wire_declared_reads_only_a_plain_positive_integer() -> None:

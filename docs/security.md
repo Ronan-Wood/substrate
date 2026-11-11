@@ -5,7 +5,7 @@ can read what, and where any of it can go. In short:
 
 - the engine opens network connections only to loopback;
 - over stdio and the Unix socket, only your user can reach it;
-- the shared transports can't write unless you say so.
+- the shared transports can't write unless you say so, and then only for a client you granted.
 
 To report a vulnerability, follow [`SECURITY.md`](../SECURITY.md). This page describes the design.
 It isn't a disclosure channel.
@@ -17,6 +17,7 @@ It isn't a disclosure channel.
 | **you**, the user who runs the engine | everything: your vaults, the registry, the index |
 | **a process running as you** | the same. A same-user attacker is out of scope (`SECURITY.md`) |
 | **an MCP client you launch over stdio** | the tools that server exposes, write tools included unless `--read-only` |
+| **an MCP client on the shared engine** | the read tools; the write tools only once you grant it by name (`substrate grant`) |
 | **another local user** | nothing over stdio or the Unix socket. Over `--http`, the same reads your own clients get, including a guarded vault while its guard is satisfied. In agent mode, the snapshots you publish |
 | **the network** | nothing. The engine connects only to loopback and listens on nothing beyond it |
 | **a document being ingested** | nothing. PDFs, images, archives and HTML are untrusted input |
@@ -39,14 +40,43 @@ What the model server on loopback does with a request is up to that server, so u
 | transport | how to start it | who can reach it | writes |
 |---|---|---|---|
 | **stdio** | `substrate-mcp` (`python -m substrate.mcp.server`) | the client that launched it | allowed unless `--read-only` |
-| **Unix socket** | `substrate serve`, or `substrate-mcp --socket` | your uid only | refused unless `--no-read-only` |
+| **Unix socket** | `substrate serve`, or `substrate-mcp --socket` | your uid only | refused unless `--writes=granted` (a granted client) or `--no-read-only` (any caller) |
 | **loopback HTTP** | `substrate-mcp --http` (`127.0.0.1:8765`) | any local process, run by any user | refused unless `--no-read-only` |
-| **stdio bridge** | `substrate-mcp --connect` | the client that launched it | allowed unless `--read-only`, and run in the bridge's own process |
+| **stdio bridge** | `substrate-mcp --connect` | the client that launched it | forwarded to the socket and decided there; never run in the bridge. `--read-only` neither lists nor sends them |
 
 The write tools are `ingest` and `amend`. `ingest` adds a note from the text it is given, or from
 any file the server process can read (`source_path`), and `amend` overwrites an existing note. A
 read-only server leaves both out of its tool list. A client allowed to write can therefore read any
 of your files into a vault, so give write access only to a client you trust that far.
+
+## Grants: which clients write through the shared engine
+
+An engine started with `--writes=granted` (`substrate serve --writes=granted`) runs a write only
+for a client you granted by name ([`substrate/grants.py`](../substrate/grants.py)):
+
+- `substrate grant <client> [--scopes a,b]` issues a token to `~/.substrate/clients/<client>.token`
+  (`0600`, in a `0700` folder) and records only its hash in `~/.substrate/grants.toml`. Run it
+  again to rotate the token. `substrate revoke <client>` removes both, and `substrate grants`
+  lists who may write and who asked.
+- The `--connect` bridge sends its client name (`--client`, else the client's own
+  `clientInfo.name`) and the token, read on every write. The engine checks them on every write, so
+  a revoke stops a running session at its next one. A refused write is recorded in
+  `~/.substrate/grant-requests.jsonl`, at most once a client an hour, for a host to show you.
+- The engine stamps each granted write in the note's frontmatter: `written_by: <client>` on a new
+  note, `amended_by: <client>` on an edit. A note that claims a different value is refused. A plan
+  is bound to the client's grant token, so another client can't redeem it, and neither can this
+  one after a rotation, or after a revoke and a new grant.
+- Every other rule still applies after the grant: the vault guard, the project vault only, the
+  writable folders, and `amend`'s refusals. Each write is still a plan, then a commit.
+
+**What a grant does:** a client writes only after you said yes to that client name, every write it
+makes carries that name, and a revoke stops it at its next write.
+
+**What it doesn't do:** any process running as you can read a token file, claim a client's name
+(`clientInfo.name` is whatever the client says it is), or write vault files directly if it can
+reach them. A grant is consent and accounting for well-behaved clients, the same honesty as the
+socket's uid check. It is not a wall against hostile code running as your user, which
+[`SECURITY.md`](../SECURITY.md) puts out of scope.
 
 **The Unix socket** is the default shared transport, because loopback TCP authenticates nobody
 ([`substrate/local_socket.py`](../substrate/local_socket.py)):
@@ -57,8 +87,9 @@ of your files into a vault, so give write access only to a client you trust that
   user, before it writes a byte.
 - The server reads each caller's uid the same way and drops any caller that isn't your user.
 
-There is no token. A secret sent upstream would go to whoever is listening, and a squatter is
-exactly who that would be.
+No token proves the engine. A secret sent upstream would go to whoever is listening, and a
+squatter is exactly who that would be, so the bridge sends a client's grant token only after the
+listener's uid has passed.
 
 **Loopback HTTP** is reachable by every user on the machine, which the server says when it starts.
 Prefer the socket. It refuses to bind anything but an IPv4 loopback address, and checks every

@@ -413,7 +413,7 @@ def test_serve_runs_on_its_own_and_refreshes() -> None:
             except OSError:
                 time.sleep(0.2)
         assert payload is not None, "serve never answered"
-        assert payload["server"] == {"read_only": True, "agent_mode": False,
+        assert payload["server"] == {"read_only": True, "writes": "none", "agent_mode": False,
                                      "refresh_every": 3600.0, "refresh_requests": True,
                                      **_RANGES}, payload["server"]
         while _recorded(registry) is None and time.monotonic() < deadline:
@@ -457,7 +457,7 @@ def test_version_reports_the_schema_and_wire_this_build_speaks() -> None:
     # `serverInfo.version`, to the bare `"params":{}` Scripta sends, which reads it back as
     # `0.<schema>.0`.
     reply = server._dispatch({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-                             None)
+                             server.Config(None, None))
     assert reply["result"]["serverInfo"]["version"] == f"0.{schema.SCHEMA_VERSION}.0", reply
 
 
@@ -490,8 +490,8 @@ def test_a_plain_server_says_it_refreshes_nothing() -> None:
     reply = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                            "params": {"name": "list_scopes", "arguments": {}}}, cfg)
     payload = json.loads(reply["result"]["content"][0]["text"])
-    assert payload["server"] == {"read_only": True, "agent_mode": False, "refresh_every": None,
-                                 "refresh_requests": False, **_RANGES}
+    assert payload["server"] == {"read_only": True, "writes": "none", "agent_mode": False,
+                                 "refresh_every": None, "refresh_requests": False, **_RANGES}
 
 
 def test_a_refreshing_server_is_refused_off_the_socket_before_any_model_is_probed() -> None:
