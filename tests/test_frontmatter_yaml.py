@@ -202,7 +202,7 @@ def test_check_leaves_yaml_that_reads_alike_and_notes_with_no_frontmatter(tmp_pa
 @pytest.mark.parametrize("block, why", [
     ("title: x\n  nested: \"a: \"b\"\"", "is not YAML"),  # not a top-level `nested`
     ("- item: \"a: \"b\"\"", "not a first-column"),
-    ("title: \"a: \"b\"\"\n---x: y", "closing"),
+    ("title: \"a: \"b\"\"\n---x: y", "not a first-column"),  # inside the block, not its end
 ])
 def test_fix_refuses_what_is_not_the_engine_dialect(tmp_path, block, why):
     v = _vault(tmp_path, {"n.md": f"---\n{block}\n---\nbody\n"})

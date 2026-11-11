@@ -843,8 +843,9 @@ def _check_amend(*, target: Path, rel: str, base: bytes, content: bytes,
         elif pinnable:
             if not id_lines:
                 # ABSENT, so `_pin` declined: the spine gate passed, so frontmatter keys exist, and
-                # the only remaining reason is a first line starting with `---`, which a line above
-                # it would turn into a closing fence. "Leave it out" would loop; say what works.
+                # a line above the first one would change how the block reads (above a `---`
+                # document marker, the block would end or YAML would read two documents). "Leave
+                # it out" would loop; say what works.
                 raise _pin_declined(before["doc_id"], content)
             if after_fid != before["doc_id"]:
                 state = "empty" if not after_fid else repr(after_fid)
@@ -934,11 +935,11 @@ def _pin_declined(doc_id: str, content: bytes) -> NoteError:
     shown, _, _ = _visible(_first_key_line(content))
     first = repr(shown if len(shown) <= 80 else shown[:80] + "…")
     return NoteError(
-        f"amend could not write `doc_id: {doc_id}` into this frontmatter: its first key line, "
-        f"{first}, starts with `---`, so a line placed above it would close the block. Write "
-        f"`doc_id: {doc_id}` yourself, on its own line directly below the {first} line (the "
-        f"first key, not the opening `---` fence), where a new line cannot move where the block "
-        f"ends."
+        f"amend could not write `doc_id: {doc_id}` into this frontmatter: a line placed above "
+        f"its first line, {first}, would change how the block reads (above a `---` document "
+        f"marker, the block would end or YAML would read two documents). Write `doc_id: {doc_id}` "
+        f"yourself, on its own line directly below the {first} line (the first line inside the "
+        f"block, not the opening `---` fence), where a new line changes nothing else."
     )
 
 
@@ -971,9 +972,8 @@ def _pin(content: bytes, doc_id: str) -> bytes:
 
     Left unchanged: content the caller already gave a `doc_id:` line (the identity gate judges it);
     content with no frontmatter, an empty block, or a block the reader takes for a thematic break
-    (the spine gate refuses it); and content whose first frontmatter line starts with `---`, which
-    a line inserted above it would turn into a closing fence (`_pin_declined` says where to write
-    the line instead). A value the reader cannot read is left out of the pairs compared below, and
+    (the spine gate refuses it); and content whose block reads differently with a line above its
+    first line, a `---` document marker (`_pin_declined` says where to write the line instead). A value the reader cannot read is left out of the pairs compared below, and
     the strict gate refuses it when the engine reads that key. The note's own line ending is used,
     so a CRLF or CR note does not gain one LF line.
     """
@@ -1011,7 +1011,7 @@ def _prepend_key(content: bytes, key: str, value: str, *,
     (`yaml_scalar.encode`) unless `written` gives its text. The note's own line ending is used, so
     a CRLF or CR note does not gain one LF line."""
     from substrate.markdown import yaml_scalar
-    from substrate.markdown.reader import normalized_text
+    from substrate.markdown.reader import _FRONTMATTER, normalized_text
 
     opener, pairs = _opener(content), _pairs(content)
     if opener is None or not pairs:
@@ -1019,15 +1019,14 @@ def _prepend_key(content: bytes, key: str, value: str, *,
     eol = opener[3:]
     # At the block's own key indent, a comment's aside: a line left of it would make every key
     # below it indented.
-    text = normalized_text(content)
-    block = text.split("\n---", 1)[0].split("\n")[1:]
+    block = _FRONTMATTER.match(normalized_text(content)).group(1).split("\n")
     first = next((ln for ln in block if ln.strip() and not ln.lstrip().startswith("#")), "")
     indent = first[:len(first) - len(first.lstrip(" \t"))]
     line = f"{indent}{key}: {yaml_scalar.encode(value) if written is None else written}".encode()
     out = opener + line + eol + content[len(opener):]
-    # The reader must see EXACTLY the old keys plus this one. A first line that itself starts
-    # with `---` (`---title: x` is a legal key) becomes a closing fence once a line sits above it,
-    # and the block would end at the new line (crosscheck, 2026-11-04). Left unwritten, the gates
+    # The reader must see EXACTLY the old keys plus this one. Above a first line that is a `---`
+    # document marker, the new line ends the block (`---`) or YAML reads two documents (`--- # c`)
+    # (crosscheck, 2026-11-04). Left unwritten, the gates
     # judge the caller's own content instead of a block this function broke.
     if _pairs(out) != [(key, value)] + pairs:
         return None
@@ -1073,7 +1072,7 @@ def _unstampable(author: str, key: str) -> NoteError:
         f"this note is written for the client `{author}`, so the engine records it in the "
         f"frontmatter as `{key}: {author}`, and it cannot put that line into this note's "
         f"frontmatter block without changing how the rest of it reads. Give the note an ordinary "
-        f"`---` frontmatter block whose first key line does not start with `---`."
+        f"`---` frontmatter block whose first line inside it is not a `---` document marker."
     )
 
 
