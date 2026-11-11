@@ -44,10 +44,14 @@ What the model server on loopback does with a request is up to that server, so u
 | **loopback HTTP** | `substrate-mcp --http` (`127.0.0.1:8765`) | any local process, run by any user | refused unless `--no-read-only` |
 | **stdio bridge** | `substrate-mcp --connect` | the client that launched it | forwarded to the socket and decided there; never run in the bridge. `--read-only` neither lists nor sends them |
 
-The write tools are `ingest` and `amend`. `ingest` adds a note from the text it is given, or from
-any file the server process can read (`source_path`), and `amend` overwrites an existing note. A
-read-only server leaves both out of its tool list. A client allowed to write can therefore read any
-of your files into a vault, so give write access only to a client you trust that far.
+The write tools are `ingest` and `amend`. `ingest` adds a note from the text it is given, and
+`amend` overwrites an existing note. `ingest` reads no file, and `amend` reads only the note at
+`path`, inside the project vault's writable folders. Both refuse `source_path`, and the
+`--connect` bridge refuses it for `ingest` before forwarding, because a model's arguments can be
+steered by content it just read. A read-only server leaves both out of its tool list. A client
+that can read a file itself can still pass that file's text as a note, so give write access only
+to a client whose own file access you trust that far. `substrate ingest <file>` on the command
+line still takes a path, since there you typed it.
 
 ## Grants: which clients write through the shared engine
 

@@ -45,7 +45,7 @@ VERSION = 1
 # The record holds one small row per scope — seven of them, ~150 bytes each. Bounded anyway,
 # because this file is parsed on the QUERY path: every search pays for it, and an unbounded
 # `json.loads` there turns one bad file into a per-request cost. Same discipline the MCP server
-# applies to a caller-named source, applied to our own state for the same reason.
+# applies to a note `expand` reads, applied to our own state for the same reason.
 MAX_STATE_BYTES = 1 << 20
 
 # A recorded timestamp is echoed into the result envelope, which the MCP tool description tells a

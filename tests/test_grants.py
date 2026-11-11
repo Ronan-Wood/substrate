@@ -277,13 +277,13 @@ def test_a_second_clients_amend_replaces_the_stamp_in_place() -> None:
 
 
 def test_the_engine_reads_no_source_path_for_a_granted_client() -> None:
-    """Its file access is its host's, not the client's; the bridge sends the file as content."""
+    """Its file access is its host's, not the client's. No caller names a file to `ingest`."""
     root, registry = _fixture(manifest=True)
     (root / "demo-vault" / "04-synthesis").mkdir()
     src = root / "outside.md"
     src.write_text(_NOTE, encoding="utf-8")
     author = grants.Decision(True, client="claude-code", generation=1, token_sha256="0" * 64)
-    with pytest.raises(server.ToolError, match="does not read `source_path`"):
+    with pytest.raises(server.ToolError, match="pass its text as `content`"):
         server._tool_ingest({"scope": "demo", "source_path": str(src)},
                             _engine_cfg(registry), author)
 

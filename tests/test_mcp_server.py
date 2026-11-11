@@ -1274,45 +1274,75 @@ def test_k_is_strict_about_its_type() -> None:
     assert _call("search", {"scope": "demo", "query": "composition", "k": 1}, registry)
 
 
-def test_ingest_refuses_a_non_regular_source() -> None:
-    """A caller-named path is untrusted input. The bound is enforced on the DESCRIPTOR that gets
-    read, not by a prior stat — the check-then-act version could be swapped for a FIFO in
-    between, and open() on one blocks forever."""
-    root, registry = _fixture(manifest=True)
-    (root / "demo-vault" / "04-synthesis").mkdir()
-    fifo = root / "pipe.md"
+def test_the_bounded_note_read_refuses_a_non_regular_file() -> None:
+    """`expand` reads the indexed note through `_read_source`. The bound is enforced on the
+    DESCRIPTOR that gets read, not by a prior stat: the check-then-act version could be swapped for
+    a FIFO in between, and open() on one blocks forever."""
+    fifo = _tmpdir() / "pipe.md"
     os.mkfifo(fifo)
-    body = _call_raw("ingest", {"scope": "demo", "source_path": str(fifo)}, registry)
-    assert body.get("isError")
-    assert "regular file" in body["content"][0]["text"]
+    try:
+        server._read_source(fifo)
+    except server.ToolError as e:
+        assert "regular file" in str(e) and "source_path" not in str(e)
+    else:
+        raise AssertionError("a FIFO was read")
 
 
-def test_ingest_refuses_an_oversized_source() -> None:
-    root, registry = _fixture(manifest=True)
-    (root / "demo-vault" / "04-synthesis").mkdir()
-    big = root / "big.md"
+def test_the_bounded_note_read_refuses_an_oversized_file() -> None:
+    big = _tmpdir() / "big.md"
     big.write_bytes(b"x" * (server.MAX_SOURCE_BYTES + 1))
-    body = _call_raw("ingest", {"scope": "demo", "source_path": str(big)}, registry)
-    assert body.get("isError")
-    assert "limit" in body["content"][0]["text"]
+    try:
+        server._read_source(big)
+    except server.ToolError as e:
+        assert "limit" in str(e) and "source_path" not in str(e)
+    else:
+        raise AssertionError("an oversized file was read whole")
 
 
-def test_ingest_refuses_a_pdf_with_the_reason() -> None:
-    """Not a capability gap silently hidden: reviewed markdown is what the engine reads, and the
-    reference tier is not auto-written (Doc 2 §2, §3b)."""
+def test_ingest_refuses_source_path_and_reads_nothing() -> None:
+    """A model names a path, and its arguments can be steered by content it just read: a granted
+    client could have the engine copy `~/.ssh/<key>` into a vault that syncs (CodeQL
+    py/path-injection on #8). `ingest` takes the note as `content` only, and refuses
+    `source_path` before it looks at the scope, the file or anything else."""
     root, registry = _fixture(manifest=True)
-    pdf = root / "paper.pdf"
-    pdf.write_bytes(b"%PDF-1.4\n")
-    body = _call_raw("ingest", {"scope": "demo", "source_path": str(pdf)}, registry)
-    assert body.get("isError")
-    assert "substrate ingest --pdf" in body["content"][0]["text"]
+    folder = root / "demo-vault" / "04-synthesis"
+    folder.mkdir()
+    secret = root / "outside.md"
+    secret.write_text(_NOTE + "\nPRIVATE LINE\n", encoding="utf-8")
+    for args in ({"scope": "demo", "source_path": str(secret)},
+                 {"scope": "demo", "source_path": str(secret), "filename": "d.md"},
+                 {"scope": "demo", "source_path": str(secret), "content": _NOTE,
+                  "filename": "d.md"},
+                 {"scope": "demo", "source_path": ""},
+                 {"scope": "nope", "source_path": str(secret)},
+                 {"scope": "demo", "source_path": str(root / "paper.pdf")}):
+        body = _call_raw("ingest", args, registry)
+        assert body.get("isError"), args
+        text = body["content"][0]["text"]
+        assert "pass its text as `content`" in text, (args, text)
+        assert "PRIVATE LINE" not in text and "confirm_token" not in text, args
+    assert not any(folder.iterdir())
 
 
-def test_ingest_refuses_both_or_neither_source() -> None:
+def test_ingest_requires_content_and_filename() -> None:
     _, registry = _fixture(manifest=True)
-    assert _call_raw("ingest", {"scope": "demo"}, registry).get("isError")
-    assert _call_raw("ingest", {"scope": "demo", "content": _NOTE, "filename": "d.md",
-                                "source_path": "/tmp/x.md"}, registry).get("isError")
+    for args in ({"scope": "demo"}, {"scope": "demo", "filename": "d.md"},
+                 {"scope": "demo", "content": "", "filename": "d.md"},
+                 {"scope": "demo", "content": ["not", "text"], "filename": "d.md"},
+                 {"scope": "demo", "content": "bad \ud800 surrogate", "filename": "d.md"},
+                 {"scope": "demo", "content": _NOTE}):
+        body = _call_raw("ingest", args, registry)
+        assert body.get("isError"), args
+        assert body["content"][0]["text"].startswith("ToolError"), (args, body)
+
+
+def test_the_ingest_schema_offers_no_path() -> None:
+    """A model reads the tool list to learn what to send, so the schema is the first refusal."""
+    tool = next(t for t in server.TOOLS if t["name"] == "ingest")
+    schema = tool["inputSchema"]
+    assert "source_path" not in schema["properties"]
+    assert set(schema["required"]) == {"scope", "content", "filename"}
+    assert "source_path" not in json.dumps(tool)
 
 
 def test_ingest_refuses_a_stale_token() -> None:

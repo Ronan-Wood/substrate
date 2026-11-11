@@ -122,8 +122,9 @@ to search scope `demo` for "engine boundary".
 Without `--read-only`, the client also gets `ingest` and `amend`, which write notes. They run in the
 engine, and only if the engine was started with `--writes=granted` and you granted that client:
 `uv run python -m substrate.cli grant <client>`, where `<client>` is the name the refusal gives.
-`ingest` can read any file the engine can, so grant only a client you trust that far, and never
-point a writing client at the demo vault, which is tracked in git.
+`ingest` takes the note's text, never a path, but a client can pass the text of any file it can
+read itself, so grant only a client you trust that far, and never point a writing client at the
+demo vault, which is tracked in git.
 [`docs/security.md`](docs/security.md) covers what each transport exposes.
 
 [`docs/demo-vault.md`](docs/demo-vault.md) walks through what the demo vaults contain and which
