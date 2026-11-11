@@ -119,11 +119,12 @@ Then add the server to your client's MCP configuration. Most clients take this s
 The client gets the read tools `search`, `expand`, `documents`, `list_scopes` and `status`. Ask it
 to search scope `demo` for "engine boundary".
 
-Without `--read-only`, the client also gets `ingest` and `amend`, which write notes. They run in
-the `substrate-mcp` process the client launches, not on the socket, and `ingest` can read any file
-that process can. Leave `--read-only` in until you trust the client that far, and never point a
-writing client at the demo vault, which is tracked in git. [`docs/security.md`](docs/security.md)
-covers what each transport exposes.
+Without `--read-only`, the client also gets `ingest` and `amend`, which write notes. They run in the
+engine, and only if the engine was started with `--writes=granted` and you granted that client:
+`uv run python -m substrate.cli grant <client>`, where `<client>` is the name the refusal gives.
+`ingest` can read any file the engine can, so grant only a client you trust that far, and never
+point a writing client at the demo vault, which is tracked in git.
+[`docs/security.md`](docs/security.md) covers what each transport exposes.
 
 [`docs/demo-vault.md`](docs/demo-vault.md) walks through what the demo vaults contain and which
 queries show inheritance, supersession and the withheld classes.

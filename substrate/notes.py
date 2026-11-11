@@ -76,10 +76,20 @@ class Plan:
     warnings: list[str]
 
 
-def _binding(target: Path, content: bytes) -> str:
+def _bound(h, bound_to: str) -> None:
+    """A plan made for a GRANTED client is bound to that client's grant token as well
+    (`grants.Decision.binding`), so another client cannot redeem it, and neither can this one after
+    its grant is rotated, or revoked and granted again. Empty for a write no grant authorised,
+    which binds as it always has."""
+    if bound_to:
+        h.update(b"grant\0" + bound_to.encode("utf-8") + b"\0")
+
+
+def _binding(target: Path, content: bytes, bound_to: str = "") -> str:
     """What a plan is FOR: this exact content, at this exact path. Binding both is the point — a
     binding over content alone would let a redeemed plan write it somewhere else."""
     h = hashlib.sha256()
+    _bound(h, bound_to)
     h.update(str(target).encode("utf-8"))
     h.update(b"\0")
     h.update(content)
@@ -219,7 +229,7 @@ def _validate(
 
 def plan(
     *, project_vault: Path, content: bytes, filename: str, folder: str = DEFAULT_FOLDER,
-    book: PlanBook,
+    book: PlanBook, author: str | None = None, bound_to: str = "",
 ) -> Plan:
     """Validate a note against the real ingestion gates without writing anything, and issue a
     single-use token for it.
@@ -227,15 +237,22 @@ def plan(
     Raises NoteError with the gate's own message when the note would be refused — the same
     refusal compose would give, delivered before the vault is touched rather than after. A refused
     plan issues no token, so nothing that failed a gate is ever redeemable.
+
+    `author` is a granted client's name: the note is stamped `written_by: <author>` BEFORE it is
+    validated and bound (`stamp_new`), so what is planned is what is written. `bound_to` binds the
+    plan to that client's grant.
     """
+    if author is not None:
+        content = stamp_new(content, author)
     target, fields = _validate(project_vault=project_vault, content=content, filename=filename,
                                folder=folder)
-    return Plan(target=target, confirm_token=book.issue(_binding(target, content)), **fields)
+    return Plan(target=target, confirm_token=book.issue(_binding(target, content, bound_to)),
+                **fields)
 
 
 def commit(
     *, project_vault: Path, content: bytes, filename: str, folder: str = DEFAULT_FOLDER,
-    confirm_token: str, book: PlanBook,
+    confirm_token: str, book: PlanBook, author: str | None = None, bound_to: str = "",
 ) -> Path:
     """Write the note, but only for a token this process issued for exactly these bytes and path.
 
@@ -245,9 +262,11 @@ def commit(
     someone to read — which re-planning alone cannot establish, since the caller supplies both of
     its inputs.
     """
+    if author is not None:
+        content = stamp_new(content, author)
     target, _fields = _validate(project_vault=project_vault, content=content, filename=filename,
                                 folder=folder)
-    if not book.redeem(confirm_token, _binding(target, content)):
+    if not book.redeem(confirm_token, _binding(target, content, bound_to)):
         raise NoteError(
             "confirm_token was not issued by this server for this note and destination, or has "
             "already been used. Call again without a token to get a current plan, confirm it with "
@@ -331,11 +350,12 @@ class AmendPlan:
     pinned_doc_id: str | None
 
 
-def _amend_binding(target: Path, base_sha256: str, content: bytes) -> str:
+def _amend_binding(target: Path, base_sha256: str, content: bytes, bound_to: str = "") -> str:
     """What an amend plan is FOR: replacing exactly the bytes whose checksum is `base_sha256`, at
     exactly this path, with exactly this content. Prefixed so no add binding can equal it."""
     h = hashlib.sha256()
     h.update(b"amend\0")
+    _bound(h, bound_to)
     h.update(str(target).encode("utf-8"))
     h.update(b"\0")
     h.update(base_sha256.encode("ascii"))
@@ -687,7 +707,8 @@ def _render_diff(base: bytes, content: bytes, rel: str) -> tuple[str, dict, int]
 
 
 def _check_amend(*, target: Path, rel: str, base: bytes, content: bytes,
-                 issued: Callable[[bytes], bool] | None = None) -> tuple[dict, bytes]:
+                 issued: Callable[[bytes], bool] | None = None,
+                 author: str | None = None) -> tuple[dict, bytes]:
     """Every gate an amend must pass, against the current bytes `base`. Issues NOTHING.
 
     Returns (the plan's fields, the bytes to WRITE): `content` with a `doc_id:` line added when the
@@ -749,6 +770,14 @@ def _check_amend(*, target: Path, rel: str, base: bytes, content: bytes,
             if with_pin != content:
                 _require_within_caps(with_pin, "the amended note with its pinned doc_id line")
             content = with_pin
+        # A GRANTED client's amend is stamped `amended_by` (`stamp_amend`), before the token is
+        # checked and the diff taken, so both cover the stamp. Not a note sent back unchanged: the
+        # stamp alone is no edit, and "nothing to amend" below says so.
+        if author is not None and content != base:
+            stamped = stamp_amend(content, base, author)
+            if stamped != content:
+                _require_within_caps(stamped, "the amended note with its amended_by line")
+            content = stamped
         if issued is not None and not issued(content):
             raise _not_issued()
         # ONE `doc_id:` line at most. The reader keeps the last of several, so a decoy line above
@@ -948,36 +977,224 @@ def _pin(content: bytes, doc_id: str) -> bytes:
     the strict gate refuses it when the engine reads that key. The note's own line ending is used,
     so a CRLF or CR note does not gain one LF line.
     """
-    from substrate.markdown.reader import frontmatter_pairs, normalized_text
-
-    for opener in (b"---\r\n", b"---\n", b"---\r"):
-        if content.startswith(opener):
-            break
-    else:
-        return content
-    try:
-        text = normalized_text(content)
-    except UnicodeDecodeError:
-        return content
     # Only an ABSENT line is written in. A `doc_id:` line the caller sent — usable, empty or
     # ill-shaped — is theirs, and the identity gate judges it rather than this rewriting it.
-    pairs = frontmatter_pairs(text)
+    pairs = _pairs(content)
     if not pairs or any(k == "doc_id" for k, _ in pairs):
         return content
+    # Written as it is, unquoted, as the pin always has been: a declarable id is plain text.
+    return _prepend_key(content, "doc_id", doc_id, written=doc_id) or content
+
+
+def _pairs(content: bytes) -> list[tuple[str, str]] | None:
+    """The frontmatter's (key, value) pairs as the reader reads them, or None (no block, not
+    UTF-8)."""
+    from substrate.markdown.reader import frontmatter_pairs, normalized_text
+
+    try:
+        return frontmatter_pairs(normalized_text(content))
+    except UnicodeDecodeError:
+        return None
+
+
+def _opener(content: bytes) -> bytes | None:
+    for opener in (b"---\r\n", b"---\n", b"---\r"):
+        if content.startswith(opener):
+            return opener
+    return None
+
+
+def _prepend_key(content: bytes, key: str, value: str, *,
+                 written: str | None = None) -> bytes | None:
+    """`content` with `key: value` as its first frontmatter line, or None when it cannot be put
+    there and leave every other key reading as it did. The value is written as a YAML scalar
+    (`yaml_scalar.encode`) unless `written` gives its text. The note's own line ending is used, so
+    a CRLF or CR note does not gain one LF line."""
+    from substrate.markdown import yaml_scalar
+    from substrate.markdown.reader import normalized_text
+
+    opener, pairs = _opener(content), _pairs(content)
+    if opener is None or not pairs:
+        return None
     eol = opener[3:]
     # At the block's own key indent, a comment's aside: a line left of it would make every key
     # below it indented.
+    text = normalized_text(content)
     block = text.split("\n---", 1)[0].split("\n")[1:]
     first = next((ln for ln in block if ln.strip() and not ln.lstrip().startswith("#")), "")
-    indent = first[:len(first) - len(first.lstrip(" \t"))].encode()
-    pinned = opener + indent + b"doc_id: " + doc_id.encode("ascii") + eol + content[len(opener):]
+    indent = first[:len(first) - len(first.lstrip(" \t"))]
+    line = f"{indent}{key}: {yaml_scalar.encode(value) if written is None else written}".encode()
+    out = opener + line + eol + content[len(opener):]
     # The reader must see EXACTLY the old keys plus this one. A first line that itself starts
     # with `---` (`---title: x` is a legal key) becomes a closing fence once a line sits above it,
-    # and the block would end at the pin (crosscheck, 2026-11-04). Unpinned, the spine gate
-    # judges the caller's own content instead of a block this function broke.
-    if frontmatter_pairs(normalized_text(pinned)) != [("doc_id", doc_id)] + pairs:
+    # and the block would end at the new line (crosscheck, 2026-11-04). Left unwritten, the gates
+    # judge the caller's own content instead of a block this function broke.
+    if _pairs(out) != [(key, value)] + pairs:
+        return None
+    return out
+
+
+def _replace_key(content: bytes, key: str, value: str) -> bytes | None:
+    """`content` with its one `key:` frontmatter line rewritten to `key: value`, keeping its indent
+    and line ending, or None when no single line can be rewritten so that only that key's value
+    changes."""
+    from substrate.markdown import yaml_scalar
+
+    pairs = _pairs(content)
+    if not pairs or sum(1 for k, _ in pairs if k == key) != 1:
+        return None
+    expected = [(k, value if k == key else v) for k, v in pairs]
+    lines = content.splitlines(keepends=True)
+    for i, raw in enumerate(lines[1:], start=1):
+        text = raw.decode("utf-8", "replace")
+        body = text.rstrip("\r\n")
+        if body.partition(":")[0].strip() != key or ":" not in body:
+            continue
+        indent = body[:len(body) - len(body.lstrip(" \t"))]
+        line = f"{indent}{key}: {yaml_scalar.encode(value)}".encode() + raw[len(body.encode()):]
+        written = b"".join([*lines[:i], line, *lines[i + 1:]])
+        if _pairs(written) == expected:
+            return written
+    return None
+
+
+# The frontmatter keys the ENGINE writes for a granted client's write. A note that declares one
+# with any other value is refused: a client cannot pass its writes off as the user's, or as
+# another client's.
+STAMP_KEYS = ("written_by", "amended_by")
+
+
+def _values(pairs: list[tuple[str, str]] | None, key: str) -> list[str]:
+    return [v for k, v in pairs or () if k == key]
+
+
+def _unstampable(author: str, key: str) -> NoteError:
+    return NoteError(
+        f"this note is written for the client `{author}`, so the engine records it in the "
+        f"frontmatter as `{key}: {author}`, and it cannot put that line into this note's "
+        f"frontmatter block without changing how the rest of it reads. Give the note an ordinary "
+        f"`---` frontmatter block whose first key line does not start with `---`."
+    )
+
+
+def _stamp_key_spellings(content: bytes) -> list[tuple[str, str]]:
+    """(the key as written, the stamp key it stands for) for every frontmatter key that some reader
+    takes for a stamp key but the engine's reader does not read as exactly that key.
+
+    Read three ways, because the readers differ: each line's text before its colon (a flat block,
+    which the engine reads by line and where a quoted key keeps its quotes); YAML's own keys
+    (`BaseLoader`, as the reader reads a block that is not flat); and the engine's pairs. A key is
+    a stamp key once its quotes and case are taken away, which is how YAML, Obsidian and Dataview
+    can read it, and it is a spelling the engine must refuse unless it is written exactly as the
+    engine writes it."""
+    import yaml
+
+    from substrate.markdown.reader import _FRONTMATTER, frontmatter_pairs, normalized_text
+
+    try:
+        text = normalized_text(content)
+    except UnicodeDecodeError:
+        return []
+    m = _FRONTMATTER.match(text)
+    if not m:
+        return []
+    block = m.group(1)
+    seen = [line.partition(":")[0].strip() for line in block.splitlines() if ":" in line]
+    engine = [k for k, _ in frontmatter_pairs(text) or ()]
+    try:
+        root = yaml.compose(block, Loader=yaml.BaseLoader)
+    except Exception:  # noqa: BLE001 — not YAML: the line view above still sees every key
+        root = None
+    from_yaml = ([k.value for k, _ in root.value if isinstance(k, yaml.ScalarNode)]
+                 if isinstance(root, yaml.MappingNode) else [])
+
+    def stamp(key: str) -> str | None:
+        bare = key.strip().strip("'\"").strip().casefold()
+        return bare if bare in STAMP_KEYS else None
+
+    out: list[tuple[str, str]] = []
+    for key in [*seen, *from_yaml, *engine]:
+        meant = stamp(key)
+        if meant is None or (key, meant) in out:
+            continue
+        if key != meant or (key in from_yaml and key not in engine):
+            out.append((key, meant))
+    return out
+
+
+def _refuse_stamp_spellings(content: bytes, author: str) -> None:
+    spelled = _stamp_key_spellings(content)
+    if spelled:
+        key, meant = spelled[0]
+        raise NoteError(
+            f"the frontmatter spells a key {key!r}, which YAML, Obsidian and Dataview can read as "
+            f"`{meant}`, a key the engine writes itself for the client `{author}`. Leave that "
+            f"line out; the engine records who wrote and amended the note.")
+
+
+def stamp_new(content: bytes, author: str) -> bytes:
+    """`ingest` content for a granted client, with `written_by: <author>` in its frontmatter.
+
+    A note may already say `written_by: <author>` (it is then left as it is). Any other
+    `written_by`, two of them, or any `amended_by` (a new note has not been amended) is refused,
+    and so is a stamp key spelled any other way (`_stamp_key_spellings`)."""
+    _refuse_stamp_spellings(content, author)
+    pairs = _pairs(content)
+    if not pairs:
+        raise NoteError(
+            f"a note written for the client `{author}` carries `written_by: {author}` in its "
+            f"frontmatter, and this note has no frontmatter block to carry it. Every note needs one "
+            f"anyway: `status`, `doc_type` and `confidence` are required.")
+    written = _values(pairs, "written_by")
+    if written and written != [author]:
+        raise NoteError(
+            f"the note declares `written_by: {', '.join(written)}`, but it is written for the "
+            f"client `{author}`, and the engine records the client that writes a note. Leave the "
+            f"`written_by:` line out; the engine writes it.")
+    if _values(pairs, "amended_by"):
+        raise NoteError("the note declares `amended_by`, which the engine writes when a note is "
+                        "amended. A new note has not been; leave the line out.")
+    if written:
         return content
-    return pinned
+    stamped = _prepend_key(content, "written_by", author)
+    if stamped is None:
+        raise _unstampable(author, "written_by")
+    return stamped
+
+
+def stamp_amend(content: bytes, base: bytes, author: str) -> bytes:
+    """`amend` content for a granted client, with `amended_by: <author>` in its frontmatter.
+
+    `written_by` must read exactly as it does in the note now: it names who wrote the note, and an
+    edit does not change that. `amended_by` may be left as the note has it, set to `<author>`, or
+    left out; it is then written as `<author>`. Any other value is refused, and so is a stamp key
+    spelled any other way (`_stamp_key_spellings`)."""
+    _refuse_stamp_spellings(content, author)
+    pairs, before = _pairs(content), _pairs(base)
+    if not pairs:
+        # No keys to stamp into, so the spine gate refuses the note in its own words.
+        return content
+    if _values(pairs, "written_by") != _values(before, "written_by"):
+        was = _values(before, "written_by")
+        keep = (f"keep `written_by: {was[0]}` as the note has it" if len(was) == 1
+                else "leave `written_by` out, as the note does" if not was
+                else "keep the `written_by` lines as the note has them")
+        raise NoteError(
+            f"`written_by` records who wrote the note, and an amend does not change it: {keep}. "
+            f"The engine records this edit as `amended_by: {author}`.")
+    amended = _values(pairs, "amended_by")
+    if len(amended) > 1 or (amended and amended[0] not in (author, *_values(before, "amended_by"))):
+        raise NoteError(
+            f"the note declares `amended_by: {', '.join(amended)}`, but this edit is made for the "
+            f"client `{author}`, and the engine records `amended_by: {author}` itself. Leave the "
+            f"line as the note has it, or leave it out.")
+    if amended == [author]:
+        return content
+    stamped = (_replace_key(content, "amended_by", author) if amended
+               else _prepend_key(content, "amended_by", author))
+    if stamped is None:
+        raise _unstampable(author, "amended_by")
+    return stamped
 
 
 def _doc_id_lines(content: bytes) -> int:
@@ -993,14 +1210,17 @@ def _doc_id_lines(content: bytes) -> int:
     return sum(1 for k, _ in frontmatter_pairs(text) or () if k == "doc_id")
 
 
-def plan_amend(*, project_vault: Path, path: str, content: bytes, book: PlanBook) -> AmendPlan:
+def plan_amend(*, project_vault: Path, path: str, content: bytes, book: PlanBook,
+               author: str | None = None, bound_to: str = "") -> AmendPlan:
     """Diff an existing note against `content`, run every gate, and issue a single-use token bound
-    to the current bytes. Writes nothing. A refused plan issues no token."""
+    to the current bytes. Writes nothing. A refused plan issues no token. `author` and `bound_to`
+    as for `plan`; the stamp is `amended_by`."""
     root, parts, target, rel = _resolve_existing(project_vault, path)
     dfd = _open_note_dir(root, parts)
     try:
         base = _read_at(dfd, parts[-1], target)
-        fields, final = _check_amend(target=target, rel=rel, base=base, content=content)
+        fields, final = _check_amend(target=target, rel=rel, base=base, content=content,
+                                     author=author)
         # After the gates, so a note amend would refuse anyway is not answered "make it writable".
         _require_writable_note(dfd, parts[-1], target)
         _require_writable_folder(dfd, target)
@@ -1009,7 +1229,8 @@ def plan_amend(*, project_vault: Path, path: str, content: bytes, book: PlanBook
     # The token is bound to what will be WRITTEN — the pinned note when a pin was added — and the
     # commit re-derives the same pin from the same base, so the two agree byte for byte.
     base_sha = _sha(base)
-    token = book.issue(_amend_binding(target, base_sha, final), note=(str(target), base_sha))
+    token = book.issue(_amend_binding(target, base_sha, final, bound_to),
+                       note=(str(target), base_sha))
     return AmendPlan(target=target, base_sha256=base_sha, new_sha256=_sha(final),
                      confirm_token=token, **fields)
 
@@ -1056,6 +1277,7 @@ def _changed_since_plan(target: Path) -> NoteError:
 
 def commit_amend(
     *, project_vault: Path, path: str, content: bytes, confirm_token: str, book: PlanBook,
+    author: str | None = None, bound_to: str = "",
 ) -> tuple[Path, str, str]:
     """Replace the note, only for a token issued for exactly the bytes these would be written as
     (a pinned doc_id included) over exactly the bytes on disk now. Returns (target,
@@ -1074,7 +1296,8 @@ def commit_amend(
         raise
     try:
         previous, written = _commit_at(dfd, parts[-1], target=target, rel=rel, content=content,
-                                       confirm_token=confirm_token, book=book)
+                                       confirm_token=confirm_token, book=book, author=author,
+                                       bound_to=bound_to)
     except NoteError:
         book.discard(confirm_token)
         raise
@@ -1148,7 +1371,8 @@ def _replace_at(dfd: int, name: str, target: Path, *, content: bytes, stage: str
 
 
 def _commit_at(dfd: int, name: str, *, target: Path, rel: str, content: bytes,
-               confirm_token: str, book: PlanBook) -> tuple[str, str]:
+               confirm_token: str, book: PlanBook, author: str | None = None,
+               bound_to: str = "") -> tuple[str, str]:
     """The write itself, relative to the note's folder descriptor. Returns (replaced sha256,
     written sha256) — the written bytes may carry a pinned doc_id the caller did not send."""
     planned = book.note_of(confirm_token)
@@ -1163,9 +1387,10 @@ def _commit_at(dfd: int, name: str, *, target: Path, rel: str, content: bytes,
         raise _changed_since_plan(target)
 
     _fields, content = _check_amend(
-        target=target, rel=rel, base=base, content=content,
-        issued=lambda final: book.matches(confirm_token, _amend_binding(target, base_sha, final)))
-    if not book.redeem(confirm_token, _amend_binding(target, base_sha, content)):
+        target=target, rel=rel, base=base, content=content, author=author,
+        issued=lambda final: book.matches(confirm_token,
+                                          _amend_binding(target, base_sha, final, bound_to)))
+    if not book.redeem(confirm_token, _amend_binding(target, base_sha, content, bound_to)):
         raise _not_issued()
 
     _replace_at(dfd, name, target, content=content, stage="amend",

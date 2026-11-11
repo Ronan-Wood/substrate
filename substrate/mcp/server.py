@@ -19,17 +19,19 @@ of them share. Both reach `handle()` and neither adds dispatch of its own — a 
 JSON-RPC rules is how the two would drift into answering differently, which is exactly the
 divergence Doc 3a §6 forbids between the MCP and the CLI.
 
-**The transports differ in exactly one thing, and it is a parameter rather than a fork.** HTTP is
-`--read-only` by default, so the write tools (`ingest`, `amend`) are neither advertised nor run
-there (Doc 3 §3): any local process can reach a loopback port, and they write notes into real
-vaults that the next refresh serves back as settled knowledge. Reaching stdio already requires
-spawning this process, so stdio keeps them. That decision travels on `Config`, not in a second dispatch — `handle()` is
-still one function answering one frame the same way whichever socket it arrived on.
+**The transports differ in exactly one thing, and it is a parameter rather than a fork:** what a
+write may do (`Config.writes`, `grants.WRITES_MODES`). The write tools (`ingest`, `amend`) write
+notes into real vaults that the next refresh serves back as settled knowledge, so a shared
+transport runs none of them by default (Doc 3 §3). `--writes=granted` runs them on the socket only
+for a client the user has granted by name (`substrate.grants`), stamped with that name. Reaching
+stdio already requires spawning this process, so stdio keeps them. That decision travels on
+`Config`, and one gate in `_dispatch` applies it — `handle()` is still one function answering one
+frame the same way whichever socket it arrived on.
 
 **`--connect` is how a stdio client reaches the shared server** (`substrate.mcp.bridge`). It is a
-stdio process with no stack: `handle()` runs as usual, except that a read tool's `tools/call` is
-forwarded to the server Scripta hosts on its Unix socket. The write tools still run in-process, so
-the write stays off the socket.
+stdio process with no stack: `handle()` runs as usual, except that every `tools/call` is forwarded
+to the shared engine on its Unix socket. A write is forwarded too, carrying the client's name and
+its grant token, and the engine decides it. Nothing is written in the bridge's process.
 
 **`--socket` is the shared server's real address; `--http` is a developer convenience.** Loopback
 TCP authenticates nobody: every user on the machine can query it, and while it is down any process
@@ -66,7 +68,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from substrate import (
-    agent, guard, introspect, local_socket, net, notes, private, render, scopes, spine, stack, wire,
+    agent, grants, guard, introspect, local_socket, net, notes, private, render, scopes, spine,
+    stack, wire,
 )
 from substrate.mcp import bridge
 from substrate.retrieve.local_models import RERANK_SENDS, cloud_refusal
@@ -358,9 +361,12 @@ TOOLS = [
             "it. Show that plan to the human. Only with their agreement, call again with the same "
             "arguments plus the plan's `confirm_token`.\n\n"
             "Additive only: it will not overwrite an existing note (change one with `amend`), "
-            "it never writes into the shared core tier, and it does not update the "
-            "index — the note is invisible to `search` until the scope is recomposed, which the "
-            "response says explicitly.\n\n"
+            "and it never writes into the shared core tier. It does not index the note itself: "
+            "an engine that refreshes indexes it on its coming pass, and otherwise it is "
+            "invisible to `search` until the scope is recomposed. The response says which.\n\n"
+            "On the shared engine a write runs only for a client the user has granted, and the "
+            "note is stamped `written_by: <client>`. Do not write that line yourself. A refusal "
+            "names the client and how the user grants it.\n\n"
             "REQUIRED FRONTMATTER: `status`, `doc_type`, AND `confidence` — the last is required "
             "HERE even though `compose` accepts notes without it, because a note being written now "
             "has an author present to judge it. Pick the value from evidence, never to fill the "
@@ -408,7 +414,10 @@ TOOLS = [
             "note, a `conversation` or `reference-frozen` note, a read-only note, a change to a "
             f"declared `doc_id`, a note over {notes.AMEND_LINE_CAP:,} lines, and a diff too large "
             "to show whole or too costly to work out. The same frontmatter gates as `ingest` "
-            "apply, `confidence` included. The index is not updated; the response says so.\n\n"
+            "apply, `confidence` included. The index is not updated by the write; the response "
+            "says when it will be. On the shared engine, as for `ingest`, a write runs only for a "
+            "granted client, the note is stamped `amended_by: <client>`, and its `written_by` "
+            "line must stay as it is.\n\n"
             "IDENTITY: a note with no usable `doc_id` (none, an empty one, or a malformed one) has "
             "the id it has now pinned into its frontmatter (`pinned_doc_id`, shown in the diff), so "
             "the edit does not change its identity. Leave the `doc_id:` line out and amend writes "
@@ -748,6 +757,37 @@ def _read_source(src: Path) -> bytes:
         raise ToolError(f"cannot read the given source_path ({type(e).__name__}).") from e
 
 
+_PDF_REFUSAL = (
+    "PDF ingestion does not run through this tool. A reference source becomes "
+    "REVIEWED markdown before the engine reads it (Doc 2 §3b), the extraction takes "
+    "minutes and is non-deterministic across Docling versions, and it lands in the "
+    "shared core tier that nothing auto-writes into (Doc 2 §2). Use `substrate "
+    "ingest --pdf` and place the reviewed output deliberately."
+)
+
+
+def _source_as_content(arguments: object) -> object:
+    """`ingest`'s `source_path`, read HERE, in the `--connect` bridge, and forwarded as `content`.
+
+    The engine would otherwise read the file with ITS file access, which on macOS is the app's
+    that hosts it, not the client's: a granted client could have it read a file the client itself
+    cannot. Read here, the client reads only what it could read anyway, and the engine refuses a
+    `source_path` from a granted client (`_tool_ingest`)."""
+    if not isinstance(arguments, dict) or not arguments.get("source_path"):
+        return arguments
+    if arguments.get("content"):
+        return arguments  # both given: the engine refuses that in its own words
+    src = Path(arguments["source_path"]).expanduser()
+    if src.suffix.lower() == ".pdf":
+        raise ToolError(_PDF_REFUSAL)
+    try:
+        text = _read_source(src).decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise ToolError("source_path is not UTF-8 text, so it cannot be a note.") from e
+    rest = {k: v for k, v in arguments.items() if k != "source_path"}
+    return {**rest, "content": text, "filename": arguments.get("filename") or src.name}
+
+
 def _writable_scope(name: str, cfg: Config):
     """The registry entry for a scope a write may land in, or a ToolError. Shared by every write
     tool so they cannot drift apart on which vaults they will write into."""
@@ -777,11 +817,26 @@ def _compose_hint(entry) -> str:
             + ("" if entry.index_root else " --default-location") + "`")
 
 
-def _tool_ingest(args: dict, cfg: Config) -> dict:
+def _indexed_when(cfg: Config, entry, what: str) -> str:
+    """The `next` text after a write: when the note will be found. An engine with a refresh loop is
+    asked for a pass now, so a written note is indexed without anyone running compose."""
+    if cfg.refresh_loop is None:
+        return f"{what} — {_compose_hint(entry)} before search reflects it."
+    when, wait = cfg.refresh_loop.request()
+    soon = ("now" if when == "now" else "once the pass running now ends" if when == "after_pass"
+            else f"in about {math.ceil(wait)} s")
+    return (f"{what}. This engine indexes it on its coming refresh pass, which starts {soon}; "
+            f"`status` lists it under drift.added until then.")
+
+
+def _tool_ingest(args: dict, cfg: Config, author: grants.Decision = grants.OWNER) -> dict:
     """Two-phase by construction. Without a token this PLANS and writes nothing; with one it
     re-plans and writes only if the token still matches. A client that auto-approves tool calls
     therefore still cannot write on the first call — the token only exists after a plan came
-    back for someone to read."""
+    back for someone to read.
+
+    `author` is the gate's decision (`_dispatch`). For a granted client the note is stamped
+    `written_by` and the plan bound to its grant; the owner's is neither."""
     name = args.get("scope")
     if not name:
         raise ToolError("ingest requires `scope`.")
@@ -798,15 +853,15 @@ def _tool_ingest(args: dict, cfg: Config) -> dict:
     entry = _writable_scope(name, cfg)
 
     if source_path:
+        if author.client is not None:
+            # The engine reads with its own file access, not the client's (`_source_as_content`),
+            # so a granted client's file is read by its bridge and arrives as `content`.
+            raise ToolError("a write from a granted client sends the note as `content`; this "
+                            "engine does not read `source_path` for one. Its `--connect` bridge "
+                            "reads the file and sends it.")
         src = Path(source_path).expanduser()
         if src.suffix.lower() == ".pdf":
-            raise ToolError(
-                "PDF ingestion does not run through this tool. A reference source becomes "
-                "REVIEWED markdown before the engine reads it (Doc 2 §3b), the extraction takes "
-                "minutes and is non-deterministic across Docling versions, and it lands in the "
-                "shared core tier that nothing auto-writes into (Doc 2 §2). Use `substrate "
-                "ingest --pdf` and place the reviewed output deliberately."
-            )
+            raise ToolError(_PDF_REFUSAL)
         content = _read_source(src)
         filename = filename or src.name
     else:
@@ -819,7 +874,8 @@ def _tool_ingest(args: dict, cfg: Config) -> dict:
     try:
         if not token:
             p = notes.plan(project_vault=entry.vault, content=content, filename=filename,
-                           folder=folder, book=cfg.plans)
+                           folder=folder, book=cfg.plans, author=author.client,
+                           bound_to=author.binding)
             return {
                 "written": False,
                 "plan": {
@@ -833,7 +889,8 @@ def _tool_ingest(args: dict, cfg: Config) -> dict:
                          "`confirm_token`."),
             }
         target = notes.commit(project_vault=entry.vault, content=content, filename=filename,
-                              folder=folder, confirm_token=token, book=cfg.plans)
+                              folder=folder, confirm_token=token, book=cfg.plans,
+                              author=author.client, bound_to=author.binding)
     except notes.NoteError as e:
         raise ToolError(str(e)) from e
 
@@ -842,10 +899,9 @@ def _tool_ingest(args: dict, cfg: Config) -> dict:
         "scope": name,
         "target": str(target),
         # The note is in the vault and NOT in the index. Said as a field, and `status` will show
-        # it under drift.added until the scope is recomposed.
+        # it under drift.added until it is indexed.
         "index_stale": True,
-        "next": ("the note is in the vault but not in the index — " + _compose_hint(entry)
-                 + " before it can be found by search."),
+        "next": _indexed_when(cfg, entry, "the note is in the vault but not yet in the index"),
     }
 
 
@@ -855,7 +911,7 @@ def _burn_amend_token(args: object, cfg: Config) -> None:
         cfg.plans.discard(token)
 
 
-def _tool_amend(args: dict, cfg: Config) -> dict:
+def _tool_amend(args: dict, cfg: Config, author: grants.Decision = grants.OWNER) -> dict:
     """`ingest`'s two-phase gate over an existing note. Without a token this diffs and plans and
     writes nothing; with one it re-checks the note's checksum and every gate, then replaces it.
     Any refusal burns the token; `_dispatch` does that, since not every refusal reaches here."""
@@ -889,7 +945,7 @@ def _tool_amend(args: dict, cfg: Config) -> dict:
     try:
         if not token:
             p = notes.plan_amend(project_vault=entry.vault, path=path, content=content,
-                                 book=cfg.plans)
+                                 book=cfg.plans, author=author.client, bound_to=author.binding)
             return {
                 "written": False,
                 "plan": {
@@ -908,7 +964,8 @@ def _tool_amend(args: dict, cfg: Config) -> dict:
             }
         target, previous, written = notes.commit_amend(project_vault=entry.vault, path=path,
                                                        content=content, confirm_token=token,
-                                                       book=cfg.plans)
+                                                       book=cfg.plans, author=author.client,
+                                                       bound_to=author.binding)
     except notes.NoteError as e:
         raise ToolError(str(e)) from e
 
@@ -920,8 +977,8 @@ def _tool_amend(args: dict, cfg: Config) -> dict:
         "sha256": written,
         # The vault holds the new version and the index still holds the old one.
         "index_stale": True,
-        "next": ("the vault holds the amended note and the index still holds the previous "
-                 "version — " + _compose_hint(entry) + " before search reflects the change."),
+        "next": _indexed_when(cfg, entry, "the vault holds the amended note and the index still "
+                                          "holds the previous version"),
     }
 
 
@@ -937,7 +994,10 @@ def _tool_list_scopes(args: dict, cfg: Config) -> dict:
     # engine a host app would have started.
     # And the note formats it indexes (`spine`), which a client attaching to write notes for it
     # checks itself against. Its wire range needs no field: a client outside it is never answered.
-    payload["server"] = {"read_only": cfg.read_only, "agent_mode": cfg.agent is not None,
+    # `read_only` means "runs no write without a grant": true for `none` and `granted`, false only
+    # for `open`. `writes` says which; a client older than it reads `read_only` alone.
+    payload["server"] = {"read_only": cfg.read_only, "writes": cfg.writes,
+                         "agent_mode": cfg.agent is not None,
                          "refresh_every": cfg.refresh_every,
                          "refresh_requests": cfg.refresh_loop is not None,
                          "notes_version": spine.NOTES_VERSION,
@@ -1085,7 +1145,7 @@ class Config:
     """
 
     def __init__(self, registry: str | None, retrieval: stack.Stack | None, *,
-                 read_only: bool = False,
+                 read_only: bool = False, writes: str | None = None,
                  recheck: Callable[[stack.Stack], stack.Stack] | None = None,
                  recheck_after: float = RECHECK_AFTER,
                  clock: Callable[[], float] = time.monotonic,
@@ -1098,14 +1158,23 @@ class Config:
         # `--connect`'s forwarder: (id, tool, arguments) -> a whole response.
         self.remote = remote
         self.plans = notes.PlanBook()
-        # Doc 3 §3. FALSE by default because a bare Config is the stdio one, and reaching stdio
-        # already means spawning this process — the write primitive is no wider than the process
-        # that owns it. `main()` turns this ON for `--http`, where any local process can reach the
-        # port.
-        self.read_only = read_only or agent is not None
+        # Doc 3 §3, as one of `grants.WRITES_MODES`. `open` by default because a bare Config is the
+        # stdio one, and reaching stdio already means spawning this process — the write primitive
+        # is no wider than the process that owns it. `main()` makes a shared transport `none`
+        # unless told otherwise, and `granted` runs a write only for a client the user granted.
+        # `read_only=True` is shorthand for `none`.
+        if writes is None:
+            writes = "none" if read_only else "open"
+        if writes not in grants.WRITES_MODES:
+            raise ValueError(f"writes must be one of {grants.WRITES_MODES}, not {writes!r}")
         # AGENT MODE (`substrate.agent`): serve only these scopes, from published snapshots. It
         # implies read-only and goes further — the write tools are not registered at all.
+        self.writes = "none" if agent is not None else writes
         self.agent = agent
+        # `--connect` only: the name this bridge writes as. `--client` if given, else the client's
+        # own `clientInfo` from `initialize`, which the bridge answers itself.
+        self.client: str | None = None
+        self.client_info: dict | None = None
         # Seconds between this server's own refresh passes (`substrate serve`), or None when it
         # refreshes nothing: a plain `substrate-mcp`, which leaves refreshing to whoever runs it.
         self.refresh_every: float | None = None
@@ -1119,6 +1188,19 @@ class Config:
         self._checked_at = clock()
         self._rechecking: threading.Thread | None = None
         self._lock = threading.Lock()
+
+    @property
+    def read_only(self) -> bool:
+        """Runs no write without a grant: `none` and `granted`. The `server` block reports it, and a
+        client that predates `writes` decides on it alone."""
+        return self.writes != "open"
+
+    def bridge_caller(self) -> grants.Caller:
+        """Who a write forwarded from this bridge says it is from: the client name and its token,
+        read from the token file now, so a rotation reaches a running session."""
+        client = self.client or grants.client_name((self.client_info or {}).get("name"))
+        token = grants.read_token(client) if client else None
+        return grants.Caller(client=client, token=token, info=self.client_info)
 
     @property
     def stack(self) -> stack.Stack:
@@ -1193,12 +1275,13 @@ def _internal_error(msg: object, exc: BaseException) -> dict | None:
 
 
 def _available_tools(cfg: Config) -> list[dict]:
-    """What this server will actually run. A read-only transport does not ADVERTISE the write tools: a
-    model told a tool exists will call it, and Doc 3 §3 takes the write primitive off the socket
-    rather than letting it fail late."""
+    """What this server will actually run. A server that runs no write does not ADVERTISE the write
+    tools: a model told a tool exists will call it, and Doc 3 §3 takes the write primitive off the
+    socket rather than letting it fail late. A `granted` one lists them: a client without a grant
+    is refused with how to get one, which is the consent prompt's start."""
     tools = TOOLS if cfg.refresh_loop is not None else [t for t in TOOLS
                                                         if t["name"] not in LOOP_TOOLS]
-    if not cfg.read_only:
+    if cfg.writes != "none":
         return tools
     return [t for t in tools if t["name"] not in WRITE_TOOLS]
 
@@ -1216,9 +1299,12 @@ def _handler(name: object, cfg: Config):
     return HANDLERS.get(name)
 
 
-def handle(msg: object, cfg: Config) -> dict | list | None:
+def handle(msg: object, cfg: Config, caller: grants.Caller | None = None) -> dict | list | None:
     """One JSON-RPC frame in, one response out — a dict, a batch array, or None for a frame that
     takes no reply.
+
+    `caller` is who a socket request says it is from (`grants.caller_from_headers`). None is the
+    OWNER, a stdio server's own client, so stdio behaves exactly as it always has.
 
     A decoded frame is not necessarily an object: a batch is a legal array and a bare scalar is
     legal JSON. Both used to reach `msg.get(...)` and take the whole session down with an uncaught
@@ -1234,7 +1320,7 @@ def handle(msg: object, cfg: Config) -> dict | list | None:
     if isinstance(msg, list):
         if not msg:
             return _error(None, -32600, "invalid request: empty batch")
-        replies = [r for r in (handle(m, cfg) for m in msg) if r is not None]
+        replies = [r for r in (handle(m, cfg, caller) for m in msg) if r is not None]
         return replies or None
     if not isinstance(msg, dict):
         return _error(None, -32600, "invalid request: expected a JSON-RPC object")
@@ -1243,14 +1329,29 @@ def handle(msg: object, cfg: Config) -> dict | list | None:
     # carrying `"id": null`, which is a response to nothing and which the docstring above says
     # does not happen. Decided once, here, and applied to whatever the dispatch returns.
     notification = "id" not in msg
-    resp = _dispatch(msg, cfg)
+    resp = _dispatch(msg, cfg, caller)
     return None if notification else resp
 
 
-def _dispatch(msg: dict, cfg: Config) -> dict | None:
+def _write_refusal(name: str, decision: grants.Decision) -> dict:
+    """NOT reported as an unknown tool. The tool exists and is reachable another way; saying it
+    does not exist would send a model hunting for another way to write, which is the misleading
+    answer this codebase refuses. It comes back as an isError result for the same reason every
+    other ToolError does — the caller can act on it."""
+    return {"content": [{"type": "text", "text": f"`{name}` was refused: {decision.reason}"}],
+            "isError": True}
+
+
+def _dispatch(msg: dict, cfg: Config, caller: grants.Caller | None = None) -> dict | None:
     method, rid = msg.get("method"), msg.get("id")
 
     if method == "initialize":
+        if cfg.remote is not None:
+            # The bridge answers `initialize` itself, so it is the one that hears who the client
+            # says it is: the name a forwarded write carries, unless `--client` named one.
+            info = (msg.get("params") or {}) if isinstance(msg.get("params"), dict) else {}
+            declared = info.get("clientInfo")
+            cfg.client_info = declared if isinstance(declared, dict) else None
         return _result(rid, {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {}},
@@ -1273,46 +1374,43 @@ def _dispatch(msg: dict, cfg: Config) -> dict | None:
         fn = _handler(name, cfg)
         if fn is None:
             return _error(rid, -32602, f"unknown tool {name!r}")
-        if cfg.read_only and name in WRITE_TOOLS:
-            # NOT reported as an unknown tool. The tool exists and is reachable over stdio; saying
-            # it does not exist would send a model hunting for another way to write, which is the
-            # misleading answer this codebase refuses. It comes back as an isError result for the
-            # same reason every other ToolError does — the caller can act on it.
-            return _result(rid, {"content": [{"type": "text", "text": (
-                f"`{name}` is refused on this transport: the server is read-only (Doc 3 §3). Any "
-                f"local process can reach a loopback port, and `{name}` writes notes into real "
-                f"vaults that the next refresh serves back as settled knowledge — so the write "
-                f"primitive is off the socket entirely rather than guarded by a token. It is "
-                f"still available over stdio: run the server without `--http`, or with "
-                f"`--no-read-only` if the write is genuinely intended."
-            )}], "isError": True})
+        arguments = params.get("arguments") or {}
+        author = grants.OWNER
+        if name in WRITE_TOOLS:
+            # THE ONE WRITE GATE. Every write passes it before anything else about the write is
+            # looked at, and everything that guards writes today runs after it, unchanged: the
+            # guard, containment, the writable folders, amend's refusals. Re-reads the grant store
+            # on every call, so a revoke reaches a running session at its next write. On a bridge
+            # it refuses only under `--read-only`; the engine decides the rest.
+            scope = arguments.get("scope") if isinstance(arguments, dict) else None
+            author = grants.may_write(cfg.writes, caller, scope)
+            if not author.allowed:
+                if name == "amend":
+                    _burn_amend_token(arguments, cfg)
+                return _result(rid, _write_refusal(name, author))
         try:
             # The serialization is INSIDE the try: a payload that will not serialize is a tool
             # fault like any other, and leaving json.dumps outside made it a second way to kill
             # the session rather than an isError the caller could read.
             if cfg.remote is not None:
                 # After every local check, so the bridge refuses an unknown tool or bad params
-                # the same way a stdio server would. The write is never forwarded; see `bridge`.
-                # Inside the try for the same reason: a fault in the forward is a tool fault.
-                if name not in WRITE_TOOLS:
-                    return cfg.remote(rid, name, params.get("arguments") or {})
-                refusal = cfg.remote.registry_disagreement(
-                    scopes.registry_path(cfg.registry), tool=name)
-                if refusal is not None:
-                    if name == "amend":
-                        _burn_amend_token(params.get("arguments"), cfg)
-                    return _result(rid, {"content": [{"type": "text", "text": refusal}],
-                                         "isError": True})
-            text = json.dumps(fn(params.get("arguments") or {}, cfg), indent=2, ensure_ascii=False)
+                # the same way a stdio server would. EVERY tool is forwarded, writes included,
+                # and a write carries who it is from: nothing is written in this process. Inside
+                # the try for the same reason: a fault in the forward is a tool fault.
+                if name == "ingest":
+                    arguments = _source_as_content(arguments)
+                return cfg.remote(rid, name, arguments,
+                                  caller=cfg.bridge_caller() if name in WRITE_TOOLS else None)
+            result = fn(arguments, cfg, author) if name in WRITE_TOOLS else fn(arguments, cfg)
+            text = json.dumps(result, indent=2, ensure_ascii=False)
         except Exception as e:  # noqa: BLE001 — a tool fault must not kill the session
             # isError keeps the failure INSIDE the result, so the model sees the condition and can
             # act on it (compose the scope, search again) rather than a transport error it cannot
             # interpret. An unexpected exception is reported the same way for the same reason.
             #
             # ANY refusal of an amend burns its token, and this is the one place every refusal
-            # passes: a wrong scope, a guard that will not vouch, a malformed argument, and the
-            # bridge's registry check, which raises before `_tool_amend` runs. Burning only inside
-            # `notes.commit_amend` left the token live after those, so a retry — once the guard
+            # passes (the write gate above burns its own): a wrong scope, a guard that will not
+            # vouch, a malformed argument. Burning only inside `notes.commit_amend` left the token live after those, so a retry — once the guard
             # vouched again — wrote against a plan whose refusal had already been shown.
             if name == "amend":
                 _burn_amend_token(params.get("arguments"), cfg)
@@ -1656,9 +1754,12 @@ class _Handler(BaseHTTPRequestHandler):
             if unserved is not None:
                 payload = wire.refusal(msg, unserved)
             else:
+                # Who the request says it is from: read here, beside the wire header, and decided
+                # by the write gate alone (`grants`).
+                caller = grants.caller_from_headers(self.headers.get_all)
                 with self.lock:
                     try:
-                        payload = handle(msg, self.cfg)
+                        payload = handle(msg, self.cfg, caller)
                     except Exception as e:  # noqa: BLE001 — the server outlives any message
                         # `msg`, not None — same reason and the same helper as the stdio loop: an
                         # error carrying `id: null` never resolves the call it answers, so the
@@ -1849,24 +1950,29 @@ def _serve(cfg: Config, make: Callable[[type], Any], where: str, *, reach: str,
     need the real port when they ask for port 0 and a handle to stop it again, and polling for
     either is a race.
 
-    READ-ONLY IS ENFORCED HERE, not upstream. `Config.read_only` defaults False — correct for
+    READ-ONLY IS ENFORCED HERE, not upstream. `Config.writes` defaults to `open` — correct for
     stdio, wrong for a socket — so when the guarantee lived only in `main()`'s argparse, every
     other caller of this function got a loopback server that would run `ingest`. That is not a
     hypothetical: the whole test suite reached it that way. The transport is what the exposure
-    depends on, so the transport is what decides, and opting out is explicit and audible.
+    depends on, so the transport is what decides, and opting out is explicit and audible. A
+    `granted` Config is served as it is: it runs no write without a grant.
     """
-    if not allow_writes and not cfg.read_only:
-        # A VIEW, not a mutation. Setting the flag on the caller's Config would reach through to
+    if not allow_writes and cfg.writes == "open":
+        # A VIEW, not a mutation. Setting the mode on the caller's Config would reach through to
         # anything else holding it — `test_http_and_stdio_answer_the_same_frame` passes one Config
         # to both transports, so mutating here would quietly make the stdio side read-only and turn
         # that equality into a comparison of two identical halves. `copy.copy` is the right depth:
-        # the stack and the PlanBook stay shared, only the flag is ours.
+        # the stack and the PlanBook stay shared, only the mode is ours.
         cfg = copy.copy(cfg)
-        cfg.read_only = True
-    elif allow_writes and not cfg.read_only:
+        cfg.writes = "none"
+    elif cfg.writes == "open":
         print(f"substrate-mcp: writes ENABLED on {where} — `ingest` (adds notes) and `amend` "
               f"(overwrites existing notes) are reachable by {reach}",
               file=sys.stderr)
+    elif cfg.writes == "granted":
+        print(f"substrate-mcp: writes for granted clients only on {where} — `ingest` and `amend` "
+              f"run for a client the user granted (`substrate grants`), and are refused for "
+              f"every other", file=sys.stderr)
     handler = type("_BoundHandler", (_Handler,), {"cfg": cfg, "lock": threading.Lock()})
     try:
         httpd = make(handler)
@@ -1972,9 +2078,12 @@ def _main(argv: list[str] | None, refresh_every: float | None = None) -> int:
                          f"one shared server for every client, restartable without touching them")
     ap.add_argument("--connect", nargs="?", const=local_socket.DEFAULT_SOCKET, default=None,
                     metavar="PATH",
-                    help=f"serve stdio by forwarding reads to the shared --socket server (default "
-                         f"{local_socket.DEFAULT_SOCKET}); the write tools "
-                         f"(`ingest`, `amend`) still run here")
+                    help=f"serve stdio by forwarding every tool to the shared --socket server "
+                         f"(default {local_socket.DEFAULT_SOCKET}); a write runs there, for a "
+                         f"client the user granted")
+    ap.add_argument("--client", default=None, metavar="NAME",
+                    help="--connect: the client name a forwarded write is granted and stamped as "
+                         "(default: the client's own clientInfo.name)")
     ap.add_argument("--socket", nargs="?", const=local_socket.DEFAULT_SOCKET, default=None,
                     metavar="PATH",
                     help=f"serve that shared server on a Unix-domain socket only this user can "
@@ -1983,6 +2092,10 @@ def _main(argv: list[str] | None, refresh_every: float | None = None) -> int:
                     help="refuse the tools that write: `ingest` (adds notes) and `amend` "
                          "(overwrites existing notes). ON by default under --http "
                          "and --socket and off under stdio; state it either way to override that.")
+    ap.add_argument("--writes", choices=grants.WRITES_MODES, default=None,
+                    help="--socket: `granted` runs `ingest` and `amend` only for a client the user "
+                         "granted (`substrate grant`); `none` is --read-only and `open` is "
+                         "--no-read-only. Not with either of those.")
     ap.add_argument("--agent-mode", action="store_true",
                     help="serve ONLY --scopes, read-only, from snapshots in --snapshot-dir; never "
                          "read the registry or a vault (substrate.agent)")
@@ -1994,6 +2107,15 @@ def _main(argv: list[str] | None, refresh_every: float | None = None) -> int:
                     metavar="SECONDS",
                     help="agent mode: older than this, every answer reports the snapshot stale")
     args = ap.parse_args(argv)
+
+    if args.writes is not None and args.read_only is not None:
+        print("substrate-mcp: --writes and --read-only/--no-read-only say the same thing two ways; "
+              "pass one", file=sys.stderr)
+        return 2
+    if args.client is not None and args.connect is None:
+        print("substrate-mcp: --client names the client a --connect bridge writes as",
+              file=sys.stderr)
+        return 2
 
     if args.connect is not None:
         if refresh_every is not None:
@@ -2008,7 +2130,8 @@ def _main(argv: list[str] | None, refresh_every: float | None = None) -> int:
         # mis-written agent config fails at launch instead of quietly widening what it can touch.
         conflict = [f for f, v in (("--registry", args.registry), ("--http", args.http),
                                    ("--socket", args.socket),
-                                   ("--no-read-only", args.read_only is False)) if v]
+                                   ("--no-read-only", args.read_only is False),
+                                   ("--writes", args.writes not in (None, "none"))) if v]
         if conflict:
             print(f"substrate-mcp: --agent-mode refuses {', '.join(conflict)}", file=sys.stderr)
             return 2
@@ -2062,6 +2185,12 @@ def _main(argv: list[str] | None, refresh_every: float | None = None) -> int:
             print(f"substrate-mcp: {e}", file=sys.stderr)
             return 2
 
+    # `granted` only where a request carries headers from a client this user runs: the socket.
+    # Loopback HTTP authenticates nobody, and stdio has one client, which spawned it.
+    if args.writes == "granted" and socket_path is None:
+        print("substrate-mcp: --writes=granted is for the shared --socket server", file=sys.stderr)
+        return 2
+
     # Refused here, at launch, not left to `stack.build`: there the reranker would be dropped as
     # "unreachable", which points at a daemon that is fine. Only the name can be judged before the
     # daemon is asked; a cloud model the listing alone gives away is still never wired.
@@ -2082,15 +2211,18 @@ def _main(argv: list[str] | None, refresh_every: float | None = None) -> int:
     if agent_scopes is None:
         warn_exposed(args.registry)
 
-    # Doc 3 §3: `ingest` comes off the TCP transport. Any local process can reach a loopback port,
-    # and `ingest` writes notes into real Obsidian vaults that the next refresh serves back as
-    # settled knowledge — a persistent false-decision primitive that also syncs to OneDrive.
-    # REMOVING the write is the control; a bearer token is not, which is why there is no token
-    # here. stdio keeps `ingest` because reaching stdio already requires spawning this process.
-    # An explicit --read-only / --no-read-only is honoured on either transport; unstated, the
-    # default follows the transport, because that is the thing the exposure depends on.
+    # Doc 3 §3: the write tools come off a shared transport by default. They write notes into
+    # real Obsidian vaults that the next refresh serves back as settled knowledge — a persistent
+    # false-decision primitive that also syncs to OneDrive. On the socket, `--writes=granted`
+    # puts them back for the clients the user has granted by name, each holding a token
+    # (`substrate.grants`): consent and attribution for well-behaved clients, which every process
+    # of this user can still read past, so it is never the default. stdio keeps the writes
+    # because reaching stdio already requires spawning this process. An explicit mode is honoured
+    # on either transport; unstated, the default follows the transport, because that is the thing
+    # the exposure depends on.
     shared = bind is not None or socket_path is not None
     read_only = shared if args.read_only is None else args.read_only
+    writes = args.writes or ("none" if read_only else "open")
     # The warning for an opted-out socket belongs to `serve_http`, which is now what enforces the
     # default — one copy, so it cannot be printed by a path that does not actually apply the rule.
 
@@ -2098,16 +2230,17 @@ def _main(argv: list[str] | None, refresh_every: float | None = None) -> int:
     # server lexical-only for its whole life because of one bad moment at launch. Agent mode too:
     # its models are the same loopback daemon, and `build_args` carries its in-memory cache, so a
     # re-check writes nothing either.
-    cfg = Config(args.registry, retrieval, read_only=read_only,
+    cfg = Config(args.registry, retrieval, writes=writes,
                  recheck=functools.partial(stack.recheck, **build_args), agent=agent_scopes)
+    allow_writes = cfg.writes != "none"
     if refresh_every is not None:
         cfg.refresh_every = refresh_every
         return _serve_refreshing(cfg, socket_path, args.registry, refresh_every,
-                                 allow_writes=not read_only)
+                                 allow_writes=allow_writes)
     if socket_path is not None:
-        return serve_unix(cfg, socket_path, allow_writes=not read_only)
+        return serve_unix(cfg, socket_path, allow_writes=allow_writes)
     if bind is not None:
-        return serve_http(cfg, *bind, allow_writes=not read_only)
+        return serve_http(cfg, *bind, allow_writes=allow_writes)
     return serve(cfg)
 
 
@@ -2181,9 +2314,10 @@ def _connect(args: Any, ap: Any) -> int:
               "--http or --socket", file=sys.stderr)
         return 2
     # REFUSED, never ignored: agent mode narrows a server to snapshots, and the shared server
-    # answers for every scope, with `ingest` on here.
+    # answers for every scope. `--writes` is the engine's to choose, not a client's.
     agent_flags = [f for f, v in (("--agent-mode", args.agent_mode), ("--scopes", args.scopes),
-                                  ("--snapshot-dir", args.snapshot_dir)) if v]
+                                  ("--snapshot-dir", args.snapshot_dir),
+                                  ("--writes", args.writes)) if v]
     if agent_flags:
         print(f"substrate-mcp: --connect refuses {', '.join(agent_flags)}", file=sys.stderr)
         return 2
@@ -2206,10 +2340,14 @@ def _connect(args: Any, ap: Any) -> int:
     if ignored:
         print(f"substrate-mcp: ignoring {', '.join(ignored)} under --connect: the shared server's "
               f"stack answers every read", file=sys.stderr)
-    # Unstated, `ingest` stays ON, as on any stdio server: only a client that spawned this process
-    # can reach it.
-    read_only = bool(args.read_only)
-    cfg = Config(args.registry, None, read_only=read_only, remote=bridge.Remote(path))
+    if args.client is not None and not grants.CLIENT_NAME.fullmatch(args.client):
+        print(f"substrate-mcp: --client {args.client!r} is not a client name: lowercase letters, "
+              f"digits, `.`, `_` and `-`, at most 64", file=sys.stderr)
+        return 2
+    # `--read-only` means this bridge neither lists nor forwards a write. Unstated, it forwards
+    # them, and the engine decides each one against the user's grants.
+    cfg = Config(args.registry, None, read_only=bool(args.read_only), remote=bridge.Remote(path))
+    cfg.client = args.client
     return serve(cfg)
 
 

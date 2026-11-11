@@ -14,9 +14,12 @@ permissions up, because a permission is only as good as whoever last ran chmod:
     listener that is not this user, BEFORE it writes a byte of the request;
   * the SERVER reads every caller's uid the same way and drops one that is not this user.
 
-There is no token and no key. A secret sent upstream is handed to whoever is listening, and the
-squatter is exactly who that is. A challenge-response would rest on the same same-uid file
-permissions as this does, with a protocol on top that has to be got right.
+No secret proves the ENGINE. A secret sent upstream is handed to whoever is listening, and the
+squatter is exactly who that is, so the client checks the listener's uid before it sends one. The
+one token that does cross is a CLIENT's grant (`substrate.grants`), sent with a write, only after
+that check: it says the user allowed that client to write, and it rests on the same same-uid file
+permissions as this does. It is consent for well-behaved clients, not a wall against code
+running as the user.
 
 Stdlib only: `substrate-mcp --connect` imports this, and it is meant to hold nothing heavier.
 """
@@ -246,7 +249,8 @@ class UnixHTTPConnection(http.client.HTTPConnection):
         self.sock = connect(self.path, self.timeout)
 
 
-def post(path: Path, body: bytes, *, timeout: float) -> tuple[int, bytes]:
+def post(path: Path, body: bytes, *, timeout: float,
+         headers: dict[str, str] | None = None) -> tuple[int, bytes]:
     """One JSON-RPC POST to the engine on `path`: (HTTP status, body), whatever the status.
 
     One connection per call. The server closes an idle connection after 30s, and a client's next
@@ -254,11 +258,13 @@ def post(path: Path, body: bytes, *, timeout: float) -> tuple[int, bytes]:
     them) or HTTPException.
 
     The request states this client's wire version, and the reply's is checked before its body is
-    handed to anything that decodes it (`substrate.wire`).
+    handed to anything that decodes it (`substrate.wire`). `headers` are sent besides those two:
+    a forwarded write's caller (`substrate.grants`).
     """
     conn = UnixHTTPConnection(path, timeout=timeout)
     try:
-        conn.request("POST", "/", body=body, headers={"Content-Type": "application/json",
+        conn.request("POST", "/", body=body, headers={**(headers or {}),
+                                                      "Content-Type": "application/json",
                                                       wire.HEADER: str(wire.VERSION)})
         resp = conn.getresponse()
         raw = resp.read()

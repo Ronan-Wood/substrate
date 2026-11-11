@@ -15,6 +15,7 @@ This is what the engine states about itself, exported from the code by
 | `wire` | the wire version range the engine serves (`version`, `min_version`), the `Substrate-Wire` header, and the JSON-RPC error code for a mismatch |
 | `socket` | the default socket path (`~/.substrate/run/substrate.sock`) and its lock suffix |
 | `cli` | the exit code a command gives when it declines because another holds the lock (`75`) |
+| `grants` | the headers a forwarded write carries (`Substrate-Client`, `Substrate-Grant`, `Substrate-Client-Info`) and the modes a shared engine runs writes in (`none`, `granted`, `open`), one of which the `server` block reports as `writes` |
 | `notes` | the range of note formats the engine reads |
 | `spine` | the closed vocabularies: `statuses`, `doc_types`, `confidences`, and which statuses are retrieved by default |
 | `classes` | document classes, their chunk policies, and which classes are withheld by default |
@@ -63,6 +64,10 @@ decodes.
 reply stating its own version, so the first bump of `VERSION` refuses every such client, whatever
 `MIN_VERSION` says. Bump it only once those clients are gone. The docstring of `wire.py` is the
 authority for these rules, and this table summarizes it.
+
+**`read_only` was redefined at wire 2** as "runs no write without a grant", true for `writes`
+`none` and `granted`. That changes a meaning, which the table calls breaking, but no wire-1 client
+acts on the engine refusing writes, so `MIN_VERSION` stayed 1.
 
 ## Changing the contract
 

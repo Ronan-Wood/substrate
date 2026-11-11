@@ -833,7 +833,7 @@ def test_an_internal_error_carries_the_id_of_the_frame_that_failed() -> None:
     """
     _, registry = _fixture()
 
-    def _boom(msg: object, cfg: server.Config) -> dict:
+    def _boom(msg: object, cfg: server.Config, caller=None) -> dict:
         raise RuntimeError("handler exploded")
 
     # The dispatcher is replaced rather than fed a frame that happens to break it, because the
@@ -1814,7 +1814,7 @@ def test_http_answers_an_internal_error_with_the_requests_id_too() -> None:
     error path had been copied rather than shared."""
     _, registry = _fixture()
 
-    def _boom(msg: object, cfg: server.Config) -> dict:
+    def _boom(msg: object, cfg: server.Config, caller=None) -> dict:
         raise RuntimeError("handler exploded")
 
     base, stop = _http_server(_cfg(registry))

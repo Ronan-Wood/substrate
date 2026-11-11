@@ -137,12 +137,12 @@ def test_a_changed_wire_version_changes_the_export(tmp_path):
 
 @pytest.mark.parametrize("module, old, new, refusal", [
     # A constant that is not a literal.
-    ("wire.py", "\nVERSION = 1\n", "\nVERSION = int(1)\n", "not an integer literal"),
+    ("wire.py", "\nVERSION = 2\n", "\nVERSION = int(1)\n", "not an integer literal"),
     # Features an engine root may state, built rather than written down.
     ("../tools/engine-manifest.py", 'FEATURES = ("serve", "refresh", "connect-unix")',
      'FEATURES = tuple(["serve", "refresh", "connect-unix"])', "not a set of string literals"),
     # A name bound twice: Python keeps the last, a first-match reader would keep the first.
-    ("wire.py", "\nVERSION = 1\n", "\nVERSION = 1\nVERSION = 2\n", "bound 2 times"),
+    ("wire.py", "\nVERSION = 2\n", "\nVERSION = 2\nVERSION = 2\n", "bound 2 times"),
     # A vocabulary member that is not a string.
     ("spine.py", '"active", "complete", "archived"', '"active", "complete", ARCHIVED',
      "ARCHIVED is bound 0 times"),
@@ -167,7 +167,7 @@ def test_a_changed_wire_version_changes_the_export(tmp_path):
     ("spine.py", '"active", "complete", "archived"', '"active", "complete", 1',
      "holds a member that is not a string literal"),
     # A module-level rebinding, `|=`-style.
-    ("wire.py", "\nVERSION = 1\n", "\nVERSION = 1\nVERSION += 1\n", "bound 2 times"),
+    ("wire.py", "\nVERSION = 2\n", "\nVERSION = 2\nVERSION += 1\n", "bound 2 times"),
     # An arm state rebound in a form the reader does not read.
     ("retrieve/retriever.py", 'reranker = "skipped"', 'reranker += "skipped"',
      "binds reranker in a form"),
@@ -183,10 +183,10 @@ def test_a_changed_wire_version_changes_the_export(tmp_path):
      '    c = result.capability\n    res = make()\n    res["x"] = 1\n',
      "Say which wire object each belongs to"),
     # Rebindings a first-match reader would miss: inside an `if`, by import, from a function.
-    ("wire.py", "\nVERSION = 1\n", "\nVERSION = 1\nif True:\n    VERSION = 2\n", "bound 2 times"),
-    ("wire.py", "\nVERSION = 1\n", "\nVERSION = 1\nfrom os import sep as VERSION\n",
+    ("wire.py", "\nVERSION = 2\n", "\nVERSION = 2\nif True:\n    VERSION = 2\n", "bound 2 times"),
+    ("wire.py", "\nVERSION = 2\n", "\nVERSION = 2\nfrom os import sep as VERSION\n",
      "bound 2 times"),
-    ("wire.py", "\nVERSION = 1\n", "\nVERSION = 1\n\n\ndef _f():\n    global VERSION\n    VERSION = 3\n",
+    ("wire.py", "\nVERSION = 2\n", "\nVERSION = 2\n\n\ndef _f():\n    global VERSION\n    VERSION = 3\n",
      "bound 2 times"),
     # An arm state bound by a `for`.
     ("retrieve/retriever.py", 'reranker = "skipped"', 'for reranker in ("skipped",): pass',
@@ -207,7 +207,7 @@ def test_a_changed_wire_version_changes_the_export(tmp_path):
     ("classes.py", "\nEXCLUDED_CLASSES", '\nPOLICIES["x"] = None\nEXCLUDED_CLASSES',
      "POLICIES is bound 2 times"),
     ("refresh_state.py", "\nOUTCOMES", "\nOUTCOMES.update({})\nOUTCOMES", "OUTCOMES is bound 2 times"),
-    ("wire.py", "\nVERSION = 1\n", "\nVERSION = 1\nfrom os import *\n", "bound 2 times"),
+    ("wire.py", "\nVERSION = 2\n", "\nVERSION = 2\nfrom os import *\n", "bound 2 times"),
     # A bolt target whose base keys come from something the reader cannot see.
     ("introspect.py", 'row["sources"] = None', 'row["sources"] = None; row = make()',
      "neither a dict literal"),

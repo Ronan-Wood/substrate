@@ -2850,6 +2850,22 @@ def main(argv: list[str] | None = None) -> int:
     rev.add_argument("--seed", type=int, default=7)
     rev.set_defaults(func=cmd_review)
 
+    gr = sub.add_parser("grant", help="let an MCP client write notes through the shared engine "
+                                      "(`serve --writes=granted`); again to rotate its token")
+    gr.add_argument("client", help="the client's name, as it introduces itself (e.g. claude-code)")
+    gr.add_argument("--scopes", default=None, metavar="NAME[,NAME…]",
+                    help="only these scopes, or `*` for every one (default: the scopes the "
+                         "client's grant has, or every scope for a new grant)")
+    gr.add_argument("--json", action="store_true")
+    gr.set_defaults(func=cmd_grant)
+    rv = sub.add_parser("revoke", help="stop an MCP client writing, and forget that it asked")
+    rv.add_argument("client")
+    rv.set_defaults(func=cmd_revoke)
+    gs = sub.add_parser("grants", help="the clients that may write, and the ones that asked")
+    gs.add_argument("--json", action="store_true",
+                    help="{granted: [...], requested: [...]}, for a host app")
+    gs.set_defaults(func=cmd_grants)
+
     ver = sub.add_parser("version",
                          help="the index schema and wire this engine build speaks, as JSON")
     ver.set_defaults(func=cmd_version)
@@ -2922,6 +2938,66 @@ def _add_lock_wait(parser: argparse.ArgumentParser) -> None:
                              f"{refresh.EX_DECLINED} having written nothing")
     parser.add_argument("--no-wait", dest="wait", action="store_const", const=0.0,
                         help="decline at once if another holds the lock")
+
+
+def cmd_grant(args: argparse.Namespace) -> int:
+    """Let an MCP client write notes through the shared engine, or rotate its token. The engine
+    reads the store on every write, so this needs no restart (`substrate.grants`)."""
+    from substrate import grants
+
+    names = [s.strip() for s in args.scopes.split(",")] if args.scopes is not None else None
+    try:
+        grant, path = grants.issue(args.client, names)
+    except (grants.GrantError, OSError) as e:
+        print(f"substrate grant: {e}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps({"client": grant.client, "generation": grant.generation,
+                          "scopes": list(grant.scopes), "token_path": str(path)}))
+        return 0
+    what = ("every scope" if grant.scopes == (grants.ALL_SCOPES,)
+            else "scopes " + ", ".join(grant.scopes))
+    print(f"  {grant.client}: may write to {what} (generation {grant.generation})")
+    print(f"  token: {path}")
+    if grant.generation > 1:
+        print("  rotated: the old token, and every plan made with it, no longer writes")
+    return 0
+
+
+def cmd_revoke(args: argparse.Namespace) -> int:
+    """Stop an MCP client writing. A running session is refused at its next write."""
+    from substrate import grants
+
+    try:
+        had = grants.revoke(args.client)
+    except (grants.GrantError, OSError) as e:
+        print(f"substrate revoke: {e}", file=sys.stderr)
+        return 2
+    print(f"  {args.client}: " + ("revoked" if had else "had no grant; its request, if any, is "
+                                                       "cleared"))
+    return 0
+
+
+def cmd_grants(args: argparse.Namespace) -> int:
+    """Which MCP clients may write, and which asked and may not."""
+    from substrate import grants
+
+    try:
+        listing = grants.listing()
+    except (grants.GrantError, OSError) as e:
+        print(f"substrate grants: {e}", file=sys.stderr)
+        return 2
+    if args.json:
+        print(json.dumps(listing, indent=2))
+        return 0
+    print("can write:" if listing["granted"] else "can write: none")
+    for g in listing["granted"]:
+        print(f"  {g['client']}  {', '.join(g['scopes'])}  since {g['issued_at']}")
+    if listing["requested"]:
+        print("asked to write (allow with `substrate grant <client>`):")
+        for r in listing["requested"]:
+            print(f"  {r['client']}  {r['at']}")
+    return 0
 
 
 def cmd_version(args: argparse.Namespace) -> int:

@@ -44,6 +44,43 @@ Every release of the engine, newest first. The format follows
   with a divider whose block YAML reads as a mapping is frontmatter now, as Obsidian shows it. Run
   `substrate frontmatter check` before upgrading to list them.
 
+### Consented writes
+
+- `substrate serve --writes=granted` runs `ingest` and `amend` on the shared socket for an MCP
+  client the user has granted by name, and refuses every other. `substrate grant <client>
+  [--scopes a,b]` issues (or rotates) the client's token, `substrate revoke <client>` withdraws
+  it, and `substrate grants [--json]` lists who may write and who asked. The engine re-reads the
+  grants on every write, so neither needs a restart. See `docs/security.md` for what a grant does
+  and does not protect against.
+- **`substrate-mcp --connect` forwards `ingest` and `amend` to the engine** with the client's name
+  and token, and no longer writes in its own process. With no engine, or no grant, nothing is
+  written. Its check that the bridge and the engine read the same registry is gone with it.
+  A bridge from an older release (wire 1, engine 0.1.x, such as the one Scripta 0.3.5 bundles)
+  still writes in its own process, ungated and unstamped, beside a granted engine, until the
+  client's helper is switched to this release's bridge (`tools/dev-engine helper dev`).
+- A granted write is stamped in the note's frontmatter, `written_by: <client>` on a new note and
+  `amended_by: <client>` on an edit, before it is planned, so the plan's diff and checksum include
+  it. A note declaring another value is refused. A plan is bound to the client's grant token, so
+  a rotation, or a revoke and a new grant, leaves no old plan redeemable.
+- After a write, an engine that refreshes runs a pass for it, and the reply says when the note
+  will be found, instead of telling the reader to compose.
+- `--client NAME` on `--connect` names the client a write is granted and stamped as, where two
+  hosts would otherwise send the same `clientInfo.name`.
+- `tools/dev-engine` runs a source tree as the shared engine (`start`, `stop`, `status`) and
+  switches the `substrate-mcp` helper script MCP clients run between it and the app's bundled
+  bridge (`helper dev|app`).
+
+### Contract
+
+- Wire version 2; the engine serves 1 to 2. New request headers (`Substrate-Client`,
+  `Substrate-Grant`, `Substrate-Client-Info`) and write tools on the socket, which a wire-2 client
+  relies on. `contract.json` gains `grants`.
+- **The `server` block's `read_only` is redefined** as "runs no write without a grant": true for
+  `writes` `none` and `granted`, false only for `open`. The new `writes` key says which. No wire-1
+  client acts on the engine refusing writes, so the range still starts at 1.
+- No index schema change, and no note format change beyond note format 2 above: the stamp is a
+  frontmatter key the reader ignores.
+
 ## 0.1.0
 
 The first release from this repository. The engine was developed inside
