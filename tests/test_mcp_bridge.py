@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from substrate import grants, local_socket, stack, wire  # noqa: E402
 from substrate.mcp import bridge, server  # noqa: E402
 from test_local_socket import OTHER_UID, _engine, _patched, _socket_dir  # noqa: E402
-from test_mcp_server import _NOTE, REPO, _call, _cfg, _fixture  # noqa: E402
+from test_mcp_server import _NOTE, REPO, _call, _cfg, _fixture, _tmpdir  # noqa: E402
 
 
 def _no_engine() -> Path:
@@ -168,9 +168,10 @@ def test_a_write_with_no_engine_is_refused_and_writes_nothing() -> None:
     assert not (root / "demo-vault" / "04-synthesis" / "d.md").exists()
 
 
-def test_source_path_is_read_by_the_bridge_and_sent_as_content() -> None:
-    """The engine reads with its own file access, which on macOS is its host app's, not the
-    client's. So the bridge reads the file, with the client's, and the engine never sees a path."""
+def test_the_bridge_refuses_source_path_and_forwards_nothing() -> None:
+    """It used to read the file and send it as `content`, so a model's path still became a read of
+    any file the client could reach. Refused here too, not only in the engine: an engine from a
+    release that still reads `source_path` would read it with the host app's file access."""
     _, registry = _fixture()
     rec = _Recorder()
     sent: list = []
@@ -180,13 +181,16 @@ def test_source_path_is_read_by_the_bridge_and_sent_as_content() -> None:
         return rec(rid, name, arguments, caller)
 
     cfg = _bridge(registry, _seen)
-    src = Path(tempfile.mkdtemp()) / "from-disk.md"
-    src.write_text(_NOTE, encoding="utf-8")
-    _tools_call(cfg, "ingest", {"scope": "demo", "source_path": str(src)})
-    assert sent == [{"scope": "demo", "content": _NOTE, "filename": "from-disk.md"}], sent
-    out = _tools_call(cfg, "ingest", {"scope": "demo", "source_path": str(src.with_suffix(".pdf"))})
-    assert out["result"]["isError"] and "PDF ingestion" in out["result"]["content"][0]["text"]
-    assert len(sent) == 1, "a refused source was forwarded"
+    src = _tmpdir() / "from-disk.md"
+    src.write_text(_NOTE + "\nPRIVATE LINE\n", encoding="utf-8")
+    for args in ({"scope": "demo", "source_path": str(src)},
+                 {"scope": "demo", "source_path": str(src), "content": _NOTE,
+                  "filename": "d.md"}):
+        out = _tools_call(cfg, "ingest", args)
+        text = out["result"]["content"][0]["text"]
+        assert out["result"]["isError"] and "pass its text as `content`" in text, (args, text)
+        assert "PRIVATE LINE" not in text
+    assert sent == [], "a source_path was forwarded"
 
 
 def test_the_bridge_lists_every_tool_without_reaching_the_server() -> None:

@@ -82,8 +82,21 @@ Every release of the engine, newest first. The format follows
   switches the `substrate-mcp` helper script MCP clients run between it and the app's bundled
   bridge (`helper dev|app`).
 
+### Security
+
+- **The MCP `ingest` tool no longer reads a file by path.** It takes the note as `content`, with a
+  `filename`, both now required, and refuses `source_path` with "read the file yourself and pass
+  its text as `content`". Before, a model could name any file the engine could read, such as an
+  SSH private key, and a plan and a commit copied it into a vault that may sync. The `--connect`
+  bridge refuses it too, so it never forwards one. A client that reads a file itself can still
+  pass its text; that read is the client's, under its own permissions. `substrate ingest <file>`
+  on the command line still takes a path.
+
 ### Contract
 
+- `ingest`'s `source_path` argument is removed, and `content` and `filename` are required, with no
+  wire bump: no socket client sends `source_path`. A wire-1 bridge never forwards a write, a
+  wire-2 bridge sends only `content`, and Scripta calls no write tool over the socket.
 - Wire version 2; the engine serves 1 to 2. New request headers (`Substrate-Client`,
   `Substrate-Grant`, `Substrate-Client-Info`) and write tools on the socket, which a wire-2 client
   relies on. `contract.json` gains `grants`.

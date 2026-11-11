@@ -138,10 +138,10 @@ NOTE_CHAR_CAP = 20_000
 # is the thing the filters block exists to prevent.
 MAX_K = 50
 
-# `source_path` ingest reads a caller-named file before anything else can validate it. Bounded and
-# restricted to regular files so one tool call cannot hand the server a 200MB blob, a FIFO that
-# blocks forever, or /dev/zero. Mirrors the markdown reader's own cap, applied BEFORE the read
-# rather than after it.
+# `expand` reads the note an index row names before anything else can validate it. Bounded and
+# restricted to regular files so a note swapped for a 200MB blob, a FIFO that blocks forever, or
+# /dev/zero cannot stall or flood a call. Mirrors the markdown reader's own cap, applied BEFORE the
+# read rather than after it.
 MAX_SOURCE_BYTES = 8 * 1024 * 1024
 
 
@@ -381,19 +381,16 @@ TOOLS = [
             "properties": {
                 "scope": {"type": "string", "description": "Which scope's project vault to add to."},
                 "content": {"type": "string",
-                            "description": "The note's full markdown, including frontmatter. Use "
-                                           "this OR source_path, not both."},
-                "source_path": {"type": "string",
-                                "description": "Path to an existing .md file to add instead."},
+                            "description": "The note's full markdown, including frontmatter. To "
+                                           "add a file, read it yourself and pass its text here."},
                 "filename": {"type": "string",
-                             "description": "Name in the vault, e.g. 'retrieval-decision.md'. "
-                                            "Required with `content`."},
+                             "description": "Name in the vault, e.g. 'retrieval-decision.md'."},
                 "folder": {"type": "string", "enum": list(notes.WRITABLE_FOLDERS),
                            "description": "Project folder (Doc 2 §4). Defaults to 04-synthesis."},
                 "confirm_token": {"type": "string",
                                   "description": "From a previous plan. Omit on the first call."},
             },
-            "required": ["scope"],
+            "required": ["scope", "content", "filename"],
         },
     },
     {
@@ -737,55 +734,40 @@ def _note_text(store, doc_id: str) -> dict:
 
 
 def _read_source(src: Path) -> bytes:
-    """A caller-named file, bounded by the read ITSELF (`freshness.read_bounded`).
-
-    The caller here is a model, and its arguments can be influenced by content it just read, so
-    "a path" is untrusted input.
+    """The note an index row names, bounded by the read ITSELF (`freshness.read_bounded`).
 
     The failure message is deliberately fixed rather than echoing the OSError, which otherwise
-    answers "does /etc/<x> exist and can you read it" for any path a model cares to name.
+    answers "does /etc/<x> exist and can you read it" for whatever path an index row names.
     """
     from substrate.freshness import FileTooLarge, NotRegularFile, read_bounded
 
     try:
         return read_bounded(src, MAX_SOURCE_BYTES)
     except NotRegularFile as e:
-        raise ToolError("source_path is not a regular file.") from e
+        raise ToolError("the indexed note is not a regular file.") from e
     except FileTooLarge as e:
-        raise ToolError(f"source_path exceeds the {MAX_SOURCE_BYTES}-byte limit for a note.") from e
+        raise ToolError(f"the indexed note exceeds the {MAX_SOURCE_BYTES}-byte limit for a note.") from e
     except OSError as e:
-        raise ToolError(f"cannot read the given source_path ({type(e).__name__}).") from e
+        raise ToolError(f"cannot read the indexed note ({type(e).__name__}).") from e
 
 
-_PDF_REFUSAL = (
-    "PDF ingestion does not run through this tool. A reference source becomes "
-    "REVIEWED markdown before the engine reads it (Doc 2 §3b), the extraction takes "
-    "minutes and is non-deterministic across Docling versions, and it lands in the "
-    "shared core tier that nothing auto-writes into (Doc 2 §2). Use `substrate "
-    "ingest --pdf` and place the reviewed output deliberately."
+_SOURCE_PATH_REFUSAL = (
+    "ingest does not read files: read the file yourself and pass its text as `content`, with a "
+    "`filename`. A PDF is not a note; it becomes reviewed markdown through `substrate ingest "
+    "--pdf` (Doc 2 §3b)."
 )
 
 
-def _source_as_content(arguments: object) -> object:
-    """`ingest`'s `source_path`, read HERE, in the `--connect` bridge, and forwarded as `content`.
+def _refuse_source_path(arguments: object) -> None:
+    """No MCP caller names a file for `ingest` to read. The caller is a model, and its arguments
+    can be steered by content it just read: a granted client could have the engine, which reads
+    with its host app's file access, copy `~/.ssh/<key>` into a vault that syncs. Refused by key,
+    so an empty value or one beside `content` is refused too, not quietly dropped. The bridge
+    refuses as well (`_dispatch`), so it never forwards one to an engine that would read it.
 
-    The engine would otherwise read the file with ITS file access, which on macOS is the app's
-    that hosts it, not the client's: a granted client could have it read a file the client itself
-    cannot. Read here, the client reads only what it could read anyway, and the engine refuses a
-    `source_path` from a granted client (`_tool_ingest`)."""
-    if not isinstance(arguments, dict) or not arguments.get("source_path"):
-        return arguments
-    if arguments.get("content"):
-        return arguments  # both given: the engine refuses that in its own words
-    src = Path(arguments["source_path"]).expanduser()
-    if src.suffix.lower() == ".pdf":
-        raise ToolError(_PDF_REFUSAL)
-    try:
-        text = _read_source(src).decode("utf-8")
-    except UnicodeDecodeError as e:
-        raise ToolError("source_path is not UTF-8 text, so it cannot be a note.") from e
-    rest = {k: v for k, v in arguments.items() if k != "source_path"}
-    return {**rest, "content": text, "filename": arguments.get("filename") or src.name}
+    `substrate ingest <file>` on the command line still reads a path: there the user typed it."""
+    if isinstance(arguments, dict) and "source_path" in arguments:
+        raise ToolError(_SOURCE_PATH_REFUSAL)
 
 
 def _writable_scope(name: str, cfg: Config):
@@ -837,37 +819,22 @@ def _tool_ingest(args: dict, cfg: Config, author: grants.Decision = grants.OWNER
 
     `author` is the gate's decision (`_dispatch`). For a granted client the note is stamped
     `written_by` and the plan bound to its grant; the owner's is neither."""
+    _refuse_source_path(args)
     name = args.get("scope")
     if not name:
         raise ToolError("ingest requires `scope`.")
-
-    source_path = args.get("source_path")
     content_arg = args.get("content")
-    filename = args.get("filename")
-    if bool(source_path) == bool(content_arg):
-        raise ToolError("pass exactly one of `source_path` (an existing file) or `content` "
-                        "(a note to write), not both and not neither.")
-
-    # The scope is resolved BEFORE any file is touched, so a call naming an unknown scope costs
-    # nothing — it previously read the whole source into memory first and then refused.
-    entry = _writable_scope(name, cfg)
-
-    if source_path:
-        if author.client is not None:
-            # The engine reads with its own file access, not the client's (`_source_as_content`),
-            # so a granted client's file is read by its bridge and arrives as `content`.
-            raise ToolError("a write from a granted client sends the note as `content`; this "
-                            "engine does not read `source_path` for one. Its `--connect` bridge "
-                            "reads the file and sends it.")
-        src = Path(source_path).expanduser()
-        if src.suffix.lower() == ".pdf":
-            raise ToolError(_PDF_REFUSAL)
-        content = _read_source(src)
-        filename = filename or src.name
-    else:
+    if not isinstance(content_arg, str) or not content_arg:
+        raise ToolError("ingest requires `content`: the whole note, frontmatter included.")
+    try:
         content = content_arg.encode("utf-8")
-        if not filename:
-            raise ToolError("`content` requires `filename` — the note needs a name in the vault.")
+    except UnicodeEncodeError as e:
+        raise ToolError(f"`content` is not encodable as UTF-8 ({e.reason}).") from e
+
+    entry = _writable_scope(name, cfg)
+    filename = args.get("filename")
+    if not filename:
+        raise ToolError("`content` requires `filename` — the note needs a name in the vault.")
 
     folder = args.get("folder", notes.DEFAULT_FOLDER)
     token = args.get("confirm_token")
@@ -921,10 +888,10 @@ def _tool_amend(args: dict, cfg: Config, author: grants.Decision = grants.OWNER)
     path = args.get("path")
     if not isinstance(path, str) or not path:
         raise ToolError("amend requires `path`: the note to change, relative to the project vault.")
-    # NO `source_path`, unlike `ingest`, and refused rather than ignored. An amend plan returns the
+    # NO `source_path`, as for `ingest`, and refused rather than ignored. An amend plan returns the
     # new note in full, as the diff, so a caller-named source would make every plan a read of any
     # file this process can reach — including notes in a vault the guard withholds — with nothing
-    # written and nobody asked. `ingest`'s plan returns spine fields only.
+    # written and nobody asked.
     if "source_path" in args:
         raise ToolError("amend takes the new note as `content`, not `source_path`: its plan echoes "
                         "the whole note back as a diff, so reading a named file would expose it.")
@@ -1398,7 +1365,7 @@ def _dispatch(msg: dict, cfg: Config, caller: grants.Caller | None = None) -> di
                 # and a write carries who it is from: nothing is written in this process. Inside
                 # the try for the same reason: a fault in the forward is a tool fault.
                 if name == "ingest":
-                    arguments = _source_as_content(arguments)
+                    _refuse_source_path(arguments)
                 return cfg.remote(rid, name, arguments,
                                   caller=cfg.bridge_caller() if name in WRITE_TOOLS else None)
             result = fn(arguments, cfg, author) if name in WRITE_TOOLS else fn(arguments, cfg)
@@ -1528,9 +1495,8 @@ def parse_bind(spec: str) -> tuple[str, int]:
     it failed closed here only because getaddrinfo happened to reject the result, which is an
     accident rather than a guard.
 
-    Binding off-loopback would put the write tools — which WRITE vaults and read caller-named files —
-    on the network, so this fails closed on anything it cannot parse, and the string it validates
-    is the string it returns.
+    Binding off-loopback would put the write tools — which WRITE vaults — on the network, so this
+    fails closed on anything it cannot parse, and the string it validates is the string it returns.
     """
     host, sep, port_s = spec.rpartition(":")
     if not sep or not host:
@@ -1551,8 +1517,8 @@ def parse_bind(spec: str) -> tuple[str, int]:
     if not _host_is_loopback(host):
         raise ValueError(
             f"refusing to bind {spec!r}: not a loopback address. This server exposes `ingest` and "
-            f"`amend`, which write vaults and read caller-named files — off-loopback they are a remote "
-            f"write primitive. Bind a loopback address such as {DEFAULT_HTTP}."
+            f"`amend`, which write vaults — off-loopback they are a remote write primitive. Bind "
+            f"a loopback address such as {DEFAULT_HTTP}."
         )
     if not _is_digits(port_s):
         raise ValueError(f"--http port must be an integer, got {port_s!r}")
