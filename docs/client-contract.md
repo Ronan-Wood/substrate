@@ -69,6 +69,12 @@ authority for these rules, and this table summarizes it.
 `none` and `granted`. That changes a meaning, which the table calls breaking, but no wire-1 client
 acts on the engine refusing writes, so `MIN_VERSION` stayed 1.
 
+**Wire 3 is additive.** Every passage, in `search` and in `expand`, carries `provenance`: what the
+engine's write log says about its note (`state`, with `client`, `op` and `at` for an engine write)
+and whether the note's own `amended_by` / `written_by` line agrees (`stamp`, `stamped_by`). The
+`list_scopes` server block carries `writes_log`. The vocabularies are in the contract's `writes`
+section.
+
 ## Changing the contract
 
 The contract changes **engine first**. The change lands and is released here, and clients follow by

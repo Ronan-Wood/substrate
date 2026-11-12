@@ -30,7 +30,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from substrate import blobs, classes, identity, private, prune, refresh, render, scopes
+from substrate import blobs, classes, identity, private, prune, refresh, render, scopes, writelog
 from substrate.checks import document_checks, partition_check_failures
 from substrate.paths import ModelsFolderError, configure, internal_cache_footprint, models_folder
 
@@ -1638,6 +1638,8 @@ def cmd_query(args: argparse.Namespace) -> int:
                     document_class=args.doc_class, chars=args.chars,
                     unavailable=unavailable, wiring=st.wiring, db=db_path,
                     registry=args.registry,
+                    provenance=writelog.lookup(store.db, [h.doc_id for h in
+                                                          (*result.passages, *result.outlines)]),
                 ), indent=2, ensure_ascii=False))
                 return 0
         # Derived from the SAME function the --json envelope uses, not from a second reading of
@@ -2871,6 +2873,16 @@ def main(argv: list[str] | None = None) -> int:
                     help="{granted: [...], requested: [...]}, for a host app")
     gs.set_defaults(func=cmd_grants)
 
+    wr = sub.add_parser("writes", help="the engine's record of the notes it wrote for granted "
+                                       "clients (`~/.substrate/writes.jsonl`)")
+    wrsub = wr.add_subparsers(dest="writes_cmd", required=True)
+    wch = wrsub.add_parser("check", help="damaged lines, writes a crash left unsettled, and notes "
+                                         "whose written_by / amended_by the log contradicts")
+    wch.add_argument("--scope", default=None, help="only this scope (default: every one)")
+    wch.add_argument("--registry", default=None)
+    wch.add_argument("--json", action="store_true")
+    wch.set_defaults(func=cmd_writes_check)
+
     ver = sub.add_parser("version",
                          help="the index schema and wire this engine build speaks, as JSON")
     ver.set_defaults(func=cmd_version)
@@ -3003,6 +3015,108 @@ def cmd_grants(args: argparse.Namespace) -> int:
         for r in listing["requested"]:
             print(f"  {r['client']}  {r['at']}")
     return 0
+
+
+def cmd_writes_check(args: argparse.Namespace) -> int:
+    """The write log against the vaults (`writelog.decide_unfinished`, whose `Check` holds the
+    exit rule): every damaged line; each write a crash left without `done` or `void`, decided
+    under the log's lock; the stamps the log contradicts, as the engine's reader reads the key,
+    each note once however many scopes inherit it; and counts of the rest.
+
+    Exit 1 only for `Check.needs_attention`: an unsettled write whose note the log cannot decide.
+    Everything else is reported and exits 0. 2 when the log or the registry cannot be read."""
+    from substrate.notes import MAX_NOTE_BYTES
+    from substrate.store.index_store import IndexStore, SchemaMismatch
+
+    try:
+        entries = scopes.load(args.registry)
+    except scopes.ScopeError as e:
+        print(f"substrate writes check: {e}", file=sys.stderr)
+        return 2
+    if args.scope is not None and args.scope not in entries:
+        print(f"substrate writes check: no scope {args.scope!r} is registered", file=sys.stderr)
+        return 2
+    try:
+        check = writelog.decide_unfinished(args.scope)
+    except writelog.WriteLogError as e:
+        print(f"substrate writes check: {e}", file=sys.stderr)
+        return 2
+
+    notes_: dict[str, tuple[str, list[str]]] = {}
+    for name in sorted(entries) if args.scope is None else [args.scope]:
+        db = entries[name].db
+        if not db.exists():
+            check.skipped_scopes.append(name)
+            continue
+        try:
+            with IndexStore(str(db), migrate=False) as store:
+                rows = store.db.execute("SELECT source_path FROM documents").fetchall()
+        except (SchemaMismatch, OSError, sqlite3.Error) as e:
+            check.unreadable_scopes.append(f"{name}: {e}")
+            continue
+        for (source,) in rows:
+            notes_.setdefault(writelog.note_key(source), (source, []))[1].append(name)
+    for source, names in (notes_[k] for k in sorted(notes_)):
+        now = writelog.note_sha256(source, MAX_NOTE_BYTES)
+        stamp = writelog.stamp_of(source, now)
+        if stamp is None or stamp is writelog.UNREAD:
+            continue
+        prov = writelog.provenance(check.log, source, now, stamp)
+        if prov["stamp"] == "contradicted":
+            check.contradicted.append({"scopes": names, "path": source, "stamped_by": stamp,
+                                       "last_write_client": prov["client"]})
+        elif prov["stamp"] == "unchecked":
+            check.unchecked_stamps += 1
+
+    log = check.log
+    if args.json:
+        # ASCII only: a note's name or stamp may hold a bidi or C1 control a terminal would act on.
+        print(json.dumps({
+            "log": str(writelog.path()),
+            "writes": len(log.writes),
+            "needs_attention": [{"seq": w.seq, "path": w.key} for w in check.needs_attention],
+            "damage": log.damage + (["the last line is unterminated"] if log.torn else []),
+            "settled": [{"seq": w.seq, "path": w.key} for w in check.settled],
+            "did_not_land": [{"seq": w.seq, "path": w.key} for w in check.did_not_land],
+            "refused": check.refused,
+            "contradicted": check.contradicted,
+            "stamps_without_an_engine_write": check.unchecked_stamps,
+            "skipped_scopes": check.skipped_scopes,
+            "unreadable_scopes": check.unreadable_scopes,
+        }, indent=2, ensure_ascii=True))
+    else:
+        from substrate.markdown.reader import _shown
+
+        def shown(text: object) -> str:
+            return _shown(str(text), 300)
+
+        print(f"  log: {shown(writelog.path())}  ·  {len(log.writes)} writes")
+        for w in check.needs_attention:
+            print(f"  NEEDS ATTENTION  seq {w.seq}: {shown(w.key)} holds neither the bytes it had "
+                  f"before this write nor the bytes the write named; look at the note")
+        for d in log.damage:
+            print(f"  damaged  {shown(d)}")
+        if log.torn:
+            print("  damaged  the last line is unterminated (a crash mid-append), and is not read")
+        for w in check.settled:
+            print(f"  settled  seq {w.seq}: {shown(w.key)} landed; its `done` was appended")
+        for w in check.did_not_land:
+            print(f"  did not land  seq {w.seq}: {shown(w.key)}; its `void` was appended")
+        for c in check.contradicted:
+            print(f"  contradicted  {shown(c['path'])} ({', '.join(c['scopes'])}): says "
+                  f"{shown(c['stamped_by'])}, and its last engine write was for "
+                  f"{shown(c['last_write_client'])}")
+        counts = [(check.refused, "writes refused before anything was written"),
+                  (check.unchecked_stamps, "stamped notes with no engine write to compare "
+                                           "(written before the log, or by hand)")]
+        for n, what in counts:
+            if n:
+                print(f"  {n} {what}")
+        for name in check.skipped_scopes:
+            print(f"  skipped  scope {name}: not composed yet, so there is nothing to check")
+        for line in check.unreadable_scopes:
+            print(f"  skipped  scope {shown(line)}: its index cannot be read")
+    return 1 if check.needs_attention else 0
 
 
 def cmd_version(args: argparse.Namespace) -> int:

@@ -79,7 +79,7 @@ def _snippet(text: str, chars: int) -> tuple[str, bool]:
 
 
 def passage(h: Hit, *, scope: str | None, chars: int = SNIPPET_CHARS,
-            full: bool = False) -> dict:
+            full: bool = False, provenance: dict | None = None) -> dict:
     """One hit as a consumer sees it: a snippet, a handle to the rest, and the whole spine.
 
     Every spine axis is present on every passage, with no field dropped for being uninteresting.
@@ -129,6 +129,11 @@ def passage(h: Hit, *, scope: str | None, chars: int = SNIPPET_CHARS,
 
     `truncated` means content was withheld from THIS payload: true for a cut snippet, false when
     the full text is included.
+
+    `provenance` is what the engine's write log says about the note's indexed bytes, and whether
+    the note's own `amended_by` / `written_by` line agrees (`writelog.provenance`). Keyed on the
+    note, so every passage of one note carries the same one. A caller that has none to give gets
+    `unknown`, never a missing key.
     """
     snippet, truncated = _snippet(h.text, chars)
     out = {
@@ -155,6 +160,11 @@ def passage(h: Hit, *, scope: str | None, chars: int = SNIPPET_CHARS,
     out["snippet"] = snippet
     out["text"] = h.text if full else None
     out["truncated"] = False if full else truncated
+    if provenance is None:
+        # Here, not at module top, for the reason `search_payload` gives for `refresh_state`.
+        from substrate import writelog
+        provenance = writelog.unknown()
+    out["provenance"] = provenance
     return out
 
 
@@ -259,10 +269,11 @@ def documents_payload(
     }
 
 
-def outline_record(h: Hit, *, scope: str | None, chars: int = SNIPPET_CHARS) -> dict:
+def outline_record(h: Hit, *, scope: str | None, chars: int = SNIPPET_CHARS,
+                   provenance: dict | None = None) -> dict:
     """A section's orientation record — the two-speed layer of Doc 2 §7. Same spine, because an
     orientation record inherits the currency and settledness of the note it orients."""
-    rec = passage(h, scope=scope, chars=chars)
+    rec = passage(h, scope=scope, chars=chars, provenance=provenance)
     rec["kind"] = "outline"
     return rec
 
@@ -430,6 +441,10 @@ def applied_filters(
     }
 
 
+# `search_payload` given no provenance: every passage then says `unknown`.
+_NO_PROVENANCE: dict[str, dict] = {}
+
+
 def search_payload(
     result: RetrievalResult,
     *,
@@ -447,6 +462,7 @@ def search_payload(
     filter_notes: tuple[str, ...] = (),
     registry: str | None = None,
     refresh: dict | None = None,
+    provenance: dict[str, dict] | None = None,
 ) -> dict:
     """The whole envelope: passages, orientation, capability, applied filters, index_version, and
     what the refresh agent last did to this scope.
@@ -492,12 +508,16 @@ def search_payload(
     # not real, since `render` already imports the retriever at module top.
     from substrate import refresh_state
 
+    prov = provenance or _NO_PROVENANCE
     return {
         "scope": scope,
         "db": db,
         "query": query,
-        "passages": [passage(h, scope=scope, chars=chars) for h in result.passages],
-        "outline_records": [outline_record(h, scope=scope, chars=chars) for h in result.outlines],
+        "passages": [passage(h, scope=scope, chars=chars, provenance=prov.get(h.doc_id))
+                     for h in result.passages],
+        "outline_records": [outline_record(h, scope=scope, chars=chars,
+                                           provenance=prov.get(h.doc_id))
+                            for h in result.outlines],
         "retrieval_mode": retrieval_mode(result, unavailable=unavailable, wiring=wiring),
         "filters": applied_filters(statuses, include_sources=include_sources, doc_type=doc_type,
                                    document_class=document_class, vaults=vaults,

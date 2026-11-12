@@ -250,6 +250,8 @@ def test_a_search_reports_the_arms_it_ran_with_even_if_they_recover_mid_call() -
     seen: dict = {}
 
     class _Store:
+        db = None   # never queried: the result names no passage to look provenance up for
+
         def close(self) -> None:
             pass
 
@@ -257,7 +259,7 @@ def test_a_search_reports_the_arms_it_ran_with_even_if_they_recover_mid_call() -
         seen["embedder"] = kw["embedder"]
         go.set()            # the recovery lands HERE: after retrieval took its arms,
         _finish(cfg)        # before the reply is rendered
-        return "result"
+        return SimpleNamespace(passages=[], outlines=[])
 
     def fake_payload(result, **kw):
         return kw

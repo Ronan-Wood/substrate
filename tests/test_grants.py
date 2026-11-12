@@ -566,21 +566,14 @@ def test_an_empty_scope_list_is_refused_not_every_scope() -> None:
 
 @pytest.mark.parametrize("spelled", ['"written_by"', "'written_by'", "Written_By", "WRITTEN_BY",
                                      '"amended_by"', "Amended_by"])
-def test_a_stamp_key_spelled_another_way_is_refused(spelled: str) -> None:
-    """YAML, Obsidian and Dataview read these as the stamp keys; the engine's line reader does
-    not. A note carrying one would show another author once the engine's own line was added."""
+def test_a_stamp_key_spelled_another_way_is_a_label_not_a_refusal(spelled: str) -> None:
+    """YAML, Obsidian and Dataview may read these as the stamp keys; the engine's reader does not.
+    The denylist that refused them could not be complete, so it is gone: the stamp is a label, and
+    the write log is the record. The engine still writes its own line."""
     content = _NOTE.replace("status: active\n", f"status: active\n{spelled}: someone\n").encode()
-    with pytest.raises(notes.NoteError, match="spells a key"):
-        notes.stamp_new(content, "claude-code")
+    stamped = notes.stamp_new(content, "claude-code")
+    assert stamped.startswith(b"---\nwritten_by: claude-code\n"), stamped
+    assert f"{spelled}: someone".encode() in stamped
     base = _NOTE.encode()
-    with pytest.raises(notes.NoteError, match="spells a key"):
-        notes.stamp_amend(content + b"\nedited\n", base, "claude-code")
-
-
-def test_a_stamp_key_in_a_yaml_block_is_read_as_yaml_reads_it() -> None:
-    """A block that is not flat lines is read by YAML. A key YAML reads as `Written_By` is still
-    the stamp key to Obsidian and Dataview, which fold the case of a property's name."""
-    content = (b'---\nstatus: active\ndoc_type: decision\nconfidence: proposed\ntags:\n  - a\n'
-               b'Written_By: someone\n---\n\n# x\n')
-    with pytest.raises(notes.NoteError, match="spells a key"):
-        notes.stamp_new(content, "claude-code")
+    amended = notes.stamp_amend(content + b"\nedited\n", base, "claude-code")
+    assert b"amended_by: claude-code\n" in amended, amended

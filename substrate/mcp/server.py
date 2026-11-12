@@ -69,7 +69,7 @@ from typing import TYPE_CHECKING, Any
 
 from substrate import (
     agent, grants, introspect, local_socket, net, notes, private, render, scopes, spine, stack,
-    wire,
+    wire, writelog,
 )
 from substrate.mcp import bridge
 from substrate.retrieve.local_models import RERANK_SENDS, cloud_refusal
@@ -632,6 +632,9 @@ def _tool_search(args: dict, cfg: Config) -> dict:
             filter_notes=tuple(n for n in (clamp_note, _sources_note(cfg, scope, include_sources))
                                if n),
             registry=cfg.registry, refresh=_refresh(cfg, scope),
+            # An agent-mode server reads no vault and no log, so its passages say `unknown`.
+            provenance=None if cfg.agent is not None else writelog.lookup(
+                store.db, [h.doc_id for h in (*result.passages, *result.outlines)]),
         )
     finally:
         store.close()
@@ -658,8 +661,10 @@ def _tool_expand(args: dict, cfg: Config) -> dict:
                 f"no passage {chunk_id!r} in scope {scope!r}. The index may have been recomposed "
                 f"since that ref was issued — search again rather than assume the note is gone."
             )
+        provenance = (None if cfg.agent is not None else
+                      writelog.lookup(store.db, [hit.doc_id]).get(hit.doc_id))
         out = {"scope": scope, "mode": mode, "index_version": store.index_version,
-               "passage": render.passage(hit, scope=scope, full=True)}
+               "passage": render.passage(hit, scope=scope, full=True, provenance=provenance)}
         if mode == "note":
             if cfg.agent is not None:
                 # From the snapshot's own copy of the note — an agent server reads no vault.
@@ -786,6 +791,16 @@ def _indexed_when(cfg: Config, entry, what: str) -> str:
             f"`status` lists it under drift.added until then.")
 
 
+def _writer(author: grants.Decision, scope: str, entry) -> writelog.Identity | None:
+    """Who a write runs for, as the engine's write log records it (`writelog`). None for the
+    owner's write, which no grant authorised and the log does not hold. A granted decision always
+    carries its token's hash; were it ever missing, `writelog.recorded` refuses the write."""
+    if author.client is None:
+        return None
+    return writelog.Identity(client=author.client, grant=(author.token_sha256 or "")[:12],
+                             scope=scope, vault=str(entry.vault))
+
+
 def _tool_ingest(args: dict, cfg: Config, author: grants.Decision = grants.OWNER) -> dict:
     """Two-phase by construction. Without a token this PLANS and writes nothing; with one it
     re-plans and writes only if the token still matches. A client that auto-approves tool calls
@@ -832,7 +847,8 @@ def _tool_ingest(args: dict, cfg: Config, author: grants.Decision = grants.OWNER
             }
         target = notes.commit(project_vault=entry.vault, content=content, filename=filename,
                               folder=folder, confirm_token=token, book=cfg.plans,
-                              author=author.client, bound_to=author.binding)
+                              author=author.client, bound_to=author.binding,
+                              who=_writer(author, name, entry))
     except notes.NoteError as e:
         raise ToolError(str(e)) from e
 
@@ -906,7 +922,8 @@ def _tool_amend(args: dict, cfg: Config, author: grants.Decision = grants.OWNER)
         target, previous, written = notes.commit_amend(project_vault=entry.vault, path=path,
                                                        content=content, confirm_token=token,
                                                        book=cfg.plans, author=author.client,
-                                                       bound_to=author.binding)
+                                                       bound_to=author.binding,
+                                                       who=_writer(author, name, entry))
     except notes.NoteError as e:
         raise ToolError(str(e)) from e
 
@@ -937,7 +954,10 @@ def _tool_list_scopes(args: dict, cfg: Config) -> dict:
     # checks itself against. Its wire range needs no field: a client outside it is never answered.
     # `read_only` means "runs no write without a grant": true for `none` and `granted`, false only
     # for `open`. `writes` says which; a client older than it reads `read_only` alone.
+    # `writes_log`: the engine's write log (`writelog`), which every passage's `provenance` is
+    # read from, whatever this server's own writes mode. Null in agent mode, which reads no log.
     payload["server"] = {"read_only": cfg.read_only, "writes": cfg.writes,
+                         "writes_log": None if cfg.agent is not None else str(writelog.path()),
                          "agent_mode": cfg.agent is not None,
                          "refresh_every": cfg.refresh_every,
                          "refresh_requests": cfg.refresh_loop is not None,

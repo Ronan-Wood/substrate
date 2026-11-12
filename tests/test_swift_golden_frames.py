@@ -56,7 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _swift_fixtures as fx  # noqa: E402
 
-from substrate import cli, net, refresh, scopes, stack  # noqa: E402
+from substrate import cli, net, refresh, scopes, stack, writelog  # noqa: E402
 from substrate.embed import engine as embed_engine  # noqa: E402
 from substrate.mcp import server  # noqa: E402
 
@@ -200,6 +200,8 @@ def demo(tmp_path, monkeypatch, _umask):
     # which is the operator's; a failed probe is all that kept it closed. Neither may be reached.
     monkeypatch.setattr(stack, "DEFAULT_CACHE", tmp_path / "vector-cache.db")
     monkeypatch.setattr(scopes, "engine_home", lambda: tmp_path / "engine-home")
+    # Inside the workspace, so the `writes_log` the server block names is stood in like the rest.
+    monkeypatch.setattr(writelog, "home", lambda: work / "engine-home")
 
     child = _Child({scopes.ENV_VAR: str(registry)})
     rc = child(["substrate.cli", "compose", str(work / "vaults" / "demo-vault"),

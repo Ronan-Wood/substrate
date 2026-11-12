@@ -964,6 +964,34 @@ def test_include_sources_carries_the_calls_into_the_snapshot(tmp_path):
     assert not any("without its sources" in n for n in res["filters"]["notes"])
 
 
+def test_an_agent_server_reads_no_write_log_for_the_calls_a_snapshot_lets_in(tmp_path,
+                                                                             monkeypatch):
+    """`include_sources = true` publishes calls; it does not let an agent server read the host's
+    write log or vault for them. Every passage, call or not, says `unknown`, from search and
+    expand alike."""
+    from substrate import writelog
+
+    shared, registry = _sourced_scope(tmp_path)
+    (registry.parent / agent.CONFIG_FILENAME).write_text(
+        f'[publish.demo]\ndir = "{shared}"\ninclude_sources = true\n', encoding="utf-8")
+    refresh_state.record("demo", "refreshed", registry=registry)
+    agent.after_refresh_record("demo", "refreshed", registry=registry)
+    _hide(registry)
+
+    def no_reading(*a, **kw):
+        raise AssertionError("an agent server read the write log or a note for provenance")
+
+    monkeypatch.setattr(writelog, "lookup", no_reading)
+    monkeypatch.setattr(writelog, "stamp_of", no_reading)
+    res, err = _call(_cfg(shared), "search",
+                     {"scope": "demo", "query": "Zqxjcalltranscript", "include_sources": True})
+    assert not err and res["passages"], res
+    assert {p["provenance"]["state"] for p in res["passages"] + res["outline_records"]} == \
+        {"unknown"}
+    out, err = _call(_cfg(shared), "expand", {"expand_ref": "demo/zqxjcallnote#c00000"})
+    assert not err and out["passage"]["provenance"] == writelog.unknown(), out
+
+
 def test_turning_include_sources_off_rewrites_the_snapshot_without_the_calls(tmp_path):
     """An unchanged index is not re-verified under the new choice: the notes it leaves out change
     what the snapshot is built from."""

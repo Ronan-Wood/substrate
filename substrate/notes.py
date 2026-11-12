@@ -52,6 +52,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from substrate.vault import SKIP_DIRS, SKIP_NAMES
+from substrate import writelog
+from substrate.writelog import WriteLogError
 
 # Doc 2 §4's project skeleton. A note lands in one of these, and `04-synthesis` is the default
 # because that is the folder the spec designates for model-entered synthesis notes.
@@ -253,6 +255,7 @@ def plan(
 def commit(
     *, project_vault: Path, content: bytes, filename: str, folder: str = DEFAULT_FOLDER,
     confirm_token: str, book: PlanBook, author: str | None = None, bound_to: str = "",
+    who: writelog.Identity | None = None,
 ) -> Path:
     """Write the note, but only for a token this process issued for exactly these bytes and path.
 
@@ -264,8 +267,8 @@ def commit(
     """
     if author is not None:
         content = stamp_new(content, author)
-    target, _fields = _validate(project_vault=project_vault, content=content, filename=filename,
-                                folder=folder)
+    target, fields = _validate(project_vault=project_vault, content=content, filename=filename,
+                               folder=folder)
     if not book.redeem(confirm_token, _binding(target, content, bound_to)):
         raise NoteError(
             "confirm_token was not issued by this server for this note and destination, or has "
@@ -273,6 +276,18 @@ def commit(
             "the human, and pass THAT token."
         )
 
+    try:
+        with writelog.recorded(who, op="ingest", target=target, doc_id=fields.get("doc_id"),
+                               before=None, after=_sha(content)):
+            _create(target, content)
+    except WriteLogError as e:
+        # The log refused the intent, so nothing was written.
+        raise NoteError(f"{e} No note was written.") from e
+    return target
+
+
+def _create(target: Path, content: bytes) -> None:
+    # Inside the logged section, so a write the log refuses does not leave a new folder behind.
     target.parent.mkdir(parents=True, exist_ok=True)
     # The additive-only and stay-inside-the-vault guarantees are enforced by the SYSCALL, not by
     # the earlier `target.exists()` check — that check is a check-then-act pair with a window, and
@@ -296,7 +311,6 @@ def commit(
         # A partial note in the vault would compose as a truncated one. Remove it and refuse.
         target.unlink(missing_ok=True)
         raise NoteError(f"failed writing {target}: {e}") from e
-    return target
 
 
 # --------------------------------------------------------------------------- amending a note
@@ -364,8 +378,7 @@ def _amend_binding(target: Path, base_sha256: str, content: bytes, bound_to: str
     return h.hexdigest()
 
 
-def _sha(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+_sha = writelog.sha256
 
 
 def _resolve_existing(project_vault: Path, path: str) -> tuple[Path, tuple[str, ...], Path, str]:
@@ -1057,10 +1070,10 @@ def _replace_key(content: bytes, key: str, value: str) -> bytes | None:
     return None
 
 
-# The frontmatter keys the ENGINE writes for a granted client's write. A note that declares one
-# with any other value is refused: a client cannot pass its writes off as the user's, or as
-# another client's.
-STAMP_KEYS = ("written_by", "amended_by")
+# `writelog.STAMP_KEYS` are the frontmatter keys the ENGINE writes for a granted client's
+# write. A note that declares one with any other value is refused, so a well-behaved client's note
+# says who wrote it. They are labels: a key spelled another way, or the file edited after, gets past
+# this. The record is the engine's write log, and search shows a stamp the log contradicts as that.
 
 
 def _values(pairs: list[tuple[str, str]] | None, key: str) -> list[str]:
@@ -1076,68 +1089,11 @@ def _unstampable(author: str, key: str) -> NoteError:
     )
 
 
-def _stamp_key_spellings(content: bytes) -> list[tuple[str, str]]:
-    """(the key as written, the stamp key it stands for) for every frontmatter key that some reader
-    takes for a stamp key but the engine's reader does not read as exactly that key.
-
-    Read three ways, because the readers differ: each line's text before its colon (a flat block,
-    which the engine reads by line and where a quoted key keeps its quotes); YAML's own keys
-    (`BaseLoader`, as the reader reads a block that is not flat); and the engine's pairs. A key is
-    a stamp key once its quotes and case are taken away, which is how YAML, Obsidian and Dataview
-    can read it, and it is a spelling the engine must refuse unless it is written exactly as the
-    engine writes it."""
-    import yaml
-
-    from substrate.markdown.reader import _FRONTMATTER, frontmatter_pairs, normalized_text
-
-    try:
-        text = normalized_text(content)
-    except UnicodeDecodeError:
-        return []
-    m = _FRONTMATTER.match(text)
-    if not m:
-        return []
-    block = m.group(1)
-    seen = [line.partition(":")[0].strip() for line in block.splitlines() if ":" in line]
-    engine = [k for k, _ in frontmatter_pairs(text) or ()]
-    try:
-        root = yaml.compose(block, Loader=yaml.BaseLoader)
-    except Exception:  # noqa: BLE001 — not YAML: the line view above still sees every key
-        root = None
-    from_yaml = ([k.value for k, _ in root.value if isinstance(k, yaml.ScalarNode)]
-                 if isinstance(root, yaml.MappingNode) else [])
-
-    def stamp(key: str) -> str | None:
-        bare = key.strip().strip("'\"").strip().casefold()
-        return bare if bare in STAMP_KEYS else None
-
-    out: list[tuple[str, str]] = []
-    for key in [*seen, *from_yaml, *engine]:
-        meant = stamp(key)
-        if meant is None or (key, meant) in out:
-            continue
-        if key != meant or (key in from_yaml and key not in engine):
-            out.append((key, meant))
-    return out
-
-
-def _refuse_stamp_spellings(content: bytes, author: str) -> None:
-    spelled = _stamp_key_spellings(content)
-    if spelled:
-        key, meant = spelled[0]
-        raise NoteError(
-            f"the frontmatter spells a key {key!r}, which YAML, Obsidian and Dataview can read as "
-            f"`{meant}`, a key the engine writes itself for the client `{author}`. Leave that "
-            f"line out; the engine records who wrote and amended the note.")
-
-
 def stamp_new(content: bytes, author: str) -> bytes:
     """`ingest` content for a granted client, with `written_by: <author>` in its frontmatter.
 
     A note may already say `written_by: <author>` (it is then left as it is). Any other
-    `written_by`, two of them, or any `amended_by` (a new note has not been amended) is refused,
-    and so is a stamp key spelled any other way (`_stamp_key_spellings`)."""
-    _refuse_stamp_spellings(content, author)
+    `written_by`, two of them, or any `amended_by` (a new note has not been amended) is refused."""
     pairs = _pairs(content)
     if not pairs:
         raise NoteError(
@@ -1166,9 +1122,7 @@ def stamp_amend(content: bytes, base: bytes, author: str) -> bytes:
 
     `written_by` must read exactly as it does in the note now: it names who wrote the note, and an
     edit does not change that. `amended_by` may be left as the note has it, set to `<author>`, or
-    left out; it is then written as `<author>`. Any other value is refused, and so is a stamp key
-    spelled any other way (`_stamp_key_spellings`)."""
-    _refuse_stamp_spellings(content, author)
+    left out; it is then written as `<author>`. Any other value is refused."""
     pairs, before = _pairs(content), _pairs(base)
     if not pairs:
         # No keys to stamp into, so the spine gate refuses the note in its own words.
@@ -1276,7 +1230,7 @@ def _changed_since_plan(target: Path) -> NoteError:
 
 def commit_amend(
     *, project_vault: Path, path: str, content: bytes, confirm_token: str, book: PlanBook,
-    author: str | None = None, bound_to: str = "",
+    author: str | None = None, bound_to: str = "", who: writelog.Identity | None = None,
 ) -> tuple[Path, str, str]:
     """Replace the note, only for a token issued for exactly the bytes these would be written as
     (a pinned doc_id included) over exactly the bytes on disk now. Returns (target,
@@ -1296,7 +1250,7 @@ def commit_amend(
     try:
         previous, written = _commit_at(dfd, parts[-1], target=target, rel=rel, content=content,
                                        confirm_token=confirm_token, book=book, author=author,
-                                       bound_to=bound_to)
+                                       bound_to=bound_to, who=who)
     except NoteError:
         book.discard(confirm_token)
         raise
@@ -1371,7 +1325,7 @@ def _replace_at(dfd: int, name: str, target: Path, *, content: bytes, stage: str
 
 def _commit_at(dfd: int, name: str, *, target: Path, rel: str, content: bytes,
                confirm_token: str, book: PlanBook, author: str | None = None,
-               bound_to: str = "") -> tuple[str, str]:
+               bound_to: str = "", who: writelog.Identity | None = None) -> tuple[str, str]:
     """The write itself, relative to the note's folder descriptor. Returns (replaced sha256,
     written sha256) — the written bytes may carry a pinned doc_id the caller did not send."""
     planned = book.note_of(confirm_token)
@@ -1385,14 +1339,21 @@ def _commit_at(dfd: int, name: str, *, target: Path, rel: str, content: bytes,
     if not secrets.compare_digest(planned[1], base_sha):
         raise _changed_since_plan(target)
 
-    _fields, content = _check_amend(
+    fields, content = _check_amend(
         target=target, rel=rel, base=base, content=content, author=author,
         issued=lambda final: book.matches(confirm_token,
                                           _amend_binding(target, base_sha, final, bound_to)))
     if not book.redeem(confirm_token, _amend_binding(target, base_sha, content, bound_to)):
         raise _not_issued()
 
-    _replace_at(dfd, name, target, content=content, stage="amend",
-                unchanged=lambda now: _sha(now) == base_sha,
-                changed=lambda: _changed_since_plan(target))
+    doc_id = fields["spine_after"].get("doc_id")
+    try:
+        with writelog.recorded(who, op="amend", target=target, doc_id=doc_id, before=base_sha,
+                               after=_sha(content)):
+            _replace_at(dfd, name, target, content=content, stage="amend",
+                        unchanged=lambda now: _sha(now) == base_sha,
+                        changed=lambda: _changed_since_plan(target))
+    except WriteLogError as e:
+        # The log refused the intent, so the note was not touched.
+        raise NoteError(f"{e} The note was not changed.") from e
     return base_sha, _sha(content)

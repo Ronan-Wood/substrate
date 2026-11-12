@@ -35,7 +35,7 @@ from substrate.store.index_store import Hit  # noqa: E402
 PASSAGE_KEYS = {
     "expand_ref", "citation", "path", "page", "n_chars", "document_class",
     "status", "doc_type", "confidence", "domains", "vault", "supersedes",
-    "snippet", "text", "truncated",
+    "snippet", "text", "truncated", "provenance",
 }
 ENVELOPE_KEYS = {
     "scope", "db", "query", "passages", "outline_records", "retrieval_mode", "filters",

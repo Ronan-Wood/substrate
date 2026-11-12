@@ -7,12 +7,42 @@ Every release of the engine, newest first. The format follows
 
 ## Unreleased
 
-### Removed
+### Added
 
-- **The vault guard.** `guard_state` is no longer a manifest key, and a manifest that still
-  declares it composes, as with any key the engine does not read. Nothing is withheld for it:
-  the MCP server returns the vault's own notes through `search`, `documents` and `expand` whatever
-  the state file says, and `ingest` and `amend` no longer refuse the vault.
+- **An engine write log, `~/.substrate/writes.jsonl`.** For each write the engine runs for a
+  granted client, it appends an `intent` line, fsynced before the note is touched, then a `done`
+  line after it, or a `void` line when the write was refused inside and nothing was written. A
+  write the log can't record isn't run. Each line names the client, a prefix of its grant, the
+  scope, the note, and the note's checksum before and after; never its content. The owner's own
+  writes aren't logged. Nothing rewrites a line, and there is no rotation yet.
+- **`provenance` on every passage**, in `search`, `expand` and `query --json`:
+  - `state` is `engine` (the indexed bytes are what the engine last wrote, for `client`), `edited`
+    (the engine wrote the note and it has changed since), `none` (no engine write) or `unknown`;
+  - `stamp` says whether the note's own `amended_by`, else `written_by`, as the engine's reader
+    reads the key, agrees with the log: `matches`, `contradicted`, or `unchecked` when there is
+    no engine write to compare it with (a note stamped before the log, or by hand) or the note
+    was not read. It is null when the note has none.
+
+  `state` is judged against the write that produced the bytes the index holds, so an index that
+  lags a write isn't reported as an edit, and the stamp is read from those same bytes. A note is
+  found by its path only: one that moved reads `none`. Looked up at query time from the index's
+  checksum and the log, so no recompose is needed. A note's stamp is remembered by the file's
+  size and mtime, so an unchanged note isn't read again.
+- **`substrate writes check [--scope S] [--json]`**, under the log's lock:
+  - decides each write a crash left with neither `done` nor `void`: `done` when the note holds the
+    bytes the write named, or a later write of the note replaced exactly those bytes; `void` when
+    the note still holds what it held before (or a new note is absent);
+  - lists damaged lines, and `seq` gaps, repeats and reorderings;
+  - lists the notes whose stamp the log contradicts, as the engine's reader reads the key, each
+    once however many scopes inherit it;
+  - counts refused writes and stamps with no engine write to compare, and names the scopes it
+    skipped (not composed yet, or an index it can't read).
+
+  **It exits 1 for one thing only:** a write it could not decide, because its note holds neither
+  the bytes it had before nor the bytes the write named. Everything else is history, reported
+  and exiting 0, since nothing may rewrite the log to clear it.
+- The `list_scopes` server block names the log as `writes_log`, null only in agent mode, which
+  reads no log.
 
 ### Changed
 
@@ -30,6 +60,19 @@ Every release of the engine, newest first. The format follows
   successful refresh. `publish-snapshot --dir` into a folder other than the entry's takes no calls.
 - A snapshot's rowids are renumbered, so their gaps no longer show how many documents and
   passages were left out of it.
+- **Wire 3.** `provenance` and `writes_log` are new reply keys, so `VERSION` is 3. `MIN_VERSION`
+  stays 1, and older clients ignore the keys.
+
+### Removed
+
+- **The vault guard.** `guard_state` is no longer a manifest key, and a manifest that still
+  declares it composes, as with any key the engine does not read. Nothing is withheld for it:
+  the MCP server returns the vault's own notes through `search`, `documents` and `expand` whatever
+  the state file says, and `ingest` and `amend` no longer refuse the vault.
+- The refusal of a stamp key spelled another way (`Written_By`, `"amended_by"`). It was a denylist
+  that two review rounds showed can't be complete. The stamp is a label, and the write log is the
+  record. A stamp key written exactly as the engine writes it is still refused when its value is
+  wrong.
 
 ## 0.2.0
 

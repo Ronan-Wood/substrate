@@ -72,9 +72,23 @@ for a client you granted by name ([`substrate/grants.py`](../substrate/grants.py
   one after a rotation, or after a revoke and a new grant.
 - **The stamp is a label, not proof.** Anyone who can edit the file can add, change or remove
   `written_by` and `amended_by`: you in Obsidian, any process running as you, and a granted client
-  that finds a spelling some reader takes for a stamp key and the engine's check misses. Read it
-  as who the engine last wrote the note for, not as who wrote what. An engine write log, outside
-  the vault, is planned as the record.
+  that spells the key another way (`Written_By`, `"amended_by"`), which some readers fold into the
+  stamp key and the engine doesn't. The engine refuses only a stamp key written exactly as it
+  writes one.
+- **The write log is the record.** The engine appends two lines to `~/.substrate/writes.jsonl`
+  (`0600`, outside every vault) for each granted write: an `intent`, fsynced before the note is
+  touched, and a `done` after (or a `void`, when the write was refused and nothing written). A
+  write the log can't record isn't run. Each line names the client, its grant, the scope, the note
+  and the note's checksum before and after, never its content. Search and expand report each
+  passage's `provenance` from the log, not from the stamp, and flag a stamp the log contradicts. A
+  note is matched to the log by its path only, so a note can't borrow another's history by
+  declaring its `doc_id`. `substrate writes check` lists damaged lines, decides a write a crash
+  left unsettled by the note's checksum, and lists the stamps the log contradicts, as the engine's
+  reader reads the key. A spelled-another-way key isn't read as a stamp, so it is neither refused
+  nor flagged: that is the label risk above. Your own writes (stdio, `frontmatter fix`) aren't a
+  client acting under a grant, and aren't logged.
+- **The log is not a wall either.** Any process running as you can rewrite or delete it. Its `seq`
+  numbers expose a gap, a repeat or a reordering by accident or by a sync tool, not by an attacker.
 - Every other rule still applies after the grant: the project vault only, the writable folders,
   and `amend`'s refusals. Each write is still a plan, then a commit.
 
