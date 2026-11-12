@@ -5,7 +5,7 @@ Every release of the engine, newest first. The format follows
 [semantic versioning](https://semver.org/). Each release attaches its source tarball and a
 `SHA256SUMS` (see [`RELEASING.md`](RELEASING.md)).
 
-## Unreleased
+## 0.2.1
 
 ### Added
 
