@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from typing import Any
 
-VERSION = 2
+VERSION = 3
 # The oldest client this engine serves. Raised only by a change an older client would misread.
 MIN_VERSION = 1
 HEADER = "Substrate-Wire"

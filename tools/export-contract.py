@@ -92,6 +92,8 @@ WIRE_OBJECTS: dict[str, tuple[str, str, tuple[int, ...], str | None]] = {
     "server": ("mcp/server.py", "_tool_list_scopes", (0,), None),
     # What `refresh` answers: when the pass it brought forward starts.
     "refresh_request": ("mcp/server.py", "_tool_refresh", (0,), None),
+    # A passage's `provenance`: what the engine's write log says about its note.
+    "provenance": ("writelog.py", "provenance_record", (0,), None),
 }
 # A wire object whose local starts as another one's: it carries the other's keys plus its own. Each
 # base is named with the exact call that produces it, receiver included, and the local must be
@@ -107,7 +109,7 @@ EXTENDS: dict[str, tuple[tuple[str, str], ...]] = {
 MODULES = ("agent.py", "markdown/yaml_scalar.py", "wire.py", "local_socket.py", "refresh.py",
            "spine.py", "classes.py", "stack.py",
            "retrieve/retriever.py", "refresh_state.py", "render.py", "introspect.py",
-           "freshness.py", "mcp/server.py", "grants.py")
+           "freshness.py", "mcp/server.py", "grants.py", "writelog.py")
 
 
 class ExportError(Exception):
@@ -738,6 +740,10 @@ def _export(root: Path) -> dict:
                    "grant_header": m["grants.py"].string("GRANT_HEADER"),
                    "client_info_header": m["grants.py"].string("CLIENT_INFO_HEADER"),
                    "writes_modes": m["grants.py"].members("WRITES_MODES")},
+        # What a passage's `provenance` may say (`substrate.writelog`), and the log it reads.
+        "writes": {"log_file": m["writelog.py"].string("FILE"),
+                   "states": m["writelog.py"].members("STATES"),
+                   "stamp_verdicts": m["writelog.py"].members("STAMP_VERDICTS")},
         # The note format a writer must produce for this engine to index it, as a range
         # (`spine.NOTES_VERSION`): an attached client writes notes, and this engine indexes them.
         "notes": {"version": spine.integer("NOTES_VERSION"),

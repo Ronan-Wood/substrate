@@ -25,7 +25,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from substrate import cli, local_socket, refresh, refresh_state, scopes, spine  # noqa: E402
+from substrate import (  # noqa: E402
+    cli, local_socket, refresh, refresh_state, scopes, spine, writelog,
+)
 
 DEMO = ROOT / "vaults" / "demo-vault"
 
@@ -413,6 +415,8 @@ def test_serve_runs_on_its_own_and_refreshes() -> None:
             except OSError:
                 time.sleep(0.2)
         assert payload is not None, "serve never answered"
+        # The engine runs in its own process, so it names its own home's log, not this suite's.
+        assert payload["server"].pop("writes_log").endswith("/writes.jsonl"), payload["server"]
         assert payload["server"] == {"read_only": True, "writes": "none", "agent_mode": False,
                                      "refresh_every": 3600.0, "refresh_requests": True,
                                      **_RANGES}, payload["server"]
@@ -490,8 +494,10 @@ def test_a_plain_server_says_it_refreshes_nothing() -> None:
     reply = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                            "params": {"name": "list_scopes", "arguments": {}}}, cfg)
     payload = json.loads(reply["result"]["content"][0]["text"])
-    assert payload["server"] == {"read_only": True, "writes": "none", "agent_mode": False,
-                                 "refresh_every": None, "refresh_requests": False, **_RANGES}
+    assert payload["server"] == {"read_only": True, "writes": "none",
+                                 "writes_log": str(writelog.path()), "agent_mode": False,
+                                 "refresh_every": None,
+                                 "refresh_requests": False, **_RANGES}
 
 
 def test_a_refreshing_server_is_refused_off_the_socket_before_any_model_is_probed() -> None:

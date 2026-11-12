@@ -6,7 +6,8 @@ the developer's real store — and a developer's own `config.toml` would decide 
 blobs went. The default index folder, `~/.substrate/index`, likewise. And `~/.substrate/serve.toml`:
 a `substrate serve` a test starts in-process reads the suite's, never the developer's models or a
 malformed file of theirs. And the grant store: a test's grant or refused write never reaches the
-developer's `~/.substrate/grants.toml`, tokens or requests.
+developer's `~/.substrate/grants.toml`, tokens or requests, and a granted write's record never
+reaches their `~/.substrate/writes.jsonl`.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import os
 
 import pytest
 
-from substrate import blobs, grants, refresh, scopes, serve_config
+from substrate import blobs, grants, refresh, scopes, serve_config, writelog
 
 
 @pytest.fixture(autouse=True)
@@ -27,6 +28,7 @@ def _private_blob_store(tmp_path_factory, monkeypatch):
     # A compose given no --db or --index-root builds in the engine's own folder: the suite's.
     monkeypatch.setattr(scopes, "index_home", lambda: home / scopes.INDEX_DIR)
     monkeypatch.setattr(grants, "home", lambda: home)
+    monkeypatch.setattr(writelog, "home", lambda: home)
     return home
 
 
