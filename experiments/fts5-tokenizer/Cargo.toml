@@ -1,0 +1,25 @@
+[package]
+name = "substrate-tok"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+name = "substrate_tok"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Routes sqlite3_* calls through the routine table the host passes to the entry point, so the
+# dylib links no libsqlite3 and works inside any host whose SQLite has FTS5 (the bundled Python's
+# SQLite is statically linked into libpython and exports nothing).
+libsqlite3-sys = { version = "0.39", features = ["loadable_extension"] }
+
+[dev-dependencies]
+proptest = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
