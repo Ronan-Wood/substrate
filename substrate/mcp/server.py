@@ -68,8 +68,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from substrate import (
-    agent, grants, guard, introspect, local_socket, net, notes, private, render, scopes, spine,
-    stack, wire,
+    agent, grants, introspect, local_socket, net, notes, private, render, scopes, spine, stack,
+    wire,
 )
 from substrate.mcp import bridge
 from substrate.retrieve.local_models import RERANK_SENDS, cloud_refusal
@@ -167,29 +167,17 @@ def _open(name: str, cfg: Config, *, refuse_empty: bool = True):
 
     if cfg.agent is not None:
         # AGENT MODE resolves against the allowed scopes' snapshots and nothing else — never the
-        # registry, which names every scope. No guard check: a guarded vault's own notes were
-        # REMOVED when the snapshot was published (`agent._fill`), and this process cannot read
-        # the vault the guard would consult.
+        # registry, which names every scope.
         try:
             entry, store = cfg.agent.open(name)
         except agent.AgentError as e:
             raise ToolError(str(e)) from e
-        return _refuse_if_empty(name, entry, store, guard.OPEN, refuse_empty)
+        return _refuse_if_empty(name, entry, store, refuse_empty)
 
     try:
         entry = scopes.resolve(name, cfg.registry)
     except scopes.ScopeError as e:
         raise ToolError(str(e)) from e
-
-    # THE GUARD, BEFORE THE INDEX IS OPENED. A vault may nominate a state file that has to vouch for
-    # it (`guard.py`), and this is the one chokepoint every scope-taking tool passes through — so
-    # the wall cannot be forgotten by a tool added later, which is exactly how the app's own server
-    # would have lost it.
-    #
-    # It WITHHOLDS rather than refuses, and the verdict travels back to the caller instead of being
-    # raised here: the guarded vault's own notes are held back and everything the scope INHERITS
-    # still answers. Refusing the scope took 69 curated notes hostage to protect zero calls.
-    verdict = guard.check(Path(entry.vault), name)
 
     # migrate=False: every tool on this server READS. A write-open drops and rebuilds an
     # old-schema index, so a search would have destroyed the index it was asked about and then
@@ -200,10 +188,10 @@ def _open(name: str, cfg: Config, *, refuse_empty: bool = True):
         # The remedy is scope-specific and the exception deliberately does not name one, so this
         # adapter supplies it: every scope on this server was built by `compose`.
         raise ToolError(f"{e} Rebuild the scope with `substrate compose`.") from e
-    return _refuse_if_empty(name, entry, store, verdict, refuse_empty)
+    return _refuse_if_empty(name, entry, store, refuse_empty)
 
 
-def _refuse_if_empty(name: str, entry, store, verdict, refuse_empty: bool):
+def _refuse_if_empty(name: str, entry, store, refuse_empty: bool):
     if refuse_empty:
         # EMPTINESS, not the `rebuilt` flag. That flag is true only on the open that PERFORMED a
         # migration, so it is consumed by whoever opens first and cannot be relied on by anyone
@@ -218,7 +206,16 @@ def _refuse_if_empty(name: str, entry, store, verdict, refuse_empty: bool):
                 f"querying it; answering from an empty index is indistinguishable from a genuine "
                 f"no-match. (`status` still reports on it.)"
             )
-    return entry, store, verdict
+    return entry, store
+
+
+def _sources_note(cfg: Config, scope: str, include_sources: bool) -> str | None:
+    """Said when a caller asks for sources an agent snapshot was published without, so an answer
+    with no calls in it does not read as a scope that has none."""
+    if cfg.agent is None or not include_sources or not cfg.agent.sources_left_out(scope):
+        return None
+    return ("this snapshot was published without its sources: the operator left conversation-"
+            "class notes out of it, so `include_sources` finds none here.")
 
 
 def _refresh(cfg: Config, scope: str) -> dict | None:
@@ -618,11 +615,10 @@ def _tool_search(args: dict, cfg: Config) -> dict:
     # retrieval actually ran with, not the ones that came back while it ran.
     st = cfg.stack
 
-    entry, store, verdict = _open(scope, cfg)
+    entry, store = _open(scope, cfg)
     try:
         result = retriever.retrieve(
-            store, query, k=k, statuses=statuses, vaults=vaults,
-            withheld_vaults=verdict.withhold, entity=entity,
+            store, query, k=k, statuses=statuses, vaults=vaults, entity=entity,
             include_sources=include_sources, with_outlines=render.OUTLINE_RECORDS,
             embedder=st.embedder,
             expander=None if fast else st.expander,
@@ -633,7 +629,8 @@ def _tool_search(args: dict, cfg: Config) -> dict:
             include_sources=include_sources, unavailable=st.unavailable,
             wiring=st.wiring,
             db=str(entry.db),
-            filter_notes=tuple(n for n in (clamp_note, verdict.reason) if n),
+            filter_notes=tuple(n for n in (clamp_note, _sources_note(cfg, scope, include_sources))
+                               if n),
             registry=cfg.registry, refresh=_refresh(cfg, scope),
         )
     finally:
@@ -653,19 +650,9 @@ def _tool_expand(args: dict, cfg: Config) -> dict:
     except render.RefError as e:
         raise ToolError(str(e)) from e
 
-    entry, store, verdict = _open(scope, cfg)
+    entry, store = _open(scope, cfg)
     try:
         hit = store.chunk(chunk_id)
-        # A READ PATH, so the same wall `search` and `documents` apply — whatever the ref's origin.
-        # A ref is `scope/chunk_id`, buildable without the guard ever vouching, and one issued while
-        # it did still names the passage after it lapses. An unattributed row (`vault` NULL) passes,
-        # as in `_add_vault_exclusion`. While anything is withheld, a missing passage and a withheld
-        # one get the SAME refusal, or walking `#c{seq}` would count the withheld note's passages.
-        if verdict.withhold and (hit is None or hit.vault in verdict.withhold):
-            raise ToolError(
-                f"{verdict.reason} No passage {chunk_id!r} can be expanded from scope {scope!r}: "
-                f"it is withheld, or the index was recomposed since that ref was issued."
-            )
         if hit is None:
             raise ToolError(
                 f"no passage {chunk_id!r} in scope {scope!r}. The index may have been recomposed "
@@ -777,18 +764,6 @@ def _writable_scope(name: str, cfg: Config):
         entry = scopes.resolve(name, cfg.registry)
     except scopes.ScopeError as e:
         raise ToolError(str(e)) from e
-
-    # THE GUARD, HERE TOO. The write tools resolve the scope themselves rather than going through
-    # `_open` — they need the vault, not the index — so the chokepoint that covers every READ does
-    # not cover them. A model that cannot read a guarded workspace must not be able to write into
-    # one either, and a write is where getting it wrong leaves a note behind rather than an answer.
-    # REFUSES OUTRIGHT, unlike the read tools. They withhold a vault and answer from the rest; there
-    # is no "write into the rest" — a note goes into THIS vault or nowhere, and writing into one
-    # nothing is vouching for is the case the guard exists for.
-    verdict = guard.check(Path(entry.vault), name)
-    if not verdict.vouched:
-        raise ToolError(f"{verdict.reason} A write into this vault is refused entirely — "
-                        f"unlike a read, there is no unguarded part of it to write to.")
     return entry
 
 
@@ -890,8 +865,7 @@ def _tool_amend(args: dict, cfg: Config, author: grants.Decision = grants.OWNER)
         raise ToolError("amend requires `path`: the note to change, relative to the project vault.")
     # NO `source_path`, as for `ingest`, and refused rather than ignored. An amend plan returns the
     # new note in full, as the diff, so a caller-named source would make every plan a read of any
-    # file this process can reach — including notes in a vault the guard withholds — with nothing
-    # written and nobody asked.
+    # file this process can reach, with nothing written and nobody asked.
     if "source_path" in args:
         raise ToolError("amend takes the new note as `content`, not `source_path`: its plan echoes "
                         "the whole note back as a diff, so reading a named file would expose it.")
@@ -983,7 +957,7 @@ def _tool_status(args: dict, cfg: Config) -> dict:
     name = args.get("scope")
     if not name:
         raise ToolError("status requires `scope`.")
-    entry, store, verdict = _open(name, cfg, refuse_empty=False)
+    entry, store = _open(name, cfg, refuse_empty=False)
     try:
         return introspect.status_payload(store, entry, stack=cfg.stack, registry=cfg.registry,
                                          refresh=_refresh(cfg, name),
@@ -1063,16 +1037,16 @@ def _tool_documents(args: dict, cfg: Config) -> dict:
     include_sources = bool(args.get("include_sources", False))
     statuses = retriever.statuses(include_archived=bool(args.get("include_archived", False)))
 
-    entry, store, verdict = _open(scope, cfg)
+    entry, store = _open(scope, cfg)
     try:
         rows, total = store.browse(statuses=statuses, include_sources=include_sources,
-                                   vault=vault, doc_type=doc_type,
-                                   withheld_vaults=verdict.withhold, entity=doc_entity,
+                                   vault=vault, doc_type=doc_type, entity=doc_entity,
                                    limit=limit, offset=offset)
         return render.documents_payload(
             rows, total, scope=scope, statuses=statuses, include_sources=include_sources,
             doc_type=doc_type, vault=vault, index_version=store.index_version, db=str(entry.db),
-            filter_notes=tuple(n for n in (limit_note, offset_note, verdict.reason) if n),
+            filter_notes=tuple(n for n in (limit_note, offset_note,
+                                           _sources_note(cfg, scope, include_sources)) if n),
             registry=cfg.registry, refresh=_refresh(cfg, scope),
         )
     finally:
@@ -1345,8 +1319,8 @@ def _dispatch(msg: dict, cfg: Config, caller: grants.Caller | None = None) -> di
         author = grants.OWNER
         if name in WRITE_TOOLS:
             # THE ONE WRITE GATE. Every write passes it before anything else about the write is
-            # looked at, and everything that guards writes today runs after it, unchanged: the
-            # guard, containment, the writable folders, amend's refusals. Re-reads the grant store
+            # looked at, and everything that guards writes today runs after it, unchanged:
+            # containment, the writable folders, amend's refusals. Re-reads the grant store
             # on every call, so a revoke reaches a running session at its next write. On a bridge
             # it refuses only under `--read-only`; the engine decides the rest.
             scope = arguments.get("scope") if isinstance(arguments, dict) else None
@@ -1376,9 +1350,9 @@ def _dispatch(msg: dict, cfg: Config, caller: grants.Caller | None = None) -> di
             # interpret. An unexpected exception is reported the same way for the same reason.
             #
             # ANY refusal of an amend burns its token, and this is the one place every refusal
-            # passes (the write gate above burns its own): a wrong scope, a guard that will not
-            # vouch, a malformed argument. Burning only inside `notes.commit_amend` left the token live after those, so a retry — once the guard
-            # vouched again — wrote against a plan whose refusal had already been shown.
+            # passes (the write gate above burns its own): a wrong scope, a malformed argument.
+            # Burning only inside `notes.commit_amend` left the token live after those, so a retry
+            # wrote against a plan whose refusal had already been shown.
             if name == "amend":
                 _burn_amend_token(params.get("arguments"), cfg)
             return _result(rid, {

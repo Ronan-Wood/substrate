@@ -263,8 +263,7 @@ def test_a_search_reports_the_arms_it_ran_with_even_if_they_recover_mid_call() -
         return kw
 
     real = (server._open, retriever.retrieve, render.search_payload)
-    server._open = lambda scope, registry: (
-        SimpleNamespace(db="/nowhere.db"), _Store(), SimpleNamespace(withhold=(), reason=None))
+    server._open = lambda scope, registry: (SimpleNamespace(db="/nowhere.db"), _Store())
     retriever.retrieve, render.search_payload = fake_retrieve, fake_payload
     try:
         with contextlib.redirect_stderr(io.StringIO()):

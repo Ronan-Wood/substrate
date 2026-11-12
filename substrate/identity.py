@@ -11,7 +11,7 @@ derived data and fatal for authored data — a merge decision an index rebuild c
 than no identity layer at all. So the rules live in a file the VAULT owns and this module only ever
 READS them, re-deriving the mention cache on every compose. Losing the cache costs a compose.
 
-DECLARED, THE WAY THE GUARD IS. A manifest may carry:
+DECLARED BY THE VAULT. A manifest may carry:
 
     identity = "/abs/path/to/identity.json"
 

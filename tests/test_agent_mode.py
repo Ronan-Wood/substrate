@@ -33,28 +33,30 @@ from substrate.models import Chunk, Document  # noqa: E402
 from substrate.store.index_store import IndexStore  # noqa: E402
 
 _BODY = ("Snapshot publishing copies the index into a shared folder for the agent. " * 10).strip()
-_GUARDED = "Transcript of a guarded workspace call that the agent must never see."
+_CALL = "Transcript of a workspace call in a vault that declares guard_state."
 OTHERS = ("acme", "globex")
 
 
-def _scope(root: Path, registry: Path, name: str, *, guarded: bool = False) -> Path:
-    """One composed-looking scope: a project vault with a manifest, two notes (one in a subfolder,
-    one owned by an inherited tier), and an index whose rows mirror what `compose` stores."""
+def _scope(root: Path, registry: Path, name: str, *, guard_state: bool = False) -> Path:
+    """One composed-looking scope: a project vault with a manifest, its notes, and an index whose
+    rows mirror what `compose` stores.
+
+    `guard_state` declares the retired key with no state file behind it and adds a second note:
+    the decision is INHERITED (core-vault) and the call is the project vault's own, which is the
+    note the retired guard withheld."""
     vault = root / f"{name}-vault"
     (vault / "02-areas").mkdir(parents=True)
     manifest = f'name = "{name}"\ninherits = []\n'
-    if guarded:
+    if guard_state:
         manifest += f'guard_state = "{root / "state.json"}"\n'
     (vault / ".substrate.toml").write_text(manifest, encoding="utf-8")
 
     db = root / f"{name}.db"
     with IndexStore(str(db)) as s:
-        # Guarded: the decision is INHERITED (core-vault) and the call is the guarded vault's own,
-        # so withholding one vault and not the scope is what the publish test can see.
         notes = [("decision", vault / "02-areas" / "decision.md",
-                  "core-vault" if guarded else f"{name}-vault", _BODY)]
-        if guarded:
-            notes.append(("call", vault / "call.md", f"{name}-vault", _GUARDED))
+                  "core-vault" if guard_state else f"{name}-vault", _BODY)]
+        if guard_state:
+            notes.append(("call", vault / "call.md", f"{name}-vault", _CALL))
         for doc_id, path, owner, text in notes:
             path.write_text(f"# {doc_id}\n\n{text}\n", encoding="utf-8")
             doc = Document(doc_id=doc_id, source_path=str(path),
@@ -337,44 +339,58 @@ def test_a_missing_manifest_reads_as_unknown_age_not_fresh(world):
 
 # --------------------------------------------------------------------------- the publisher
 
-def test_publishing_strips_guarded_notes_and_operator_paths(tmp_path):
+def test_publishing_strips_operator_paths(tmp_path):
     home = tmp_path / "operator"
     home.mkdir()
     registry = home / "scopes.toml"
-    _scope(home, registry, "demo", guarded=True)
+    _scope(home, registry, "demo")
     shared = tmp_path / "shared"
     shared.mkdir()
-    p = agent.publish("demo", shared, registry=registry)
-    assert set(p.withheld) == {"demo", "demo-vault"}
+    agent.publish("demo", shared, registry=registry)
     raw = (shared / "demo.snapshot.db").read_bytes()
-    assert _GUARDED.encode() not in raw, "a withheld note survived in the file"
     assert str(home).encode() not in raw, "an operator path survived in the file"
     assert oct((shared / "demo.snapshot.db").stat().st_mode & 0o777) == oct(agent.FILE_MODE)
 
-    _hide(registry)
-    res, _ = _call(_cfg(shared), "documents", {"scope": "demo"})
-    assert [d["title"] for d in res["documents"]] == ["decision"]
-    assert res["total"] == 1
 
-
-def test_a_snapshot_carries_no_trace_of_its_sources_vector_writes(tmp_path):
-    """`vector_generation` counts every write to the live index's vectors, and removing a withheld
-    note's vector from the copy moved it once more. Carried into the snapshot, it would tell the
-    agent how much of the guarded vault there is. A snapshot gets its own epoch and starts at 0."""
+def test_a_vault_declaring_guard_state_publishes_its_own_notes(tmp_path):
+    """The engine ignores `guard_state`. No state file exists here, which the retired guard read as
+    "nothing vouches" and answered by removing the project vault's own notes from the copy."""
     home = tmp_path / "operator"
     home.mkdir()
     registry = home / "scopes.toml"
-    _scope(home, registry, "demo", guarded=True)
+    _scope(home, registry, "demo", guard_state=True)
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    agent.publish("demo", shared, registry=registry)
+    assert _CALL.encode() in (shared / "demo.snapshot.db").read_bytes()
+
+    _hide(registry)
+    res, _ = _call(_cfg(shared), "documents", {"scope": "demo"})
+    assert sorted(d["title"] for d in res["documents"]) == ["call", "decision"]
+    assert res["total"] == 2
+
+
+def test_a_snapshot_carries_no_trace_of_its_sources_vector_writes(tmp_path):
+    """`vector_generation` counts every write to the live index's vectors, and removing an
+    excluded note's vector from the copy moved it once more. Carried into the snapshot, it would
+    tell the agent how much was left out. A snapshot gets its own epoch and starts at 0."""
+    home = tmp_path / "operator"
+    home.mkdir()
+    registry = home / "scopes.toml"
+    _scope(home, registry, "demo")
+    call = _add_real_doc(registry, "call", _BODY)
     with IndexStore(str(home / "demo.db")) as s:
         s.store_vectors([("decision#c00000", [1.0, 0.0]), ("call#c00000", [0.0, 1.0])], "m#raw")
         live = tuple(s.db.execute("SELECT epoch, n FROM vector_generation").fetchone())
+    call.write_text(call.read_text(encoding="utf-8") + "\nAn edit compose has not seen.\n",
+                    encoding="utf-8")
     shared = tmp_path / "shared"
     shared.mkdir()
     agent.publish("demo", shared, registry=registry)
     with IndexStore(str(shared / "demo.snapshot.db"), migrate=False, immutable=True) as snap:
         epoch, n = snap.db.execute("SELECT epoch, n FROM vector_generation").fetchone()
         kept = [r[0] for r in snap.db.execute("SELECT chunk_id FROM chunk_vectors")]
-    assert kept == ["decision#c00000"], "the premise: the guarded note's vector was removed"
+    assert kept == ["decision#c00000"], "the premise: the excluded note's vector was removed"
     assert live[1] == 2 and n == 0
     assert epoch != live[0]
 
@@ -499,9 +515,11 @@ def test_a_manifest_planted_as_a_symlink_is_not_read_through(world, tmp_path):
     manifest = shared / "demo.snapshot.json"
     manifest.unlink()
     manifest.symlink_to(secret)
-    # Nothing readable through the link, so nothing to annotate and nothing copied out.
-    assert agent.annotate("demo", shared, registry=registry) == "absent"
-    assert manifest.is_symlink()
+    # Nothing readable through the link, so nothing copied out. An unreadable manifest may sit
+    # beside a copy holding calls, so the copy is withdrawn, and the link with it, not its target.
+    assert agent.annotate("demo", shared, registry=registry) == "withdrawn"
+    assert not manifest.exists() and not manifest.is_symlink()
+    assert "s3cr3t" in secret.read_text(encoding="utf-8")
     assert "s3cr3t" not in "".join(p.read_text(errors="replace") for p in shared.iterdir()
                                    if p.is_file() and not p.is_symlink())
 
@@ -648,7 +666,8 @@ def test_publishes_of_one_scope_are_serialized(world):
     assert done.is_set()
 
 
-def test_a_guard_declared_after_publishing_withdraws_the_snapshot_on_a_failed_refresh(world):
+def test_guard_state_declared_after_publishing_leaves_the_snapshot_served(world):
+    """A failed refresh marks the manifest and keeps the copy, whatever the manifest declares."""
     shared, registry = world
     (registry.parent / agent.CONFIG_FILENAME).write_text(
         f'[publish.demo]\ndir = "{shared}"\n', encoding="utf-8")
@@ -658,10 +677,10 @@ def test_a_guard_declared_after_publishing_withdraws_the_snapshot_on_a_failed_re
                         + f'guard_state = "{registry.parent / "state.json"}"\n', encoding="utf-8")
     refresh_state.record("demo", "compose_failed", registry=registry)
     line = agent.after_refresh_record("demo", "compose_failed", registry=registry)
-    assert "WITHDRAWN" in line
-    assert not (shared / "demo.snapshot.db").exists()
-    text, err = _call(_cfg(shared), "search", {"scope": "demo", "query": "snapshot"})
-    assert err and "no published snapshot" in text
+    assert line == "demo: snapshot manifest marked compose_failed"
+    assert (shared / "demo.snapshot.db").exists()
+    res, err = _call(_cfg(shared), "search", {"scope": "demo", "query": "snapshot"})
+    assert not err and res["passages"]
 
 
 # --------------------------------------------------------------------------- fix-pass crosscheck regressions
@@ -705,50 +724,6 @@ def test_a_document_that_changes_while_notes_are_read_is_not_published(world, mo
     db = shared / "demo.snapshot.db"
     assert (not db.exists()) if rebuild else db.read_bytes() == before
     assert (shared / "demo.snapshot.json").read_bytes() == manifest_before
-
-
-def _declare_guard(registry: Path) -> None:
-    vault = Path(scopes.resolve("demo", registry).vault)
-    manifest = vault / ".substrate.toml"
-    manifest.write_text(manifest.read_text(encoding="utf-8")
-                        + f'guard_state = "{registry.parent / "state.json"}"\n', encoding="utf-8")
-
-
-def test_a_new_guard_withdraws_the_snapshot_even_when_the_successful_publish_fails(
-        world, monkeypatch):
-    shared, registry = world
-    _declare_guard(registry)
-    real, calls = agent._fingerprint, []
-
-    def drifting(*a):
-        calls.append(1)
-        return real(*a) + ("x" if len(calls) > 1 else "")
-
-    monkeypatch.setattr(agent, "_fingerprint", drifting)
-    with pytest.raises(agent.AgentError):
-        agent.publish("demo", shared, registry=registry)
-    assert not (shared / "demo.snapshot.db").exists()
-
-
-def test_a_guard_written_below_a_table_withdraws_the_snapshot_although_publish_refuses(world):
-    """The manifest now refuses a `guard_state` swallowed into a table, so the publish fails. The
-    snapshot built without that guard must go first, not outlive the refusal."""
-    shared, registry = world
-    vault = Path(scopes.resolve("demo", registry).vault)
-    manifest = vault / ".substrate.toml"
-    manifest.write_text(manifest.read_text(encoding="utf-8") + '\n[reference_pins]\n'
-                        + f'guard_state = "{registry.parent / "state.json"}"\n', encoding="utf-8")
-    with pytest.raises(agent.AgentError, match="guard_state"):
-        agent.publish("demo", shared, registry=registry)
-    assert not (shared / "demo.snapshot.db").exists()
-
-
-def test_a_new_guard_withdraws_a_snapshot_whose_manifest_is_missing(world):
-    shared, registry = world
-    (shared / "demo.snapshot.json").unlink()
-    _declare_guard(registry)
-    assert agent.annotate("demo", shared, registry=registry) == "withdrawn"
-    assert not (shared / "demo.snapshot.db").exists()
 
 
 # --------------------------------------------------------------------------- the identity roster
@@ -796,14 +771,13 @@ def test_a_shared_roster_reaches_the_agent_only_as_this_scopes_notes_show_it(wor
     assert docs["total"] == 1
 
 
-@pytest.mark.parametrize("where", ["vault", "guarded vault"])
-def test_a_roster_kept_inside_the_vault_is_stripped_the_same_way(tmp_path, where):
-    """Where the roster file lives grants nothing: one kept in the project vault — the vault a
-    guard withholds — would otherwise ship its glosses beside the stripped notes."""
+def test_a_roster_kept_inside_the_vault_is_stripped_the_same_way(tmp_path):
+    """Where the roster file lives grants nothing: one kept in the project vault would otherwise
+    ship its glosses beside the scope's notes."""
     home = tmp_path / "operator"
     home.mkdir()
     registry = home / "scopes.toml"
-    _scope(home, registry, "demo", guarded=where == "guarded vault")
+    _scope(home, registry, "demo")
     _roster(tmp_path, registry, inside=True)
     shared = tmp_path / "shared"
     shared.mkdir()
@@ -907,3 +881,203 @@ def test_the_swift_decoders_fixtures_are_what_agent_mode_sends(world):
     for name, frame in frames.items():
         fx.assert_matches(name, _payload(frame), payload_of=_frame_payload,
                           stand_in=SNAPSHOT_DIR_STAND_IN)
+
+
+# --------------------------------------------------------------------------- sources stay out
+
+_CALL_TEXT = "Zqxjcalltranscript said on a recorded call, kept from the agent account."
+
+
+def _sourced_scope(tmp_path: Path) -> tuple[Path, Path]:
+    """`demo` holding its decision note and one CALL: a conversation-class note with a passage, an
+    outline, a vector and an entity mention, every row a snapshot could carry it in."""
+    home = tmp_path / "operator"
+    home.mkdir()
+    registry = home / "scopes.toml"
+    vault = _scope(home, registry, "demo")
+    call = vault / "_sources" / "zqxjcallnote.md"
+    call.parent.mkdir()
+    call.write_text(f"# zqxjcallnote\n\n{_CALL_TEXT}\n", encoding="utf-8")
+    with IndexStore(str(home / "demo.db")) as s:
+        doc = Document(doc_id="zqxjcallnote", source_path=str(call),
+                       source_sha256=hashlib.sha256(call.read_bytes()).hexdigest(),
+                       source_pages=1, document_class="conversation", title="zqxjcallnote",
+                       status="active", doc_type="reference", confidence="stated",
+                       vault="demo-vault", tier=3, domains=[], supersedes=[])
+        chunks = [Chunk(chunk_id=f"zqxjcallnote#c0000{i}", doc_id="zqxjcallnote", kind=kind,
+                        text=_CALL_TEXT, path=["zqxjcallnote"], level=1, n_chars=len(_CALL_TEXT),
+                        document_class="conversation")
+                  for i, kind in enumerate(("passage", "outline"))]
+        s.upsert(doc, chunks, markdown_path="x", markdown_mtime=0.0, markdown_sha256="d" * 64)
+        s.store_vectors([("decision#c00000", [1.0, 0.0]), ("zqxjcallnote#c00000", [0.0, 1.0])],
+                        "m#raw")
+        s.replace_identity([("ada-lovelace", "Zqxjcallperson", "person", None)])
+        s.set_document_entities("zqxjcallnote", [("ada-lovelace", "Zqxjcallperson")])
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    return shared, registry
+
+
+def test_a_snapshot_leaves_out_every_trace_of_a_call_by_default(tmp_path):
+    shared, registry = _sourced_scope(tmp_path)
+    agent.publish("demo", shared, registry=registry)
+    raw = (shared / "demo.snapshot.db").read_bytes()
+    for leak in (b"Zqxjcalltranscript", b"zqxjcallnote", b"Zqxjcallperson"):
+        assert leak not in raw, leak
+    with IndexStore(str(shared / "demo.snapshot.db"), migrate=False, immutable=True) as snap:
+        for table in ("documents", "chunks", "snapshot_notes", "document_entities"):
+            classes = {r[0] for r in snap.db.execute(f"SELECT doc_id FROM {table}")}
+            assert classes <= {"decision"}, (table, classes)
+        assert [r[0] for r in snap.db.execute("SELECT chunk_id FROM chunk_vectors")] == \
+            ["decision#c00000"]
+    manifest = json.loads((shared / "demo.snapshot.json").read_text(encoding="utf-8"))
+    assert manifest["include_sources"] is False
+    assert manifest["excluded_documents"] == 0, "a left-out call is not counted anywhere"
+
+    _hide(registry)
+    res, err = _call(_cfg(shared), "search",
+                     {"scope": "demo", "query": "Zqxjcalltranscript", "include_sources": True})
+    assert not err and res["passages"] == []
+    assert any("without its sources" in n for n in res["filters"]["notes"]), res["filters"]
+    docs, _ = _call(_cfg(shared), "documents", {"scope": "demo", "include_sources": True})
+    assert docs["total"] == 1
+    assert any("without its sources" in n for n in docs["filters"]["notes"])
+    plain, _ = _call(_cfg(shared), "documents", {"scope": "demo"})
+    assert not any("without its sources" in n for n in plain["filters"]["notes"]), \
+        "said only to a caller who asked for sources"
+
+
+def test_include_sources_carries_the_calls_into_the_snapshot(tmp_path):
+    shared, registry = _sourced_scope(tmp_path)
+    (registry.parent / agent.CONFIG_FILENAME).write_text(
+        f'[publish.demo]\ndir = "{shared}"\ninclude_sources = true\n', encoding="utf-8")
+    refresh_state.record("demo", "refreshed", registry=registry)
+    agent.after_refresh_record("demo", "refreshed", registry=registry)
+    assert b"Zqxjcalltranscript" in (shared / "demo.snapshot.db").read_bytes()
+    manifest = json.loads((shared / "demo.snapshot.json").read_text(encoding="utf-8"))
+    assert manifest["include_sources"] is True
+
+    _hide(registry)
+    res, err = _call(_cfg(shared), "search",
+                     {"scope": "demo", "query": "Zqxjcalltranscript", "include_sources": True})
+    assert not err and [p["expand_ref"] for p in res["passages"]] == ["demo/zqxjcallnote#c00000"], res
+    assert not any("without its sources" in n for n in res["filters"]["notes"])
+
+
+def test_turning_include_sources_off_rewrites_the_snapshot_without_the_calls(tmp_path):
+    """An unchanged index is not re-verified under the new choice: the notes it leaves out change
+    what the snapshot is built from."""
+    shared, registry = _sourced_scope(tmp_path)
+    agent.publish("demo", shared, registry=registry, include_sources=True)
+    p = agent.publish("demo", shared, registry=registry)
+    assert p.rewrote
+    assert b"Zqxjcalltranscript" not in (shared / "demo.snapshot.db").read_bytes()
+
+
+@pytest.mark.parametrize("value", ['"true"', "1", "[]", "{}"])
+def test_a_non_bool_include_sources_is_refused(world, value):
+    shared, registry = world
+    (registry.parent / agent.CONFIG_FILENAME).write_text(
+        f'[publish.demo]\ndir = "{shared}"\ninclude_sources = {value}\n', encoding="utf-8")
+    with pytest.raises(agent.AgentError, match="include_sources must be true or false"):
+        agent.load_config(registry)
+
+
+def test_an_entry_with_only_a_dir_still_publishes_without_sources(world):
+    shared, registry = world
+    (registry.parent / agent.CONFIG_FILENAME).write_text(
+        f'[publish.demo]\ndir = "{shared}"\n', encoding="utf-8")
+    assert agent.load_config(registry) == {"demo": agent.Target(shared, False)}
+    (shared / "demo.snapshot.db").unlink()
+    refresh_state.record("demo", "refreshed", registry=registry)
+    line = agent.after_refresh_record("demo", "refreshed", registry=registry)
+    assert line.startswith("demo: snapshot published")
+    manifest = json.loads((shared / "demo.snapshot.json").read_text(encoding="utf-8"))
+    assert manifest["include_sources"] is False
+
+
+def test_a_scope_holding_only_calls_is_refused_not_published_empty(tmp_path):
+    shared, registry = _sourced_scope(tmp_path)
+    with IndexStore(str(registry.parent / "demo.db")) as s:
+        s.remove("decision")
+    with pytest.raises(agent.AgentError, match="include_sources = true"):
+        agent.publish("demo", shared, registry=registry)
+    assert not (shared / "demo.snapshot.db").exists()
+
+
+def _entry(registry: Path, shared: Path, *, include_sources: bool) -> None:
+    (registry.parent / agent.CONFIG_FILENAME).write_text(
+        f'[publish.demo]\ndir = "{shared}"\ninclude_sources = '
+        f'{"true" if include_sources else "false"}\n', encoding="utf-8")
+
+
+def test_revoking_include_sources_withdraws_the_snapshot_on_a_failed_refresh(tmp_path):
+    shared, registry = _sourced_scope(tmp_path)
+    _entry(registry, shared, include_sources=True)
+    refresh_state.record("demo", "refreshed", registry=registry)
+    agent.after_refresh_record("demo", "refreshed", registry=registry)
+    assert b"Zqxjcalltranscript" in (shared / "demo.snapshot.db").read_bytes()
+
+    _entry(registry, shared, include_sources=False)
+    refresh_state.record("demo", "compose_failed", registry=registry)
+    line = agent.after_refresh_record("demo", "compose_failed", registry=registry)
+    assert "WITHDRAWN" in line
+    assert not (shared / "demo.snapshot.db").exists()
+    assert not (shared / "demo.snapshot.json").exists()
+
+
+def test_revoking_include_sources_withdraws_the_snapshot_although_publish_refuses(tmp_path):
+    """A scope of calls alone refuses to publish without them, and its copy must not outlive that."""
+    shared, registry = _sourced_scope(tmp_path)
+    with IndexStore(str(registry.parent / "demo.db")) as s:
+        s.remove("decision")
+    agent.publish("demo", shared, registry=registry, include_sources=True)
+    with pytest.raises(agent.AgentError, match="include_sources = true"):
+        agent.publish("demo", shared, registry=registry)
+    assert not (shared / "demo.snapshot.db").exists()
+
+
+def test_a_snapshot_whose_manifest_does_not_record_include_sources_is_withdrawn(world):
+    """Every snapshot the previous engine published carried calls and no `include_sources`."""
+    shared, registry = world
+    manifest_path = shared / "demo.snapshot.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["include_sources"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert agent.annotate("demo", shared, registry=registry) == "withdrawn"
+    assert not (shared / "demo.snapshot.db").exists()
+
+
+def test_a_snapshot_published_without_sources_is_only_marked_on_a_failed_refresh(world):
+    shared, registry = world
+    assert agent.annotate("demo", shared, registry=registry) == "marked"
+    assert (shared / "demo.snapshot.db").exists()
+
+
+def test_a_snapshots_rowids_do_not_show_what_was_left_out(tmp_path):
+    shared, registry = _sourced_scope(tmp_path)
+    _add_real_doc(registry, "later", _BODY)
+    agent.publish("demo", shared, registry=registry)
+    with IndexStore(str(shared / "demo.snapshot.db"), migrate=False, immutable=True) as snap:
+        for table in ("documents", "chunks", "chunk_vectors", "chunks_fts_docsize"):
+            key = "id" if table == "chunks_fts_docsize" else "rowid"
+            ids = [r[0] for r in snap.db.execute(f"SELECT {key} FROM {table} ORDER BY 1")]
+            assert ids == list(range(1, len(ids) + 1)), (table, ids)
+        docs = [r[0] for r in snap.db.execute("SELECT doc_id FROM documents ORDER BY rowid")]
+        assert docs == ["decision", "later"]
+    _hide(registry)
+    res, err = _call(_cfg(shared), "search", {"scope": "demo", "query": "snapshot publishing"})
+    assert not err and {p["expand_ref"] for p in res["passages"]} == \
+        {"demo/decision#c00000", "demo/later#c00000"}, "FTS must follow the renumbered rowids"
+
+
+def test_publish_snapshot_into_another_folder_takes_no_calls(tmp_path):
+    shared, registry = _sourced_scope(tmp_path)
+    _entry(registry, shared, include_sources=True)
+    other = tmp_path / "other"
+    other.mkdir()
+    assert cli.main(["publish-snapshot", "--scope", "demo", "--dir", str(other),
+                     "--registry", str(registry)]) == 0
+    assert b"Zqxjcalltranscript" not in (other / "demo.snapshot.db").read_bytes()
+    assert cli.main(["publish-snapshot", "--scope", "demo", "--registry", str(registry)]) == 0
+    assert b"Zqxjcalltranscript" in (shared / "demo.snapshot.db").read_bytes()

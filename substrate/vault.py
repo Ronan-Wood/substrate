@@ -125,12 +125,11 @@ class Scope:
 # A TOML key that needs no quotes.
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 
-# Every key the manifest format defines at top level. `guard.GUARD_KEY` and `identity.IDENTITY_KEY`
-# are two of them, spelled out rather than imported because `guard` imports this module; a test
-# keeps the three in step. `reference_pins` is the only table, and its keys are the operator's
+# Every key the manifest format defines at top level. `identity.IDENTITY_KEY` is one of them, and a
+# test keeps the two in step. `reference_pins` is the only table, and its keys are the operator's
 # reference names, so no table has a fixed schema to hold unknown keys against.
 TOP_LEVEL_KEYS: frozenset[str] = frozenset(
-    {"name", "inherits", "reference_domains", "reference_pins", "guard_state", "identity"})
+    {"name", "inherits", "reference_domains", "reference_pins", "identity"})
 
 
 def misplaced_keys(manifest: dict) -> list[tuple[str, str]]:
@@ -139,7 +138,7 @@ def misplaced_keys(manifest: dict) -> list[tuple[str, str]]:
 
     TOML puts every key written after a `[table]` header inside that table, so a top-level key
     written below `[reference_pins]` is absent where it is read and present where nothing reads it.
-    A swallowed `guard_state` is a string, so it passed as a pin, and the vault was unguarded.
+    A swallowed `identity` is a string, so it would pass as a pin, and the roster would be unread.
     The path is a tuple, not a joined string: a table may be named `[""]`, and its path must not
     read as the top level. Iterative, because a manifest tomllib can parse may nest deeper than a
     recursive walk can go.

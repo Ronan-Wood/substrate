@@ -1,13 +1,12 @@
 """A multi-query paraphrase is held to the same vault and entity filters as the question asked.
 
-The variant LEXICAL search was the one arm that dropped `withheld_vaults=` and `entity=`. The direct
-arm, the variant vector arm and the outline search all passed them, and routed passages inherit
-them by being pinned to an outline's `doc_id`. So a passage from a guard-withheld vault, or from a
-note that does not mention the requested entity, could enter the fused results through a
-paraphrase while every other arm correctly refused it.
+The variant LEXICAL search was the one arm that dropped `entity=`. The direct arm, the variant
+vector arm and the outline search all passed it, and routed passages inherit it by being pinned to
+an outline's `doc_id`. So a passage from a note that does not mention the requested entity could
+enter the fused results through a paraphrase while every other arm correctly refused it.
 
-Latent when found: only `substrate eval` wires a `MultiQuery`, and the MCP server, the only caller
-that sets `withheld_vaults`, passes none. The tests pin it before a caller combines the two.
+Latent when found: only `substrate eval` wires a `MultiQuery`. The tests pin it before another
+caller wires one.
 
 Runnable with plain `python tests/test_variant_filters.py`; discovered by pytest.
 """
@@ -56,13 +55,13 @@ def _store() -> IndexStore:
     return IndexStore(str(Path(tempfile.mkdtemp()) / "index.db"))
 
 
-def test_a_paraphrase_does_not_reach_a_withheld_vault() -> None:
+def test_a_paraphrase_does_not_reach_a_vault_outside_the_filter() -> None:
     with _store() as s:
         allowed = _put(s, "open", f"{QUERY} in the open vault", vault="core")
-        withheld = _put(s, "secret", f"{PARAPHRASE} in the guarded vault", vault="acme")
-        got = _ids(s, withheld_vaults=frozenset({"acme"}))
+        outside = _put(s, "other", f"{PARAPHRASE} in another vault", vault="acme")
+        got = _ids(s, vaults=frozenset({"core"}))
         assert allowed in got, got
-        assert withheld not in got, "a guarded vault's passage entered through the paraphrase"
+        assert outside not in got, "a passage outside `vaults` entered through the paraphrase"
 
 
 def test_a_paraphrase_does_not_reach_a_note_outside_the_entity() -> None:
@@ -84,9 +83,9 @@ def test_a_paraphrase_still_reaches_what_the_filters_allow() -> None:
         reachable = _put(s, "also-open", f"{PARAPHRASE} in another open vault", vault="research")
         s.replace_identity([("ada", "Ada", "person", None)])
         s.set_document_entities("also-open", [("ada", "Ada")])
-        got = _ids(s, withheld_vaults=frozenset({"acme"}))
+        got = _ids(s, vaults=frozenset({"core", "research"}))
         assert reachable in got, got
-        got = _ids(s, entity="ada", withheld_vaults=frozenset({"acme"}))
+        got = _ids(s, entity="ada", vaults=frozenset({"core", "research"}))
         assert reachable in got, got
 
 
