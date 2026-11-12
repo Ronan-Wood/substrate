@@ -197,10 +197,10 @@ def test_the_agent_publisher_leaves_out_an_edited_derived_note() -> None:
              "demo-core-vault": (root / "demo-core-vault").resolve()}
     with IndexStore(str(db), migrate=False) as s:
         rows = agent._doc_rows(s)
-    _copies, excluded = agent._read_notes(rows, roots, frozenset())
+    _copies, excluded = agent._read_notes(rows, roots)
     assert doc_id not in excluded, "unedited, it is carried"
     note.write_text(_DERIVED + "\nEdited after compose.\n", encoding="utf-8")
-    _copies, excluded = agent._read_notes(rows, roots, frozenset())
+    _copies, excluded = agent._read_notes(rows, roots)
     assert doc_id in excluded
 
 
@@ -229,7 +229,7 @@ def test_the_agent_publisher_leaves_out_a_derived_note_it_cannot_check() -> None
              "demo-core-vault": (root / "demo-core-vault").resolve()}
     with IndexStore(str(db), migrate=False) as s:
         rows = agent._doc_rows(s)
-    copies, excluded = agent._read_notes(rows, roots, frozenset())
+    copies, excluded = agent._read_notes(rows, roots)
     assert doc_id in excluded
     assert copies and all(c.stale == 0 for c in copies), "what is carried is a verified match"
 

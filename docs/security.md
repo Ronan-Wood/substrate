@@ -18,7 +18,7 @@ It isn't a disclosure channel.
 | **a process running as you** | the same. A same-user attacker is out of scope (`SECURITY.md`) |
 | **an MCP client you launch over stdio** | the tools that server exposes, write tools included unless `--read-only` |
 | **an MCP client on the shared engine** | the read tools; the write tools only once you grant it by name (`substrate grant`) |
-| **another local user** | nothing over stdio or the Unix socket. Over `--http`, the same reads your own clients get, including a guarded vault while its guard is satisfied. In agent mode, the snapshots you publish |
+| **another local user** | nothing over stdio or the Unix socket. Over `--http`, the same reads your own clients get. In agent mode, the snapshots you publish |
 | **the network** | nothing. The engine connects only to loopback and listens on nothing beyond it |
 | **a document being ingested** | nothing. PDFs, images, archives and HTML are untrusted input |
 
@@ -75,8 +75,8 @@ for a client you granted by name ([`substrate/grants.py`](../substrate/grants.py
   that finds a spelling some reader takes for a stamp key and the engine's check misses. Read it
   as who the engine last wrote the note for, not as who wrote what. An engine write log, outside
   the vault, is planned as the record.
-- Every other rule still applies after the grant: the vault guard, the project vault only, the
-  writable folders, and `amend`'s refusals. Each write is still a plan, then a commit.
+- Every other rule still applies after the grant: the project vault only, the writable folders,
+  and `amend`'s refusals. Each write is still a plan, then a commit.
 
 **What a grant does:** a client writes only after you said yes to that client name, every write it
 makes is labelled with that name, and a revoke stops it at its next write.
@@ -122,28 +122,6 @@ The store of originals refuses a cloud-sync folder and any file carrying an exte
 The one exception is agent-mode snapshots, which are readable by their folder's group by design
 (see below).
 
-## The vault guard
-
-A vault can hold content whose owner wants a narrower audience than you have, for example call
-transcripts that an app shows only while it is running. Such a vault declares a guard at the
-top level of its manifest, above any `[table]`:
-
-```toml
-guard_state = "/absolute/path/to/state.json"
-```
-
-The MCP server is designed to withhold that vault's own notes unless the state file shows a
-heartbeat from the last 60 seconds naming the scope being asked for
-([`substrate/guard.py`](../substrate/guard.py)). The guard is a privacy control and is opt-in, so
-report anything that gets past it privately, as [`SECURITY.md`](../SECURITY.md) describes.
-
-- **It is built to fail closed.** A missing, unreadable or malformed state file withholds the vault.
-  So does a `guard_state` written inside a table, which `compose` also refuses.
-- **It withholds a vault, not a scope.** The vaults the guarded one inherits stay readable.
-- **Only what the MCP server returns is guarded.** The CLI, `query` included, and anything that
-  opens the index read the guarded notes. `compose`, `embed` and the refresh loop are your own tools
-  and keep the index current.
-
 ## Agent mode
 
 `substrate-mcp --agent-mode --scopes <names> --snapshot-dir <dir>` serves chosen scopes to another
@@ -151,7 +129,16 @@ local user who can't read your home folder ([`substrate/agent.py`](../substrate/
 
 - Your own engine publishes a snapshot of each scope listed in `agent-publish.toml`, after each
   successful refresh. A snapshot holds the full text of the scope's notes, with vault-relative
-  paths, and with a guarded vault's notes removed rather than filtered.
+  paths.
+- **Calls stay out of a snapshot unless you let them in.** Every conversation-class note (call
+  transcripts) is removed from the copy, not filtered: its passages, outlines, vectors, entity
+  mentions and text. Set `include_sources = true` in the scope's `[publish.<scope>]` entry to
+  publish them, and the agent then reads them by passing `include_sources`, as any client does.
+  The snapshot manifest records which you chose, and a caller asking for sources from a snapshot
+  without them is told so in `filters`. Setting it back to `false`, or deleting the line, removes a
+  published copy at the next refresh, before anything else is tried, and a copy whose manifest
+  doesn't record the choice is treated as holding calls. Deleting the whole entry stops
+  publishing but removes nothing, so delete that scope's snapshot files yourself.
 - Snapshot files are mode `0640`, so **what another user can read is decided by which scopes you
   publish and by the snapshot folder's group**. Give each agent account its own folder.
 - `--scopes` limits what that one server answers. Any other scope gets the same fixed "scope not

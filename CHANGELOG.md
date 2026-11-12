@@ -5,6 +5,32 @@ Every release of the engine, newest first. The format follows
 [semantic versioning](https://semver.org/). Each release attaches its source tarball and a
 `SHA256SUMS` (see [`RELEASING.md`](RELEASING.md)).
 
+## Unreleased
+
+### Removed
+
+- **The vault guard.** `guard_state` is no longer a manifest key, and a manifest that still
+  declares it composes, as with any key the engine does not read. Nothing is withheld for it:
+  the MCP server returns the vault's own notes through `search`, `documents` and `expand` whatever
+  the state file says, and `ingest` and `amend` no longer refuse the vault.
+
+### Changed
+
+- **Agent-mode snapshots leave out every call unless the scope's entry opts in.** A
+  conversation-class note is removed from the snapshot, not filtered, for every published scope,
+  and `include_sources = true` under `[publish.<scope>]` in `agent-publish.toml` publishes them.
+  Before, the guard removed a guarded vault's own notes and every other scope's calls were
+  published. An entry with only `dir` keeps working, now without its calls, except for a scope
+  that holds nothing but calls, which refuses to publish. Any value of `include_sources` other
+  than `true` or `false` is refused. The snapshot manifest records the choice, and a caller asking
+  for sources from a snapshot without them is told so in `filters`.
+- A published snapshot that may hold calls its entry does not let in is removed before anything
+  else is tried, on a failed refresh too. That includes every snapshot an earlier engine
+  published, so after upgrading, a scope that does not opt in serves nothing until its next
+  successful refresh. `publish-snapshot --dir` into a folder other than the entry's takes no calls.
+- A snapshot's rowids are renumbered, so their gaps no longer show how many documents and
+  passages were left out of it.
+
 ## 0.2.0
 
 ### Fixed

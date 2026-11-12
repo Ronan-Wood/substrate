@@ -128,11 +128,10 @@ def _filters(i: int) -> dict:
         {"doc_id": "d03"},
         {"vaults": frozenset({"proj"})},
         {"vaults": frozenset()},
-        {"withheld_vaults": frozenset({"core"})},
-        {"vaults": frozenset({"proj", "core"}), "withheld_vaults": frozenset({"core"})},
+        {"vaults": frozenset({"proj", "core"})},
         {"entity": "ent-a"},
         {"entity": "nobody"},
-        {"kind": "passage", "statuses": DEFAULT_STATUSES, "withheld_vaults": frozenset({"calls"}),
+        {"kind": "passage", "statuses": DEFAULT_STATUSES, "vaults": frozenset({"proj"}),
          "entity": "ent-b"},
     ]
     return opts[i % len(opts)]
@@ -209,11 +208,10 @@ def _plant_best(path: str, doc_id: str, q: list[float], **doc_kw) -> str:
 
 @pytest.mark.parametrize("doc_kw, call_kw", [
     ({"status": "archived"}, {"statuses": DEFAULT_STATUSES}),
-    ({"vault": "core"}, {"withheld_vaults": frozenset({"core"})}),
     ({"vault": "calls"}, {"vaults": frozenset({"proj"})}),
     ({"document_class": "conversation"}, {}),
     ({"kinds": ["outline"]}, {"kind": "passage"}),
-], ids=["status", "withheld-vault", "vault", "class-exclusion", "kind"])
+], ids=["status", "vault", "class-exclusion", "kind"])
 def test_a_filter_removes_the_best_match_on_the_cached_path(db: str, scan_forbidden,
                                                             doc_kw, call_kw) -> None:
     q = _unit(random.Random(3))

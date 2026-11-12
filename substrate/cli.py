@@ -2143,18 +2143,21 @@ def cmd_publish_snapshot(args: argparse.Namespace) -> int:
     from substrate import agent
 
     try:
-        target = (Path(args.dir).expanduser() if args.dir
-                  else agent.load_config(args.registry).get(args.scope))
+        entry = agent.load_config(args.registry).get(args.scope)
+        target = Path(args.dir).expanduser() if args.dir else entry.dir if entry else None
         if target is None:
             print(f"FATAL: no --dir, and {args.scope!r} is not under [publish] in "
                   f"{agent.CONFIG_FILENAME} beside the registry.", file=sys.stderr)
             return 2
-        p = agent.publish(args.scope, target, registry=args.registry)
+        # The opt-in was written for the entry's folder, so another folder gets no calls.
+        include = (entry is not None and entry.include_sources
+                   and target.resolve() == entry.dir.resolve())
+        p = agent.publish(args.scope, target, registry=args.registry, include_sources=include)
     except agent.AgentError as e:
         print(f"FATAL (publish-snapshot): {e}", file=sys.stderr)
         return 2
     print(f"  {p.scope}: snapshot {'published' if p.rewrote else 'verified, unchanged'} -> "
-          f"{p.db}" + (f" · withheld vaults {', '.join(p.withheld)}" if p.withheld else "")
+          f"{p.db}"
           + (f" · {p.excluded} document(s) outside the vaults excluded" if p.excluded else ""))
     return 0
 
@@ -2789,7 +2792,9 @@ def main(argv: list[str] | None = None) -> int:
     ps.add_argument("--scope", required=True)
     ps.add_argument("--dir", default=None,
                     help="the shared folder to publish into (default: the scope's `dir` in "
-                         "agent-publish.toml beside the registry). Must already exist.")
+                         "agent-publish.toml beside the registry). Must already exist. Calls "
+                         "are left out unless that entry sets include_sources = true and names "
+                         "this folder.")
     ps.add_argument("--registry", default=None,
                     help=f"scope registry (default ${scopes.ENV_VAR}, else "
                          f"{scopes.DEFAULT_REGISTRY})")

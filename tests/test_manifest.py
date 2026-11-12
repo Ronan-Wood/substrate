@@ -587,32 +587,31 @@ def _manifest_refusal(body: str) -> str | None:
     return None
 
 
-def test_a_guard_written_below_a_table_is_refused_by_name() -> None:
-    """`guard_state` below `[reference_pins]` is a string, so it passed as a pin and the vault
-    composed unguarded. The refusal names the key and the table it landed in."""
+def test_a_reserved_key_written_below_a_table_is_refused_by_name() -> None:
+    """`identity` below `[reference_pins]` is a string, so it would pass as a pin. The refusal
+    names the key and the table it landed in."""
     for table, body in (
         ("reference_pins", 'name = "demo"\ninherits = []\n\n[reference_pins]\ngo = "1.21"\n'
-                           'guard_state = "/tmp/state.json"\n'),
-        ("extra", 'name = "demo"\ninherits = []\n\n[extra]\nguard_state = "/tmp/state.json"\n'),
+                           'identity = "/tmp/roster.json"\n'),
+        ("extra", 'name = "demo"\ninherits = []\n\n[extra]\nidentity = "/tmp/roster.json"\n'),
         ("reference_pins", 'name = "demo"\ninherits = []\n'
-                           'reference_pins.guard_state = "/tmp/state.json"\n'),
-        ("extra", 'name = "demo"\ninherits = []\n\n[[extra]]\nguard_state = "/tmp/state.json"\n'),
+                           'reference_pins.identity = "/tmp/roster.json"\n'),
+        ("extra", 'name = "demo"\ninherits = []\n\n[[extra]]\nidentity = "/tmp/roster.json"\n'),
         ("extra.deeper", 'name = "demo"\ninherits = []\n\n[extra.deeper]\n'
-                         'guard_state = "/tmp/state.json"\n'),
+                         'identity = "/tmp/roster.json"\n'),
         # A table may be named by an empty quoted key. Its keys are no more top level than any
         # other table's, though a path built from its name is empty.
-        ('""', 'name = "demo"\ninherits = []\n\n[""]\nguard_state = "/tmp/state.json"\n'),
-        ('""', 'name = "demo"\ninherits = []\n"".guard_state = "/tmp/state.json"\n'),
+        ('""', 'name = "demo"\ninherits = []\n\n[""]\nidentity = "/tmp/roster.json"\n'),
+        ('""', 'name = "demo"\ninherits = []\n"".identity = "/tmp/roster.json"\n'),
     ):
         refusal = _manifest_refusal(body)
-        assert refusal is not None, f"accepted a swallowed guard_state: {body!r}"
-        assert "'guard_state'" in refusal and f"[{table}]" in refusal, refusal
+        assert refusal is not None, f"accepted a swallowed identity: {body!r}"
+        assert "'identity'" in refusal and f"[{table}]" in refusal, refusal
 
 
 def test_every_known_top_level_key_is_refused_inside_a_table() -> None:
     for key, value in (("identity", '"/tmp/roster.json"'), ("name", '"other"'),
-                       ("inherits", '["core-vault"]'), ("reference_domains", '["software-dev"]'),
-                       ("guard_state", '"/tmp/state.json"')):
+                       ("inherits", '["core-vault"]'), ("reference_domains", '["software-dev"]')):
         refusal = _manifest_refusal(
             f'name = "demo"\ninherits = []\n\n[reference_pins]\ngo = "1.21"\n{key} = {value}\n')
         assert refusal is not None and f"'{key}'" in refusal and "[reference_pins]" in refusal, \
@@ -650,8 +649,8 @@ def test_the_best_effort_chain_refuses_an_inherits_written_below_a_table() -> No
 
 
 def test_the_known_keys_include_every_key_another_module_reads() -> None:
-    from substrate import guard, identity
-    assert {guard.GUARD_KEY, identity.IDENTITY_KEY} <= V.TOP_LEVEL_KEYS
+    from substrate import identity
+    assert identity.IDENTITY_KEY in V.TOP_LEVEL_KEYS
 
 
 if __name__ == "__main__":

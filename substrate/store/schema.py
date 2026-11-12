@@ -103,13 +103,13 @@ SCHEMA_VERSION = 11
 #     re-derived, not lost.
 
 # v10 (2026-08-07) IDENTITY, as a CACHE. `entities` and `document_entities` hold who a note
-#     mentions, resolved at compose from a file the vault DECLARES (`identity` in the manifest,
-#     the same pattern `guard_state` uses). It bumps the version because it adds tables, and it is
-#     worth stating why they are only ever a cache: the system of record is that vault file, not
-#     this index. The index is dropped and rebuilt by every `--clean` compose, and identity must
-#     survive that — a hand-made "these two names are one person" decision that a rebuild could
-#     erase is worse than no identity layer at all. So nothing here is authored here; it is
-#     re-derived from the declared file on every compose, and losing it costs a compose.
+#     mentions, resolved at compose from a file the vault DECLARES (`identity` in the manifest).
+#     It bumps the version because it adds tables, and it is worth stating why they are only ever
+#     a cache: the system of record is that vault file, not this index. The index is dropped and
+#     rebuilt by every `--clean` compose, and identity must survive that — a hand-made "these two
+#     names are one person" decision that a rebuild could erase is worse than no identity layer at
+#     all. So nothing here is authored here; it is re-derived from the declared file on every
+#     compose, and losing it costs a compose.
 # v11 (2026-11-05) documents gains `note_sha256`: the checksum of the file at `source_path` as
 #     ingest read it. `source_sha256` holds a DECLARED checksum for a note that names its original
 #     (a PDF-derived note names the PDF), so an edit to such a note was invisible to freshness and

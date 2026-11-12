@@ -10,7 +10,7 @@ Start with the [project README](../README.md) for the install and the quickstart
 |---|---|
 | [`architecture.md`](architecture.md) | the pipeline from a vault to an answer, and a module map |
 | [`configuration.md`](configuration.md) | `.substrate.toml`, the registry, `serve.toml`, `~/.substrate`, local models |
-| [`security.md`](security.md) | who can reach what: loopback-only models, the Unix socket, read-only transports, the vault guard, agent mode |
+| [`security.md`](security.md) | who can reach what: loopback-only models, the Unix socket, read-only transports, agent mode |
 | [`demo-vault.md`](demo-vault.md) | the demo vaults, note by note, and queries that show each behaviour |
 | [`client-contract.md`](client-contract.md) | for client authors: `contract/contract.json`, the golden frames, the wire version |
 

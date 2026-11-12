@@ -209,25 +209,6 @@ def _add_vault_filter(where: list[str], args: list[Any], vaults: frozenset[str] 
     args.extend(ordered)
 
 
-def _add_vault_exclusion(where: list[str], args: list[Any], excluded: frozenset[str] | None) -> None:
-    """Withhold passages composed from these vaults. Empty or None means withhold nothing.
-
-    SEPARATE FROM THE INCLUDE FILTER, and both can apply at once. The include list is what the
-    CALLER asked for; this is what the corpus refuses to hand over regardless — a guarded vault
-    whose application is not vouching for it. A caller narrowing to exactly the guarded vault gets
-    nothing and is told why, which is the correct answer to "show me the thing you may not show me".
-
-    `d.vault IS NULL OR ...`: a row with no recorded provenance cannot be proven to be the guarded
-    vault's, and withholding every unattributed note because one vault is guarded would take the
-    corpus down. The guard protects a NAMED vault.
-    """
-    if not excluded:
-        return
-    ordered = sorted(excluded)
-    where.append(f"(d.vault IS NULL OR d.vault NOT IN ({','.join('?' * len(ordered))}))")
-    args.extend(ordered)
-
-
 def _add_entity_filter(where: list[str], args: list[Any], entity: str | None) -> None:
     """Restrict to documents that mention this entity. None means no filter.
 
@@ -550,7 +531,6 @@ class IndexStore:
         statuses: frozenset[str] | None = None,
         include_sources: bool = False,
         vaults: frozenset[str] | None = None,
-        withheld_vaults: frozenset[str] | None = None,
         entity: str | None = None,
     ) -> list[Hit]:
         """Lexical search, precision-first with a recall TOP-UP.
@@ -569,8 +549,7 @@ class IndexStore:
         kw = dict(
             kind=kind, document_class=document_class, doc_id=doc_id,
             min_path_depth=min_path_depth, path_prefix=path_prefix, statuses=statuses,
-            include_sources=include_sources, vaults=vaults, withheld_vaults=withheld_vaults,
-            entity=entity,
+            include_sources=include_sources, vaults=vaults, entity=entity,
         )
         seen: set[str] = set()
         out: list[Hit] = []
@@ -607,7 +586,6 @@ class IndexStore:
                              include_sources=kw.get("include_sources", False)
                              or kw.get("document_class") is not None)
         _add_vault_filter(where, args, kw.get("vaults"))
-        _add_vault_exclusion(where, args, kw.get("withheld_vaults"))
         _add_entity_filter(where, args, kw.get("entity"))
         args.append(kw.get("k", 10))
 
@@ -711,7 +689,6 @@ class IndexStore:
 
     def browse(self, *, statuses: frozenset[str] | None, include_sources: bool,
                vault: str | None = None, doc_type: str | None = None,
-               withheld_vaults: frozenset[str] | None = None,
                entity: str | None = None,
                limit: int = 25, offset: int = 0) -> tuple[list[dict], int]:
         """What a scope HOLDS, one row per note, in a stable order. The browse counterpart to
@@ -754,7 +731,6 @@ class IndexStore:
         if doc_type is not None:
             where.append("d.doc_type = ?")
             args.append(doc_type)
-        _add_vault_exclusion(where, args, withheld_vaults)
         # `d.doc_id` here, not `c.doc_id`: browse queries the documents table directly, and the
         # chunk-shaped clause would have referenced a table this statement does not join.
         if entity is not None:
@@ -1150,7 +1126,6 @@ class IndexStore:
         statuses: frozenset[str] | None = None,
         include_sources: bool = False,
         vaults: frozenset[str] | None = None,
-        withheld_vaults: frozenset[str] | None = None,
         entity: str | None = None,
     ) -> list[Hit]:
         """Brute-force cosine. Vectors are L2-normalized, so a dot product IS cosine.
@@ -1181,7 +1156,6 @@ class IndexStore:
         # would otherwise walk back in through cosine, and a filter that holds on one arm and not
         # the other is a filter that holds until the stack is wired.
         _add_vault_filter(where, args, vaults)
-        _add_vault_exclusion(where, args, withheld_vaults)
         _add_entity_filter(where, args, entity)
 
         hits = self._vector_search_cached(query_vec, model, k, where, args)

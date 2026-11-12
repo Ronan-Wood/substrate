@@ -48,7 +48,7 @@ configuration* section is what the engine runs.
 | retrieval | `retrieve/` (`retriever.py`, `expand.py`, `rerank.py`, `rerank_cross.py`), `embed/`, `stack.py` |
 | state and freshness | `scopes.py` (the registry), `refresh.py`, `refresh_state.py`, `freshness.py`, `prune.py` |
 | transports | `mcp/server.py`, `mcp/bridge.py` (`--connect`), `local_socket.py`, `wire.py` |
-| safety | `net.py` (loopback egress), `guard.py` (vault guard), `private.py` (file modes), `agent.py` (agent mode) |
+| safety | `net.py` (loopback egress), `private.py` (file modes), `agent.py` (agent mode) |
 | originals | `blobs.py`, `blob_lifecycle.py` (the content-addressed store behind derived notes) |
 | entry point | `cli.py` |
 

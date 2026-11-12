@@ -14,10 +14,14 @@ opens that file `immutable=1` (`IndexStore(immutable=True)`), touching nothing b
 
 THE SNAPSHOT CARRIES WHAT THE AGENT CANNOT FETCH. The index holds passages, not notes — `expand
 mode=note` reads the note from the vault — so the publisher adds a `snapshot_notes` table with every
-note's text as it stood at publish time. It also strips what would leak the operator's layout
-(absolute source paths become vault-relative) and what is not the agent's to see: a vault that
-declares a `guard` has its own notes REMOVED, not filtered, because a copy cannot check a heartbeat
-and the guard fails closed (`guard.py`).
+note's text as it stood at publish time. It also strips what would leak the operator's layout:
+absolute source paths become vault-relative.
+
+CALLS STAY OUT UNLESS THE OPERATOR LETS THEM IN. A conversation-class document (a call transcript)
+is REMOVED from the snapshot, not filtered — passages, outlines, vectors, entity mentions and note
+text — unless its `[publish.<scope>]` entry sets `include_sources = true`. Retrieval withholds
+calls by default for accuracy, and a caller lifts that with a flag; across a uid boundary the
+operator decides instead, per scope, and the manifest records what was decided.
 
 THE ENFORCEMENT IS SERVER-SIDE. `--scopes` is the whole world in agent mode: any other name gets
 the same fixed "scope not available", which names nothing, so the error cannot be used to list what
@@ -40,7 +44,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterable
 
-from substrate import guard, private, refresh_state, scopes
+from substrate import private, refresh_state, scopes
 
 SNAPSHOT_SUFFIX = ".snapshot.db"
 MANIFEST_SUFFIX = ".snapshot.json"
@@ -175,11 +179,20 @@ def _trusted_dir(directory: Path) -> None:
         raise AgentError(not_a_folder)
 
 
-def load_config(registry: str | Path | None = None) -> dict[str, Path]:
-    """`{scope: snapshot dir}` from `agent-publish.toml` beside the registry; `{}` when absent.
+@dataclass(frozen=True)
+class Target:
+    """Where one scope is published, and whether its snapshot carries the scope's sources."""
+
+    dir: Path
+    include_sources: bool = False
+
+
+def load_config(registry: str | Path | None = None) -> dict[str, Target]:
+    """`{scope: Target}` from `agent-publish.toml` beside the registry; `{}` when absent.
 
         [publish.atlas]
         dir = "/Users/Shared/atlas-agent/substrate"
+        include_sources = true      # optional; false leaves every call out of the snapshot
 
     Opt-in by file, like the registry itself: no file, no publishing, and nothing under
     `/Users/Shared` is ever written by a machine that did not ask for it.
@@ -199,7 +212,10 @@ def load_config(registry: str | Path | None = None) -> dict[str, Path]:
         if not valid_scope_name(name) or not isinstance(row, dict) \
                 or not isinstance(row.get("dir"), str) or not row["dir"].strip():
             raise AgentError(f"{path}: [publish.{name}] needs a valid scope name and a `dir`.")
-        out[name] = Path(row["dir"]).expanduser()
+        include = row.get("include_sources", False)
+        if not isinstance(include, bool):
+            raise AgentError(f"{path}: [publish.{name}] include_sources must be true or false.")
+        out[name] = Target(Path(row["dir"]).expanduser(), include)
     return out
 
 
@@ -209,7 +225,6 @@ class Published:
     db: Path
     manifest: Path
     rewrote: bool
-    withheld: tuple[str, ...]
     excluded: int = 0
 
 
@@ -224,25 +239,17 @@ class _NoteCopy:
     stale: int | None
 
 
-def _withheld(scope: str, project_vault: Path) -> frozenset[str]:
-    """Fail closed: a declared guard, well-formed or not, withholds the project vault's own notes,
-    under the same names the server's verdict carries (`guard.withheld_names`)."""
-    if guard.declared_guard(project_vault) is None:
-        return frozenset()
-    return guard.withheld_names(project_vault, scope)
-
-
 def _doc_rows(store) -> list[tuple]:
     """The rows the note copies are derived from. Captured ONCE and fingerprinted, so the re-check
     after the copy sees a document that was added, removed, moved to another vault or repointed
     while the notes were being read — `index_version` hashes content, not where it lives."""
     return [tuple(r) for r in store.db.execute(
-        "SELECT doc_id, source_path, source_sha256, vault, note_sha256 FROM documents "
-        "ORDER BY doc_id")]
+        "SELECT doc_id, source_path, source_sha256, vault, note_sha256, document_class "
+        "FROM documents ORDER BY doc_id")]
 
 
-def _read_notes(rows: list[tuple], roots: dict[str, Path],
-                withheld: frozenset[str]) -> tuple[list[_NoteCopy], frozenset[str]]:
+def _read_notes(rows: list[tuple],
+                roots: dict[str, Path]) -> tuple[list[_NoteCopy], frozenset[str]]:
     """Every note the snapshot will carry, read from the vault — and ONLY from the vault — plus
     the documents to EXCLUDE from the snapshot altogether.
 
@@ -259,9 +266,7 @@ def _read_notes(rows: list[tuple], roots: dict[str, Path],
     from substrate.freshness import read_bounded, stale_verdict
 
     out, excluded = [], set()
-    for doc_id, source_path, source_sha256, vault, note_sha256 in rows:
-        if vault in withheld:
-            continue
+    for doc_id, source_path, source_sha256, vault, note_sha256, _class in rows:
         try:
             real = Path(source_path).resolve(strict=True)
             if not any(real.is_relative_to(root) for root in roots.values()):
@@ -282,7 +287,7 @@ def _read_notes(rows: list[tuple], roots: dict[str, Path],
     return out, frozenset(excluded)
 
 
-def _fingerprint(store, withheld: frozenset[str], excluded: frozenset[str], docs: list[tuple],
+def _fingerprint(store, include_sources: bool, excluded: frozenset[str], docs: list[tuple],
                  notes: list[_NoteCopy]) -> str:
     """What the snapshot would be built from. Equal fingerprints mean an identical snapshot, so a
     refresh that changed nothing re-verifies the manifest instead of rewriting 50MB."""
@@ -303,7 +308,7 @@ def _fingerprint(store, withheld: frozenset[str], excluded: frozenset[str], docs
         [list(r) for r in docs],
         [[n.doc_id, n.path, hashlib.sha256(n.text.encode()).hexdigest(), n.stale]
          for n in notes],
-        sorted(withheld), sorted(excluded), schema.SCHEMA_VERSION, MANIFEST_VERSION,
+        include_sources, sorted(excluded), schema.SCHEMA_VERSION, MANIFEST_VERSION,
     ])
     return hashlib.sha256(sig.encode()).hexdigest()
 
@@ -319,29 +324,26 @@ def _relative(source: str, roots: dict[str, Path], vault: str | None) -> str:
     return f"{vault or '?'}/{p.name}"
 
 
-def _fill(tmp: Path, withheld: frozenset[str], excluded: frozenset[str],
-          notes: list[_NoteCopy], meta: dict) -> None:
-    """Turn a raw `VACUUM INTO` copy into a snapshot: withhold, add note text, strip paths."""
+def _fill(tmp: Path, excluded: frozenset[str], notes: list[_NoteCopy], meta: dict) -> None:
+    """Turn a raw `VACUUM INTO` copy into a snapshot: drop the excluded, add note text, strip
+    paths."""
     from substrate.store.index_store import IndexStore
 
     store = IndexStore(str(tmp), migrate=False)
     db = store.db
     try:
-        # Deleted pages are zeroed, and the whole file is VACUUMed below, so a withheld note's text
-        # does not survive in free pages of a file handed to another user.
+        # Deleted pages are zeroed, and the whole file is VACUUMed below, so an excluded note's
+        # text does not survive in free pages of a file handed to another user.
         db.execute("PRAGMA secure_delete=ON")
-        marks = ",".join("?" * len(withheld))
-        gone = set(excluded) | {r[0] for r in db.execute(
-            f"SELECT doc_id FROM documents WHERE vault IN ({marks})", tuple(withheld))}
-        if gone:
-            for doc_id in sorted(gone):
-                store.remove(doc_id)
-            db.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
+        for doc_id in sorted(excluded):
+            store.remove(doc_id)
+        _renumber_rowids(db)
+        db.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
         _strip_roster(db)
         # `vector_generation` came across with `VACUUM INTO`: the live index's epoch, and an `n`
-        # the removals above just moved once per withheld vector, which would tell the agent how
-        # much of a guarded vault there is. Redrawn, it says nothing about the source, and no two
-        # snapshots share a generation.
+        # the removals above just moved once per excluded vector, which would tell the agent how
+        # much was left out. Redrawn, it says nothing about the source, and no two snapshots share
+        # a generation.
         if db.execute("SELECT 1 FROM sqlite_master WHERE name = 'vector_generation'").fetchone():
             db.execute("UPDATE vector_generation SET epoch = lower(hex(randomblob(16))), n = 0")
 
@@ -369,15 +371,44 @@ def _fill(tmp: Path, withheld: frozenset[str], excluded: frozenset[str],
         store.close()
 
 
-def _withdraw_if_newly_guarded(withheld: frozenset[str], db_path: Path, manifest_path: Path,
-                               prior: dict | None) -> bool:
-    """Remove a published snapshot built WITHOUT a guard the scope now declares. True if removed.
+def _renumber_rowids(db) -> None:
+    """Renumber every table's rowids 1..N in their existing order.
 
-    Run before anything that can fail, by every path that touches a published scope: a snapshot
-    that outlives a newly declared guard serves that vault's notes for as long as the rebuild that
-    would strip them keeps failing. No manifest counts as nothing withheld — fail closed."""
-    built = prior.get("withheld_vaults") if prior else None
-    if withheld <= frozenset(built if isinstance(built, list) else ()) or not db_path.exists():
+    `VACUUM` keeps rowids, so the gaps a removal leaves would say how many documents and passages
+    were left out and where they sat — the count the manifest declines to state. Gaps the live index
+    already had are its edit history, which is not the agent's either. The FTS index keys on
+    `chunks.rowid` and is rebuilt after this; `vector_generation` is redrawn after it too."""
+    tables = [r[0] for r in db.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' "
+        "AND name NOT LIKE 'chunks_fts%' AND sql NOT LIKE '%WITHOUT ROWID%'")]
+    db.execute("BEGIN")
+    for table in tables:
+        count, top = db.execute(f'SELECT COUNT(*), MAX(rowid) FROM "{table}"').fetchone()
+        if not count or top == count:
+            continue
+        db.execute("DROP TABLE IF EXISTS temp.renumber")
+        db.execute(f'CREATE TEMP TABLE renumber AS SELECT rowid AS old, '
+                   f'ROW_NUMBER() OVER (ORDER BY rowid) AS new FROM "{table}"')
+        db.execute("CREATE UNIQUE INDEX temp.renumber_old ON renumber(old)")
+        db.execute(f'UPDATE "{table}" SET rowid = -(SELECT new FROM temp.renumber '
+                   f'WHERE old = "{table}".rowid)')
+        db.execute(f'UPDATE "{table}" SET rowid = -rowid')
+    db.execute("DROP TABLE IF EXISTS temp.renumber")
+    db.execute("COMMIT")
+
+
+def _withdraw_if_sources_revoked(include_sources: bool, db_path: Path, manifest_path: Path,
+                                 prior: dict | None) -> bool:
+    """Remove a published snapshot that may hold calls the scope's entry no longer lets in. True
+    if removed.
+
+    Run before anything that can fail, by every path that touches a published scope: a refusal or
+    a failed refresh would otherwise leave the copy serving them until a publish succeeds. A
+    manifest that does not record `include_sources: false` — missing, unreadable, or written
+    before the key existed, when every call was published — counts as holding calls."""
+    if include_sources or not db_path.exists():
+        return False
+    if prior is not None and prior.get("include_sources") is False:
         return False
     db_path.unlink(missing_ok=True)
     manifest_path.unlink(missing_ok=True)
@@ -430,29 +461,29 @@ def _publish_lock(scope: str, registry: str | Path | None):
 
 
 def publish(scope: str, directory: str | Path, *, registry: str | Path | None = None,
-            now: datetime | None = None) -> Published:
-    """Publish one scope's snapshot and manifest into `directory`, which must already exist."""
+            now: datetime | None = None, include_sources: bool = False) -> Published:
+    """Publish one scope's snapshot and manifest into `directory`, which must already exist.
+    Conversation-class documents are left out unless `include_sources`."""
     with _publish_lock(scope, registry):
-        return _publish(scope, Path(directory), registry=registry, now=now)
+        return _publish(scope, Path(directory), registry=registry, now=now,
+                        include_sources=include_sources)
 
 
 def _publish(scope: str, directory: Path, *, registry: str | Path | None,
-             now: datetime | None) -> Published:
+             now: datetime | None, include_sources: bool) -> Published:
     from substrate import vault as _vault
+    from substrate.classes import EXCLUDED_CLASSES
     from substrate.store.index_store import IndexStore, SchemaMismatch
 
     db_path, manifest_path = snapshot_paths(directory, scope)
     _trusted_dir(directory)
+    prior, _ = _read_manifest(manifest_path)
+    if _withdraw_if_sources_revoked(include_sources, db_path, manifest_path, prior):
+        prior = None
     try:
         entry = scopes.resolve(scope, registry)
     except scopes.ScopeError as e:
         raise AgentError(str(e)) from e
-    # Withdrawn BEFORE the chain is resolved: a guard written below a `[table]` makes the manifest
-    # refuse, and the unguarded snapshot must not keep serving for as long as it does.
-    withheld = _withheld(scope, Path(entry.vault))
-    prior, _ = _read_manifest(manifest_path)
-    if _withdraw_if_newly_guarded(withheld, db_path, manifest_path, prior):
-        prior = None
     try:
         chain = _vault.resolve_vaults(Path(entry.vault))
     except _vault.VaultError as e:
@@ -468,18 +499,25 @@ def _publish(scope: str, directory: Path, *, registry: str | Path | None,
         if source.stats()["passages"] == 0:
             raise AgentError(f"scope {scope!r} has an EMPTY index; refusing to publish it.")
         rows = _doc_rows(source)
-        notes, excluded = _read_notes(rows, roots, withheld)
+        # Never read, so a call's text is not held in this process for a snapshot it stays out of.
+        left_out = frozenset() if include_sources else frozenset(
+            r[0] for r in rows if r[5] in EXCLUDED_CLASSES)
+        notes, excluded = _read_notes([r for r in rows if r[0] not in left_out], roots)
+        if not notes and left_out and not excluded:
+            raise AgentError(f"every note in {scope!r} is a source, which a snapshot leaves out "
+                             f"unless its [publish.{scope}] entry sets include_sources = true; "
+                             f"refusing to publish an empty snapshot.")
         if not notes:
-            # The source was not empty, so everything was withheld or excluded — most likely the
-            # vault roots no longer match the indexed paths (a moved vault, before a recompose).
-            # A published empty snapshot would answer "nothing on that", labelled fresh.
-            raise AgentError(f"every note in {scope!r} was withheld or could not be matched to "
-                             f"the index ({len(excluded)} excluded); refusing to publish an "
-                             f"empty snapshot. Recompose the scope, then publish.")
-        fingerprint = _fingerprint(source, withheld, excluded, rows, notes)
+            # The source was not empty, so everything was excluded — most likely the vault roots
+            # no longer match the indexed paths (a moved vault, before a recompose). A published
+            # empty snapshot would answer "nothing on that", labelled fresh.
+            raise AgentError(f"no note in {scope!r} could be matched to the index "
+                             f"({len(excluded)} excluded); refusing to publish an empty "
+                             f"snapshot. Recompose the scope, then publish.")
+        fingerprint = _fingerprint(source, include_sources, excluded, rows, notes)
         index_version = source.index_version
         rewrite = not (prior and prior.get("fingerprint") == fingerprint and db_path.is_file())
-        if not rewrite and _fingerprint(source, withheld, excluded, _doc_rows(source),
+        if not rewrite and _fingerprint(source, include_sources, excluded, _doc_rows(source),
                                         notes) != fingerprint:
             # Re-verifying is a claim that the snapshot matches the live index NOW, so the same
             # re-check guards it: a change landing while the notes were read is not "unchanged".
@@ -495,13 +533,13 @@ def _publish(scope: str, directory: Path, *, registry: str | Path | None,
                 # A compose that committed between the fingerprint and the copy would leave a
                 # snapshot whose recorded version describes different rows. Refused, and the next
                 # refresh — which follows that compose — publishes the settled index.
-                if _fingerprint(source, withheld, excluded, _doc_rows(source),
+                if _fingerprint(source, include_sources, excluded, _doc_rows(source),
                                 notes) != fingerprint:
                     raise AgentError(f"the {scope!r} index changed while it was being copied; "
                                      f"not published. The next refresh will publish it.")
                 source.close()
-                _fill(tmp, withheld, excluded, notes, {"scope": scope, "published": stamp,
-                                             "index_version": index_version})
+                _fill(tmp, excluded | left_out, notes,
+                      {"scope": scope, "published": stamp, "index_version": index_version})
                 os.chmod(tmp, FILE_MODE)
                 os.replace(tmp, db_path)
             finally:
@@ -521,7 +559,9 @@ def _publish(scope: str, directory: Path, *, registry: str | Path | None,
         "index_version": index_version,
         "fingerprint": fingerprint,
         "sources": [v.name for v in chain],
-        "withheld_vaults": sorted(withheld),
+        # Whether conversation-class documents were copied. No count when they were not: how many
+        # calls a scope holds is part of what was left out.
+        "include_sources": include_sources,
         # A count, not the ids: this file is the agent's to read, and the point of excluding a
         # document is that nothing about it reaches the agent.
         "excluded_documents": len(excluded),
@@ -530,28 +570,23 @@ def _publish(scope: str, directory: Path, *, registry: str | Path | None,
         "refresh": refresh_state.stored_row(scope, registry),
     }
     _write_atomic(manifest_path, (json.dumps(manifest, indent=2) + "\n").encode())
-    return Published(scope, db_path, manifest_path, rewrite, tuple(sorted(withheld)),
-                     len(excluded))
+    return Published(scope, db_path, manifest_path, rewrite, len(excluded))
 
 
-def annotate(scope: str, directory: str | Path, *,
-             registry: str | Path | None = None) -> str:
+def annotate(scope: str, directory: str | Path, *, registry: str | Path | None = None,
+             include_sources: bool = False) -> str:
     """Carry a FAILED refresh to the agent without touching the snapshot: the copy stays as good
     as it was, and its manifest now says the live scope is frozen.
 
     Returns what happened: `absent` (nothing published to annotate), `marked`, or `withdrawn` —
-    the scope has gained a guard since the snapshot was built, and a failed refresh does not
-    republish, so the snapshot is removed instead (`_withdraw_if_newly_guarded`). The agent then
-    reads "no published snapshot", which is true, and the next successful refresh publishes it
-    stripped."""
+    the snapshot may hold calls the entry no longer lets in, and a failed refresh does not
+    republish, so it is removed instead (`_withdraw_if_sources_revoked`)."""
     directory = Path(directory)
     with _publish_lock(scope, registry):
         db_path, manifest_path = snapshot_paths(directory, scope)
         _trusted_dir(directory)
         prior, _ = _read_manifest(manifest_path)
-        entry = scopes.load(registry).get(scope)
-        if entry is not None and _withdraw_if_newly_guarded(
-                _withheld(scope, Path(entry.vault)), db_path, manifest_path, prior):
+        if _withdraw_if_sources_revoked(include_sources, db_path, manifest_path, prior):
             return "withdrawn"
         if prior is None:
             return "absent"
@@ -569,11 +604,11 @@ def after_refresh_record(scope: str, outcome: str, *,
     if target is None:
         return None
     if refresh_state.OUTCOMES[outcome]["success"]:
-        p = publish(scope, target, registry=registry)
+        p = publish(scope, target.dir, registry=registry, include_sources=target.include_sources)
         return f"{scope}: snapshot {'published' if p.rewrote else 'verified'} -> {p.db}"
-    done = annotate(scope, target, registry=registry)
+    done = annotate(scope, target.dir, registry=registry, include_sources=target.include_sources)
     if done == "withdrawn":
-        return f"{scope}: snapshot WITHDRAWN — the scope declares a guard it was not built with"
+        return f"{scope}: snapshot WITHDRAWN — it may hold calls its entry no longer includes"
     if done == "marked":
         return f"{scope}: snapshot manifest marked {outcome}"
     return None
@@ -678,6 +713,13 @@ class AgentScopes:
         if lead:
             block["note"] = lead if not block["note"] else f"{lead} {block['note']}"
         return block
+
+    def sources_left_out(self, name: str) -> bool:
+        """True only when the manifest says the snapshot was published without its sources. An
+        older or unreadable manifest says nothing either way, so this says False."""
+        _, manifest_path = self._paths(name)
+        manifest, _ = _read_manifest(manifest_path)
+        return bool(manifest) and manifest.get("include_sources") is False
 
     def note(self, store, doc_id: str, *, cap: int) -> dict:
         """The whole note behind a passage, from the snapshot — never from a vault."""

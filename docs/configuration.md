@@ -25,7 +25,6 @@ go = "1.21"
 | `inherits` | list of strings | vaults to compose. An absolute path is used as given. Anything else resolves against the project vault's **parent** folder, never the working directory. A vault that doesn't exist fails the compose |
 | `reference_domains` | list of tags | the project's domains, carried as a tag. It never filters results |
 | `reference_pins` | table, name to version | which version of a versioned reference counts as current for this project |
-| `guard_state` | absolute path | withholds this vault's notes unless the state file vouches for them (see [`security.md`](security.md#the-vault-guard)) |
 | `identity` | absolute path | a JSON file of people and things that notes mention, resolved on every compose |
 
 In TOML, every key written after a `[table]` header belongs to that table, so keep every top-level
