@@ -5,6 +5,16 @@ Every release of the engine, newest first. The format follows
 [semantic versioning](https://semver.org/). Each release attaches its source tarball and a
 `SHA256SUMS` (see [`RELEASING.md`](RELEASING.md)).
 
+## Unreleased
+
+### Fixed
+
+- The golden frames in `contract/frames/` are one capture again. In 0.2.1 the `status`,
+  `documents` and `agent-status` frames came from an earlier capture than the rest, so the
+  `status` frame named a different `index_version` from the `search` frame. A client that reads
+  them as one index, as Scripta's decode tests do, failed. A test now holds the demo capture's
+  `search`, `search-sources`, `expand`, `documents` and `status` frames to one `index_version`.
+
 ## 0.2.1
 
 ### Added

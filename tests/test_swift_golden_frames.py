@@ -266,3 +266,23 @@ def test_the_swift_golden_frames_are_what_the_engine_sends_over_the_demo_vaults(
     # Every file in the folder, including the ones no capture writes (`http-415-refusal.body.json`),
     # against both captures' stand-ins: this one's and agent mode's.
     fx.assert_clean_folder((STAND_IN, AGENT_STAND_IN))
+
+
+def test_the_committed_frames_are_one_capture():
+    """The committed frames are one capture, as a client reads them.
+
+    Scripta's `WireDecodingTests.testSearchDecodesTheSpineAndTheEnvelope` holds the search frame
+    and the status frame to one index: the same `index_version`, leading with the status frame's
+    `v{schema_version}:`. A frame kept from an earlier capture still matches the engine's SHAPE,
+    so `assert_matches` passes it, and the client is the first to fail. Every frame this capture
+    writes that carries an `index_version` is held to the same rule here."""
+    payloads = {name: _payload_of((fx.SWIFT_FIXTURES / name).read_text(encoding="utf-8"))
+                for name, *_ in CALLS}
+    versions = {name: p["index_version"] for name, p in payloads.items()
+                if isinstance(p, dict) and "index_version" in p}
+    assert {"search.frame.json", "status.frame.json"} <= set(versions), versions
+    assert len(set(versions.values())) == 1, (
+        f"the frames come from more than one capture: {versions}. Recapture them all at once "
+        f"with {fx.CAPTURE_ENV}=1")
+    schema = payloads["status.frame.json"]["schema_version"]
+    assert versions["search.frame.json"].startswith(f"v{schema}:"), versions
