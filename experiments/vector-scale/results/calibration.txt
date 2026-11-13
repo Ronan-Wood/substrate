@@ -1,0 +1,7 @@
+statistic               vault-a, all chunks    synthetic 7,206    vault-a, passages    synthetic 3,721
+random pair cos                     0.354              0.361              0.352              0.361
+nn1 cos                             0.893              0.872              0.802              0.872
+nn10 cos                            0.705              0.701              0.667              0.692
+nn100 cos                           0.564              0.485              0.532              0.471
+|mean|                              0.596              0.601              0.594              0.601
+participation ratio                88.487            106.629             80.562             97.277
