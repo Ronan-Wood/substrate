@@ -8,7 +8,7 @@ dependencies = [
     "docling",
     # The default PDF reader's text layer (`substrate/extract/pdftext_arm.py`). docling pins it too,
     # but the reader that is supposed to work with nothing else installed must not depend on that.
-    "pypdfium2>=5.15.0,<6",
+    "pypdfium2>=5.15.2,<6",
     # Image OCR through Apple Vision. docling already prefers it on macOS once it is installed, and
     # `substrate/extract/convert.py` names it explicitly as well.
     "ocrmac>=1.0.0,<2; sys_platform == 'darwin'",
