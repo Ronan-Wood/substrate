@@ -32,10 +32,12 @@ THREE INVOCATION DETAILS, ALL MEASURED, ALL SILENT FAILURES IF MISSED
    a thinking model; without `<think>\n\n</think>` already closed it reasons before answering
    and the single-token budget captures reasoning instead of the verdict.
 
-3. BINARY ONLY on this stack. Graded relevance needs the logprob of "yes" against "no", and
-   Ollama 0.20.3 does not expose it by any route tested: `logprobs` inside `options` is
-   silently ignored (no error, no field), at the top level it is HTTP 400, and
-   /v1/completions returns `top_logprobs` empty. So the score is 1.0 or 0.0.
+3. BINARY ONLY, because this arm does not ask for logprobs. Graded relevance needs the logprob
+   of "yes" against "no". Ollama 0.20.3 exposed it by no route tested (`logprobs` inside
+   `options` silently ignored, HTTP 400 at the top level, `top_logprobs` empty on
+   /v1/completions), but Ollama 0.32.5 returns `logprobs` and `top_logprobs` on /api/generate,
+   and the 2026-11-07 sweep scored graded verdicts that way (EXPERIMENTS.md). Until this arm
+   requests them, the score is 1.0 or 0.0.
 
    That makes this a RELEVANCE FILTER rather than a re-ranker: every "yes" is promoted above
    the rest, and fused order is preserved within each group by a stable sort. A "no" and an
@@ -45,8 +47,8 @@ THREE INVOCATION DETAILS, ALL MEASURED, ALL SILENT FAILURES IF MISSED
    discard the ranking those candidates earned — with binary scores most entries tie, so the
    sort's stability carries almost all the ordering.
 
-   No speculative logprob-parsing branch is kept here. The finding is recorded above and in
-   EXPERIMENTS.md; unreachable code written against a response shape nobody has observed
+   No speculative logprob-parsing branch is kept here. Graded verdicts land as a change of
+   their own, with a test against the response shape the sweep observed; an unreachable branch
    would fall through to binary SILENTLY on the day it was meant to activate, which is the
    exact class of failure the rest of this file is defending against.
 

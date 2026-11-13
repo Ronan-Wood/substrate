@@ -37,6 +37,11 @@ rerank    listwise via qwen2.5:7b, ADAPTIVE (skipped when the top hit is already
 > local Ollama. The shipped stack is qwen3-embedding:0.6b · HyDE `auto` · the cross-encoder. Auto
 > resolves to the smallest local chat model — `qwen3.5:4b-mlx` here, measured tier **0.667** at 44
 > cases — see §"HyDE re-measured after qwen2.5".
+>
+> **Measured 2026-11-07, not shipped:** four rule changes (lexprec fusion, the Qwen3 query prefix,
+> graded cross-encoder verdicts, pool 30) take a new 1,368-case decision set from 0.767 to 0.821
+> with no new model. They wait for approval, so this block still says what ships. See
+> §"The 6,407-case sweep".
 
 ---
 
@@ -109,6 +114,17 @@ noise and then crowns it.
 | **qwen3-embedding:0.6b** | 0.531 → 0.642 (**+0.110**) | LLM-derived embedder; different lineage from the BERT-family cluster |
 | **Adaptive listwise rerank** | 0.603 → 0.698 (**+0.095**) at +37ms | Sharpens order without widening the pool — the thing three failed experiments pointed at |
 
+### Accepted 2026-11-07 — measured, awaiting approval, none shipped
+
+From §"The 6,407-case sweep" below. A new cohort: none of these figures is comparable to the 44-case ones.
+
+| experiment | result | why |
+|---|---|---|
+| **lexprec fusion** | 0.680 → 0.764 (**+0.084** [+0.075, +0.093]), full set, n=5,623 | Plain RRF demotes a precise lexical top hit whenever the vector list disagrees. Kw +0.147, identifier +0.168, para +0.011. Wins in all six scopes |
+| **Qwen3 query-instruct prefix** | +0.008 [+0.005, +0.011] over lexprec, full set | No generation cost. On the decision set it is about 70% of HyDE 4b's no-rerank gain. Identifier −0.011 |
+| **Graded CE, P(yes) ≥ 0.9** | +0.008 over binary at pool 30 (0.826 vs 0.818) | Logprobs are available on Ollama 0.32.5. The bigger effect is identifier: −0.003 (not significant) against binary's −0.013* |
+| **CE pool 30** | pool 10 / 20 / 30: 0.811 / 0.815 / 0.818 | Fused lists hold about 30 candidates, so pool 40 is the same run. The rerank runs on 43% of queries, at 11.4 pairs per query on average |
+
 ## Rejected — measured and not shipped
 
 | experiment | result | why rejected |
@@ -121,6 +137,21 @@ noise and then crowns it.
 | **Multi-query fusion (3)** | +0.034 at **5× latency** | 11 up, 10 down, 3 newly broken. Redistribution, not improvement |
 | **Per-class chunk geometry** | +0.012 | Below resolution. **Shipped anyway on principle**, explicitly not on evidence |
 | **Chunk granularity sweep** | see below | Current geometry already at/near optimum |
+
+Rejected in the 2026-11-07 sweep (§"The 6,407-case sweep"; same cohort caveat as above):
+
+| experiment | result | why rejected |
+|---|---|---|
+| **Lexical weight 1.5–3 (plain RRF)** | +0.005 to +0.015 | Real but small. Lexprec gets +0.084 by changing the rule rather than the weight |
+| **Deeper candidate lists (k·6, k·12)** | −0.031 / −0.050 | Identifier −0.078* / −0.129*. Extra depth adds vector noise above precise hits |
+| **Vector-first when the cosine top is confident** | −0.006 to −0.044 | The real-query stratum loses −0.15 to −0.18 at every threshold from 0.60 to 0.75 |
+| **Lexprec precision constants, vector depth, RRF k, vector weight** | every one within ±0.001 of lexprec | Flat. Kept the engine's `_already_precise` constants |
+| **CE with no gate** | 0.804 vs 0.815 gated | Kw −0.028*, identifier −0.041* (against no-rerank lexprec). The gate is load-bearing for the cross-encoder too |
+| **Margin gates** (fused top-1 minus top-2 cosine) | 0.791–0.802 | Worse than the precise gate at every threshold. `either` adds nothing |
+| **Prob mode** (sort the pool by P(yes)) | 0.827–0.831, the highest MRR | Identifier −0.048*, rejected by the adoption rule |
+| **Lexical-only + CE** | — | Not an engine configuration: `retrieve()` reranks only on the fused path |
+| **HyDE `qwen3.5:9b-mlx`** | partial, ties 4b | Exceeds the target machine's memory (16 GB resident, heavy swap). Not a candidate |
+| **qwen3-embedding 4b / 8b** | skipped | The engine's models must fit a 32 GB Mac. Already measured behind 0.6b with the reranker on (the table above) |
 
 ### Chunk granularity (the axis that had never been varied)
 
@@ -353,6 +384,13 @@ ignored silently inside `options`, HTTP 400 at top level, empty `top_logprobs` o
 candidates tie. The claim is "reranking is saturated ON THIS STACK", not "cross-encoders do
 not help." Revisit if Ollama ships logprobs.
 
+> **SUPERSEDED 2026-11-12, both findings above, by the 1,368-case decision set** (§"The 6,407-case
+> sweep"). Ollama 0.32.5 returns `logprobs` and `top_logprobs` on `/api/generate`, and the sweep
+> scored graded verdicts that way: promoting P(yes) ≥ 0.9 beat binary, 0.826 against 0.818 at
+> pool 30. The shipped arm still requests no logprobs, so it is still the binary filter described
+> here. The gate finding did not survive either: at that scale, removing the gate costs −0.011
+> pooled, kw −0.028* and identifier −0.041*, so the gate stays for the cross-encoder too.
+
 ### THE RERANKER IS AN EQUALIZER — five embedders, 44 cases, one instrument
 
 The most generalizable result in this log. Every embedder measured at the same cohort, with
@@ -566,20 +604,38 @@ whose correct answer is not in the corpus (consistent hashing) get deleted, not 
 
 ## Open / next
 
+> **Updated 2026-11-12.** Most of this table is done. Each row keeps its original status, and what
+> happened since follows it.
+
 | # | experiment | status |
 |---|---|---|
-| 4 | Chunk granularity (600 / 1500 / 2500) as an axis | not started — the one factor never varied |
-| 5 | qwen3-embedding 4b / 8b | **unblocked** — chunking is locked. Runbook below |
-| 6 | Reranking — qwen2.5:7b vs Bonsai-27B ternary | arguably should move ahead of #4 |
+| 4 | Chunk granularity (600 / 1500 / 2500) as an axis | not started — the one factor never varied · **2026-11-12: done.** §"Chunk granularity" measured 700 / ~1500 / 2500 and kept the current geometry |
+| 5 | qwen3-embedding 4b / 8b | **unblocked** — chunking is locked. Runbook below · **2026-11-12: rejected.** Measured at 0.645 / 0.683 against 0.6b's 0.698 (the Rejected table and §"The embedder size sweep"), and outside the rule that the engine's models fit a 32 GB Mac |
+| 6 | Reranking — qwen2.5:7b vs Bonsai-27B ternary | arguably should move ahead of #4 · **2026-11-12: done.** The cross-encoder ships (§"THE RERANKING AXIS IS SATURATED" and its 2026-08-10 note). Bonsai-27B is unshippable (§"Bonsai-27B RUNS on this machine"; 6.85 s p50 as HyDE in §"HyDE re-measured after qwen2.5") |
 | — | Adaptive multi-query (fallback only on low confidence) | needs a confidence signal the retriever does not expose |
-| — | qwen3 instruction format | **unanswered** — first attempt retracted |
-| — | Result contract (snippet-first, graduated capability + measured cost, version-stamped) | the cure for docs/principles.md; precedes any transport choice |
-| — | Extract engine to its own repo | relocate BEFORE wiring consumers — do not wire through the weld |
-| — | Claude access: skill+CLI primary, MCP only if Desktop/web reach is real | trivial once the contract exists |
-| — | **Scanned-PDF ingestion** | granite-docling-258M is DOWNLOADED but **NOT WIRED** — see below |
-| — | embeddinggemma (3rd lineage) · Qwen3-Reranker-4B (purpose-built) · Bonsai-27B ternary | downloaded, untested |
+| — | qwen3 instruction format | **unanswered** — first attempt retracted · **2026-11-12: answered for queries, not shipped.** The query-instruct prefix is +0.008 [+0.005, +0.011] over lexprec on the full 2026-11-07 set (§"The 6,407-case sweep") |
+| — | Result contract (snippet-first, graduated capability + measured cost, version-stamped) | the cure for docs/principles.md; precedes any transport choice · **2026-11-12: done.** [`contract/contract.json`](contract/contract.json), with the golden frames and the wire version ([docs/client-contract.md](docs/client-contract.md)) |
+| — | Extract engine to its own repo | relocate BEFORE wiring consumers — do not wire through the weld · **2026-11-12: done.** This repository, since 2026-11-10 ([the split plan](docs/history/engine-split-plan.md)) |
+| — | Claude access: skill+CLI primary, MCP only if Desktop/web reach is real | trivial once the contract exists · **2026-11-12: done, through MCP.** `substrate-mcp --connect` puts every stdio client on the one shared engine, and writes run only for a client the user grants |
+| — | **Scanned-PDF ingestion** | granite-docling-258M is DOWNLOADED but **NOT WIRED** — see below · **2026-11-12: done on macOS**, through Apple's recognizer rather than granite-docling. pip and Linux installs have no scan reader yet |
+| — | embeddinggemma (3rd lineage) · Qwen3-Reranker-4B (purpose-built) · Bonsai-27B ternary | downloaded, untested · **2026-11-12: all measured** (§"The model axis is exhausted"). Qwen3-Reranker-4B is the shipped reranker (`substrate/retrieve/rerank_cross.py`, `DEFAULT_MODEL`), embeddinggemma tied, Bonsai-27B is unshippable |
+| — | Fusion, query prefix, graded CE, pool 30 (added 2026-11-12) | measured 2026-11-07, awaiting approval (§"The 6,407-case sweep") |
+| — | Nine engine experiments: query router, rerank less, tokenizer, Rust bridge and more (added 2026-11-12) | planned in [docs/plans/engine-experiments.md](docs/plans/engine-experiments.md) |
 
 ### Downloaded but not wired — scanned PDFs
+
+> **SUPERSEDED 2026-11-12.** A scanned PDF is read now, on macOS. `TextLayerExtractor`
+> (`substrate/extract/pdftext_arm.py`), the reader `ingest` uses when no docling models are named
+> (`substrate/cli.py`), sends every page with no text layer to Apple's on-device recognizer
+> (`substrate/extract/apple_arm.py`, Vision on macOS 26), which needs no model weights.
+> granite-docling-258M is still not wired, and was not needed. Where the recognizer is missing,
+> the page is refused by name rather than emitted empty, which was the silent failure below. A pip
+> install has no `bin/extract-apple` (`tools/build-bundled-engine` builds it for the bundled
+> engine) and Linux has no Vision, so **pip and Linux installs have no scan reader yet**.
+> `do_ocr = False` survives only in `substrate/extract/docling_arm.py`, the docling PDF reader.
+>
+> The three models in the last paragraph were measured since (§"The model axis is exhausted").
+> Qwen3-Reranker-4B is the shipped reranker, embeddinggemma tied, and Bonsai-27B is unshippable.
 
 `ibm-granite--granite-docling-258M` is on the drive. The engine **still cannot ingest a
 scanned PDF**: the pipeline sets `do_ocr = False` and uses the standard text-layer path, so a
@@ -598,6 +654,11 @@ currently shipped), and `hf.co/prism-ml/Bonsai-27B-gguf:Q1_0` (27B-class judgmen
 verified ternary rather than the 54 GB F16 registry variant).
 
 ### Runbook: qwen3-embedding 4b / 8b
+
+> **SUPERSEDED 2026-11-12 by the 32 GB rule:** the engine's models must fit a 32 GB Mac, and the
+> 2026-11-07 sweep ruled both sizes out on it. The runbook had already run before that rule existed.
+> Its results are in §"The embedder size sweep" and the Rejected table (4b 0.645, 8b 0.683, against
+> 0.6b's 0.698). Kept as the record of what was pre-registered.
 
 Chunking is locked, so this can run any time. Result is directly comparable to **0.698** —
 same 44-case cohort, embedder as the only variable, no cross-scale caveat.
@@ -658,6 +719,11 @@ come from HF directly.
 
 Acquired 2026-07-21 in one fast-connection window. **No further downloads are needed for any
 planned work**, which matters because the machine is often on slow wifi.
+
+> **Status 2026-11-12.** The UNTESTED and NOT-wired marks below are out of date. embeddinggemma,
+> gemma3:4b, Qwen3-Reranker-4B and Bonsai-27B were measured (§"The model axis is exhausted"), and
+> Qwen3-Reranker-4B is the shipped reranker. Scanned pages go to Apple's recognizer, not to
+> granite-docling or RapidOcr (§"Downloaded but not wired"). qwen2.5 was deleted 2026-10-30.
 
 Ollama (`OLLAMA_MODELS=/Volumes/External/ollama-models`, 16 models, 48.5 GB):
 
@@ -849,3 +915,162 @@ To reproduce (from `substrate/`, with `$S` holding the migrated copy):
 ```bash
 uv run python -m substrate.cli eval --db $S/ref.db --baseline $S/none.json --hyde-model qwen3.5:4b-mlx --cross-encoder
 ```
+
+---
+
+## The 6,407-case sweep (2026-11-07) — fusion, query prefix, HyDE, cross-encoder
+
+**The default should change four ways, and every one is a rule change rather than a model change.**
+1. Lexprec fusion.
+2. The query prefix.
+3. Graded verdicts at P(yes) ≥ 0.9.
+4. Pool 30.
+
+Together they take the decision set from 0.767 (shipped) to 0.821 without HyDE, or 0.826 with it. No
+model larger than the shipped ones is involved, and HyDE becomes optional. **None of the four is made
+in the engine yet.** Each waits for approval, so §"Current best configuration" still says what ships.
+
+The configuration these results propose:
+
+```
+ingest    docling 2.114.0 + layout-heron, 100-page batches
+chunk     class-driven; reference-frozen 1500/2800/450, reference-versioned 1000/2000/300
+index     SQLite FTS5 (external content) + chunk_vectors, section-weighted bm25
+embed     qwen3-embedding:0.6b, documents raw; queries with the Qwen3 query-instruct prefix
+expand    HyDE `auto` (qwen3.5:4b-mlx here), cached — OPTIONAL: worth +0.005 once rerank is on
+fuse      lexprec: when the lexical top passes _already_precise, lexical order first, fused rest after;
+          otherwise RRF k=60, lexical + vector at equal weight, each list cut to k*3
+rerank    cross-encoder Qwen3-Reranker-4B, graded: promote P(yes) >= 0.9 (stable), pool 30,
+          gated by _already_precise on the fused top hit, cached per pair
+```
+
+| metric | value | cohort |
+|---|---|---|
+| MRR@5, the configuration above | **0.826** (R@1 0.757, R@5 0.925) | 1,368-case decision set |
+| MRR@5, same without HyDE | **0.821** | 1,368-case decision set |
+| MRR@5, shipped (plain RRF + HyDE 4b + binary CE, pool 20) | 0.767 | 1,368-case decision set |
+| negatives leaked | **0 / 60** in every arm | decision set |
+| latency | **not measured.** The machine was loaded throughout. | — |
+
+> **Not comparable to the 44-case figures above.** This is a new cohort: a private gold set of 6,407
+> cases over six scopes, with a stratified 1,368-positive decision subset. Its absolute numbers are
+> not the 44-case ones, and must never be subtracted from them.
+
+**Setup.**
+- **Gold set.** Private, 6,407 unique cases over six scopes (A–F), kept outside the repo. Strata:
+  - kw / lexq / para / identifier, about 5,600 non-core positives;
+  - core-* instances (shared-vault notes reached from every scope), reported separately;
+  - 50 real queries;
+  - 235 unanswerable;
+  - 229 negatives (archived or withheld-class passages that must not surface).
+- **Decision set.** A fixed, seeded 1,368-positive subset for model-backed arms. Stratified quotas,
+  allocated per scope in proportion, plus every real and unanswerable case and 60 negatives.
+- **Statistics.** Paired cluster bootstrap by target note, 2,000 resamples, 95% CI. `*` marks a
+  stratum delta whose CI excludes 0.
+- **Adoption rule, fixed before the numbers:**
+  - the pooled CI excludes 0;
+  - no kw, identifier or real regression worse than −0.02 with a CI excluding 0;
+  - 0 negatives leaked.
+- **Configuration replayed.** The MCP search path: k=5, route off, each list cut to k·3. `substrate
+  eval`'s default (outline routing on) is a different configuration, and its numbers are not this
+  section's reference.
+
+**Method: capture once, replay offline.**
+- Each case's lexical and vector ranked lists are captured once to depth 60, per embedder, query
+  style and HyDE model.
+- Cross-encoder verdicts are scored once per (query, passage), 61,340 pairs, with P(yes) kept beside
+  the binary verdict.
+- Fusion, depth, gate, pool and score mode are then replayed offline.
+- **The replay was checked against the engine's own `retrieve()`.** Identical top-5:
+  - 300/300 lexical-only;
+  - 300/300 hybrid;
+  - 200/200 hybrid + HyDE;
+  - 300/300 hybrid + CE;
+  - 200/200 hybrid + HyDE + CE.
+
+  The engine's reranker pointed at a dead port, so every verdict had to come from the stored set.
+  Stored verdicts against `CrossEncoderReranker._score`: 0/100 disagree.
+
+**Full set (n=5,623 non-core positives, 229 negatives).** Shipped hybrid with no HyDE and no rerank:
+0.680 (R@1 0.565, R@5 0.860).
+
+| arm | MRR@5 | Δ [95% CI] | kw | identifier | para | real (n=50) |
+|---|---|---|---|---|---|---|
+| lexical only | 0.753 | +0.073 [+0.061, +0.084] | +0.145* | +0.177* | −0.033* | +0.052 |
+| lexprec | 0.764 | +0.084 [+0.075, +0.093] | +0.147* | +0.168* | +0.011* | +0.055 |
+| lexprec + query prefix | 0.772 | +0.092 | | | | |
+
+Lexprec against the shipped hybrid, per scope:
+
+| scope | shipped hybrid | lexprec |
+|---|---|---|
+| A | 0.650 | 0.779 |
+| B | 0.736 | 0.769 |
+| C | 0.590 | 0.643 |
+| D | 0.662 | 0.773 |
+| E | 0.748 | 0.829 |
+| F | 0.654 | 0.844 |
+
+Unanswerable separability from the bare-query top-1 cosine: AUROC 0.849.
+
+**Decision set (n=1,368).**
+
+| profile | MRR@5 | R@1 | R@5 | Δ vs shipped: kw | identifier | para | CE pairs/query |
+|---|---|---|---|---|---|---|---|
+| shipped: RRF + HyDE 4b + binary CE, pool 20 | 0.767 | 0.673 | 0.905 | — | — | — | 10.1 |
+| lexprec + HyDE 4b + CE thr 0.9, pool 30 | 0.826 | 0.757 | 0.925 | +0.098 | +0.126 | +0.016 | 11.4 |
+| lexprec + prefix + CE thr 0.9, pool 30 | 0.821 | 0.756 | 0.914 | +0.099 | +0.126 | −0.003 | 11.4 |
+| lexprec + prefix, no rerank (fast) | 0.773 | 0.698 | 0.886 | +0.093 | +0.126 | −0.140 | 0 |
+
+The shipped stack's deficit is kw −0.092 and identifier −0.129 against lexprec, and it comes from
+the fusion rule, not from HyDE: the no-HyDE hybrid shows the same gap on the full set (kw −0.147,
+identifier −0.168). Plain RRF lets vector neighbours outrank a precise lexical hit, and the reranker
+recovers only part of it.
+
+**Why the recommended default is the no-HyDE profile.** With rerank on, HyDE buys +0.005, inside
+overlapping CIs, for one generation per query. HyDE 4b with rerank is the accuracy-max option, not
+the default.
+
+**HyDE 9b (`qwen3.5:9b-mlx`): partial, 500/1705, not runnable on the target machine.**
+- Stopped at 500 queries, of which 486 had expansions: 514 cases, 441 positive. Paired against HyDE
+  4b on exactly those cases, with no rerank:
+  - plain RRF: 0.793 vs 0.791, Δ +0.003 [−0.015, +0.019];
+  - lexprec: 0.847 vs 0.852, Δ −0.004 [−0.012, +0.003].
+- **The sample is biased and says nothing about paraphrase.** The 500 are the first 500 queries in
+  sorted order. They hold no paraphrase cases, and paraphrase is the stratum where HyDE earns its
+  gain (+0.059 for 4b).
+- Recorded for completeness only. The model cannot be resident day to day on the target machine.
+
+**qwen3-embedding 4b / 8b: skipped, because the engine's models must fit a 32 GB Mac.** Not
+re-measured. §"THE RERANKER IS AN EQUALIZER" already found 4b at 0.645 and 8b at 0.683, against 0.6b
+at 0.698, with the reranker on (44 cases). The cheapest adequate embedder remains the right pick.
+
+**Two earlier claims in this file, corrected at 1,368 cases:**
+- *"The gate is a chat-model crutch… on the cross-encoder it is worth −0.008."* At this scale,
+  removing it costs −0.011 pooled, kw −0.028* and identifier −0.041*. The gate stays.
+- *"Graded relevance… Ollama 0.20.3 exposes [logprobs] by no route tested… Revisit if Ollama ships
+  logprobs."* Ollama 0.32.5 returns `logprobs` / `top_logprobs` on `/api/generate`, and graded
+  verdicts beat binary.
+
+**Caveats that bound the conclusion.**
+- **The gold answers are phrases taken from note text,** which may favour lexical retrieval. The
+  real-query stratum is the guard. It is not significant anywhere (n=50), and it sits at +0.032 to
+  +0.052 for the two rerank profiles.
+- **The CE gate fires on 57% of decision-set queries.** That is a property of this corpus.
+- **No latency was measured.** On the loaded machine, CE calls ran at a median of 942 ms each with
+  4-way concurrency, and HyDE 4b at 2.9 s. Neither is a latency number.
+- **One incident during scoring.** The reranker's runner wedged under swap pressure and returned
+  stubs. 1,455 pairs had been stored as abstain. They were quarantined and re-scored, and the scorer
+  now refuses a stub.
+
+**Engine changes these results need, none made:**
+1. A `lexprec` fusion rule.
+2. `logprobs` on the CE request, promoting on P(yes) ≥ 0.9.
+3. CE pool 30.
+4. The Qwen3 query prefix as the query default.
+
+Changes 2 and 3 also need new `_STACKS` tiers. What to measure next on top of them is planned in
+[docs/plans/engine-experiments.md](docs/plans/engine-experiments.md) (experiments 1 and 2).
+
+The harness (capture, replay, grid, CE scorer, faithfulness check) and the data stay outside this
+repository, with the private gold set.
