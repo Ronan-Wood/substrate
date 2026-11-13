@@ -1,8 +1,8 @@
 # The engine's tests, on a clean machine. The caches, the models and the built bundle are all on the
 # developer's Mac, and a runner has none of them.
 #
-# FOR THE ENGINE'S OWN REPOSITORY. GitHub reads `.github` only at a repository's root, so while the
-# engine is `substrate/` inside Scripta this file is inert, and Scripta's own `.github` runs its jobs.
+# This repository is the engine, so GitHub runs this file here. Until the split (2026-11-10) it sat
+# at `substrate/` inside Scripta, where GitHub never read it.
 #
 # ACTIONS ARE PINNED BY COMMIT, not by tag. A tag is a moving pointer that its owner can repoint at
 # any code, and these jobs run against this repository's contents. The version each hash belongs to

@@ -1,8 +1,8 @@
 # CodeQL, on the engine's Python, which is where untrusted input lands: PDFs, images, zip containers,
 # HTML and the JSON a subprocess hands back.
 #
-# FOR THE ENGINE'S OWN REPOSITORY. GitHub reads `.github` only at a repository's root, so while the
-# engine is `substrate/` inside Scripta this file is inert, and Scripta's own `.github` runs its jobs.
+# This repository is the engine, so GitHub runs this file here. Until the split (2026-11-10) it sat
+# at `substrate/` inside Scripta, where GitHub never read it.
 #
 # Actions pinned by commit, for the reason the test workflow gives.
 name: code scanning

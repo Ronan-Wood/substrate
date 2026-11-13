@@ -23,7 +23,8 @@ Start with the [project README](../README.md) for the install and the quickstart
 | [`../EXPERIMENTS.md`](../EXPERIMENTS.md) | every retrieval experiment, accepted or rejected, and the configuration that shipped |
 | [`ingestion-findings.md`](ingestion-findings.md) | what PDF and Docling ingestion taught, measured on real documents |
 | [`migration-vocabulary.md`](migration-vocabulary.md) | moving an existing Obsidian vault onto the spine: the vocabulary and the landmines |
-| [`history/`](history/) | dated records: a handoff, an audit tracker and a spike readout. Superseded where they disagree with the code |
+| [`plans/engine-experiments.md`](plans/engine-experiments.md) | nine planned engine experiments, each with its question, method and success number, and which are done or moot |
+| [`history/`](history/) | dated records: a handoff, an audit tracker, a spike readout and the engine split plan. Superseded where they disagree with the code |
 
 ## Project process
 

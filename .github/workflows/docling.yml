@@ -1,7 +1,7 @@
 # The engine's whole suite against the locked environment, docling included, on macOS.
 #
-# FOR THE ENGINE'S OWN REPOSITORY. GitHub reads `.github` only at a repository's root, so while the
-# engine is `substrate/` inside Scripta this file is inert, and Scripta's own `.github` runs its jobs.
+# This repository is the engine, so GitHub runs this file here. Until the split (2026-11-10) it sat
+# at `substrate/` inside Scripta, where GitHub never read it.
 #
 # ON PULL REQUESTS ONLY, AND NOT FOR DOCS. A macOS minute costs ten Linux ones, so this skips a
 # change that touches only the documents below, and does not run again on the merge to `main`.
