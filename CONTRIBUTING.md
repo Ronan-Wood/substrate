@@ -1,9 +1,10 @@
 # Contributing
 
 Thanks for helping. This page covers how to set up, how to check a change, and the rules a change
-follows to land. For something to work on, look at the issues labelled
-[`good first issue`](https://github.com/Ronan-Wood/substrate/labels/good%20first%20issue), and
-comment on an issue before you start on it.
+follows to land. For something to work on, see [`ROADMAP.md`](ROADMAP.md), which lists the work in the order we
+expect to take it, or the issues labelled
+[`good first issue`](https://github.com/Ronan-Wood/substrate/labels/good%20first%20issue). Comment on an
+issue before you start on it, so two people don't build the same thing.
 
 **Security problems don't go in public issues.** Report them as [`SECURITY.md`](SECURITY.md)
 describes.
@@ -40,6 +41,18 @@ uv run python -m pytest tests -q
 | `engine docling` (macOS, the locked environment minus OpenCV, no skips allowed) | PRs, unless they change only Markdown at the root, `docs/`, `experiments/`, the licence or the other CI files | no |
 | `lean` (Ubuntu, the models of the [verified paths](#verified-paths) against the real code) | PRs that touch `substrate/`, `pyproject.toml`, `uv.lock`, a model or its workflow | no |
 | `codeql python` (`code scanning` workflow) | pushes to `main`, PRs, and weekly | no |
+
+## Issue labels
+
+| label | means |
+|---|---|
+| `needs-decision` | waits on a maintainer's choice, which the issue names. Please don't start it until the choice is recorded on the issue |
+| `pip-blocker` | stops `pip install substrate-engine` working on an ordinary vault. These come first |
+| `good first issue` | small, and needs no models and no special hardware |
+| `needs-models` | needs a local model server and models to finish. The unit tests usually don't |
+| `needs-quiet-machine` | needs a latency run with only the model server busy |
+| `experiment` | states its success criterion first and reports in `EXPERIMENTS.md` either way |
+| `verified-path` | a Lean model plus a differential harness, as [`VERIFIED.md`](VERIFIED.md) describes |
 
 ## The rules
 
