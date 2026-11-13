@@ -1,9 +1,8 @@
 # Dependency updates, weekly, as pull requests.
 #
-# FOR THE ENGINE'S OWN REPOSITORY. GitHub reads `.github` only at a repository's root, so while the
-# engine is `substrate/` inside Scripta this file is inert, and Scripta's own `.github` runs its jobs.
-# These two entries are Scripta's entries for the engine with the directory moved to this root, and
-# Scripta's `.github/staged-engine-check` fails while the engine is inside it if they differ.
+# This repository is the engine, so these entries are live and are the only copy. Until the split
+# (2026-11-10) they sat at `substrate/` inside Scripta, where GitHub never read them and a Scripta
+# check kept them in step with Scripta's own.
 version: 2
 updates:
   - package-ecosystem: github-actions
