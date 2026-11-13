@@ -42,7 +42,7 @@ MODEL_FLAGS = {"hyde_model": "--hyde-model", "rerank_model": "--rerank-model"}
 KEYS = (*MODEL_FLAGS, "every")
 OFF = "off"
 # What each arm would send off this Mac, for the refusal of a cloud model's name.
-_SENDS = {"hyde_model": "every query it expands", "rerank_model": local_models.RERANK_SENDS}
+_SENDS = {"hyde_model": local_models.HYDE_SENDS, "rerank_model": local_models.RERANK_SENDS}
 # Read by no build: why each is refused, said in the refusal.
 _NOT_HERE = {"embed_model": "the embedder decides what every index holds, and the refresh pass and "
                             "`substrate embed` vector with their own, so this file cannot choose "

@@ -151,8 +151,22 @@ local user who can't read your home folder ([`substrate/agent.py`](../substrate/
   The snapshot manifest records which you chose, and a caller asking for sources from a snapshot
   without them is told so in `filters`. Setting it back to `false`, or deleting the line, removes a
   published copy at the next refresh, before anything else is tried, and a copy whose manifest
-  doesn't record the choice is treated as holding calls. Deleting the whole entry stops
-  publishing but removes nothing, so delete that scope's snapshot files yourself.
+  doesn't record the choice is treated as holding calls.
+- **Removing an entry removes its snapshot.** Each folder a snapshot is published into for an
+  entry is recorded in `agent-published.json` beside the registry. Removing the entry, emptying
+  the file, or pointing the entry's `dir` elsewhere removes the copy from each recorded folder at
+  the next refresh. A folder's record is dropped only once its copy is actually removed. A folder
+  that is empty, can't be looked in or isn't mounted keeps its record for a later pass.
+- **Nothing is withdrawn on uncertain state.**
+  - If `agent-publish.toml` is missing or isn't a regular file, which can happen mid-save, the
+    refresh says so and withdraws nothing. To withdraw every snapshot, leave the file empty.
+  - If the file doesn't parse, or an entry is malformed, nothing is published for it. A copy it
+    left that may hold calls is still removed, and other entries are unaffected.
+  - A ledger that can't be read is left as it is, and nothing it records is withdrawn that pass.
+    A ledger with bad content is set aside beside itself, and its valid rows are kept.
+- **Copies you place by hand.** A `publish-snapshot --dir` copy is never recorded on its own and is
+  never touched. One placed in a folder that an entry has published to *is* withdrawn with that
+  entry's record.
 - Snapshot files are mode `0640`, so **what another user can read is decided by which scopes you
   publish and by the snapshot folder's group**. Give each agent account its own folder.
 - `--scopes` limits what that one server answers. Any other scope gets the same fixed "scope not

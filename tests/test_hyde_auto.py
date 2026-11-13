@@ -214,6 +214,70 @@ def test_eval_refuses_a_hyde_sentinel() -> None:
         assert rc == 2, (sentinel, rc)
 
 
+class _Built(Exception):
+    """`stack.build` was reached."""
+
+
+def _launch(fn, argv: list[str]) -> tuple[int | None, str]:
+    """`(exit code, stderr)` of one launch, with `None` for a launch that got as far as building
+    the stack: a refusal at launch never gets there."""
+    import io
+
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(err):
+            return fn(argv), err.getvalue()
+    except _Built:
+        return None, err.getvalue()
+
+
+def test_the_server_and_serve_refuse_a_cloud_hyde_model_at_launch() -> None:
+    """Exit 2 before the stack is built, saying why, as `--rerank-model` does. Left to
+    `stack.build`, the engine started and dropped HyDE as a cloud refusal in `unavailable`: a host
+    that reads the exit status saw a healthy launch."""
+    from substrate import cli
+    from substrate.mcp import server
+
+    with tempfile.TemporaryDirectory() as tmp, \
+            mock.patch.object(server.stack, "build", side_effect=_Built):
+        registry = ["--registry", str(Path(tmp) / "scopes.toml")]
+        serve = ["serve", "--no-refresh", "--socket", str(Path(tmp) / "s.sock"), *registry]
+        for model in ("gpt-oss:120b-cloud", "glm-4.6:CLOUD"):
+            for fn, argv in ((server.main, [*registry, "--hyde-model", model]),
+                             (cli.main, [*serve, "--hyde-model", model])):
+                rc, err = _launch(fn, argv)
+                assert rc == 2, (argv, rc, err)
+                assert "cloud model" in err and model in err and "--hyde-model" in err, err
+        # The controls: a local model and both sentinels get as far as building the stack, so the
+        # 2 above is the refusal and not some earlier step failing on this machine.
+        for value in ("qwen3.5:4b-mlx", expand.AUTO, expand.OFF):
+            assert _launch(server.main, [*registry, "--hyde-model", value])[0] is None, value
+        # A lexical-only server runs no HyDE, so there is nothing to refuse.
+        assert _launch(server.main, [*registry, "--lexical-only",
+                                     "--hyde-model", "gpt-oss:120b-cloud"])[0] is None
+
+
+def test_eval_refuses_a_cloud_hyde_model_by_name_and_by_listing() -> None:
+    """`eval` builds HyDE itself, past `stack.build`. A cloud model read as "expansion:
+    unavailable" and the run went on, measured without HyDE. `big` is cloud by the listing's
+    `remote_host` alone; multi-query generates with the same `--hyde-model`, and is refused by
+    the listing too (`MultiQuery.refused_cloud`)."""
+    from substrate import cli
+
+    listing = {"models": [{"name": "big:latest", "capabilities": ["completion"],
+                           "remote_host": "https://ollama.com:443"}]}
+    with tempfile.TemporaryDirectory() as tmp, _tags(listing):
+        paths = ["--db", str(Path(tmp) / "absent.db"),
+                 "--baseline", str(Path(tmp) / "none.json"),
+                 "--cache", str(Path(tmp) / "cache.db")]
+        for extra in (["--hyde-model", "gpt-oss:120b-cloud"], ["--hyde-model", "big"],
+                      ["--no-hyde", "--multi-query", "2", "--hyde-model", "glm-4.6:cloud"],
+                      ["--no-hyde", "--multi-query", "2", "--hyde-model", "big"]):
+            rc, err = _launch(cli.main, ["eval", "--no-vector", "--no-rerank", *extra, *paths])
+            assert rc == 2, (extra, rc, err)
+            assert "cloud model" in err and "unavailable" not in err, (extra, err)
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

@@ -1326,11 +1326,11 @@ def _raw(base: str, payload: bytes, *, half_close: bool = False, timeout: float 
     that reason: a second hand-rolled recv loop is how one of them drifts back into dying as a bare
     TimeoutError that names neither the frame nor what the server answered.
 
-    `half_close` shuts the write half after sending, which ends `_linger`'s discard budget at once
-    instead of a second later. OFF by default: with it on, our own FIN is what ends the connection,
-    so `closed` stops being evidence that the SERVER closed it. `before_half_close(sock)` runs
-    between the send and the half-close, so a test can fix which of the two the server's reset
-    lands before.
+    `half_close` shuts the write half after sending, so a server still reading this connection
+    reaches end-of-input at once instead of waiting for bytes that never come. OFF by default:
+    with it on, our own FIN is what ends the connection, so `closed` stops being evidence that the
+    SERVER closed it. `before_half_close(sock)` runs between the send and the half-close, so a
+    test can fix which of the two the server's reset lands before.
     """
     import errno
     import socket

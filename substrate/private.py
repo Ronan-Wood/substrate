@@ -10,9 +10,9 @@ Three pieces, because no one of them is enough:
   * `restricted()` — the umask every entry point runs under, so whatever the process creates is
     0600 or 0700.
   * `seal()` — for what a writer already owns. A umask never reaches an existing file: SQLite
-    reopens a database at its old mode and gives `-wal`/`-shm` the database's mode, and compose
-    overwrites each note's ingest files in place. Without this, an index first built under 0644
-    stays 0644 for as long as it exists.
+    reopens a database at its old mode and gives `-wal`/`-shm` the database's mode, and an ingest
+    file compose has not rewritten since keeps its own. Without this, an index first built under
+    0644 stays 0644 for as long as it exists.
   * `exposed()` — what a READER reports and does not repair. A loose index is a leak that has
     already happened; refusing to serve it would not undo the leak, only stop answering until the
     next compose, which is what seals it.
@@ -315,8 +315,8 @@ def _tighten_fd(fd: int, label: str) -> Fail | None:
     return None
 
 
-def _open_owned_dir(path: Path | str, *, dir_fd: int | None = None,
-                    label: str | None = None) -> int | Fail | None:
+def open_owned_dir(path: Path | str, *, dir_fd: int | None = None,
+                   label: str | None = None) -> int | Fail | None:
     """A descriptor on the real directory at `path`, owned by this user; why not; or None when
     there is nothing there."""
     label = label or str(path)
@@ -343,7 +343,7 @@ def _seal_dir(path: Path) -> list[Fail]:
         return [(str(path), f"not sealed: {r.why}")]
     if not r.exists:
         return []
-    fd = _open_owned_dir(r.path, label=str(path))
+    fd = open_owned_dir(r.path, label=str(path))
     if not isinstance(fd, int):
         return [fd] if fd else []
     try:
@@ -615,8 +615,8 @@ def _classify(fd: int, family: Family) -> Listing:
             shaped.append(name)
             continue
         held = _held(fd, name)
-        # This user's regular files only: compose's next write into a planted one of someone
-        # else's would put the note's text in their file.
+        # This user's regular files only: a planted one of someone else's is not a file compose
+        # wrote, so the folder is not the engine's to seal.
         files_only = held is not None and not any(_file_refusal(st) for _, st in held)
         if files_only and all(n in INGEST_FILES or n.startswith(".") for n, _ in held):
             if any(n in INGEST_FILES for n, _ in held):
@@ -674,7 +674,7 @@ def _seal_ingest(fd: int, name: str, label: Path) -> list[Fail]:
     a link and sealed first, and each file is chmodded relative to it, so nothing inside the tree
     is resolved by name. A file that shares its inode with another name is given one of its own
     (`_relink`) rather than chmodded through the other."""
-    child = _open_owned_dir(name, dir_fd=fd, label=str(label))
+    child = open_owned_dir(name, dir_fd=fd, label=str(label))
     if not isinstance(child, int):
         return [child] if child else []
     fails: list[Fail] = []
@@ -691,7 +691,7 @@ def _seal_ingest(fd: int, name: str, label: Path) -> list[Fail]:
                 continue
             if not stat.S_ISREG(st.st_mode):
                 fails.append((str(label / e), "a link or not a file, in an ingest directory: "
-                                              "compose would write through it"))
+                                              "not a file compose wrote"))
             elif st.st_nlink > 1 and st.st_uid == os.geteuid():
                 if f := _relink(child, e, str(label / e)):
                     fails.append(f)
@@ -718,8 +718,9 @@ def _shaped_unsafe(fd: int, name: str) -> str | None:
     """Why a folder shaped like an ingest directory that is not one is unsafe, or None. Judged by
     the folder's own mode and by what compose would open in it under each `INGEST_FILES` name —
     looked up through the folder, so `Document.md` on a volume that ignores case is found — which
-    must be a closed regular file of this user's with no other hard link: compose writes by name,
-    so a planted file, link or hard link there would take a note's text. What else the folder
+    must be a closed regular file of this user's with no other hard link. Compose replaces each by
+    rename and never writes through one, but a planted file, link or hard link there is still not
+    a file compose wrote, so the folder is not one this index can vouch for. What else the folder
     holds is not the engine's to judge."""
     if _loose_at(fd, name):
         return "other users can read it"
@@ -763,7 +764,7 @@ def _seal_root(index_root: Path, r: Resolved, family: Family) -> list[Fail]:
     if not r.exists:
         return []
     target = r.path
-    fd = _open_owned_dir(target)
+    fd = open_owned_dir(target)
     if not isinstance(fd, int):
         return [fd] if fd else []
     fails: list[Fail] = []
@@ -888,7 +889,7 @@ def _root_exposed(root: Resolved, family: Family) -> bool:
         return False
     if _loose(st):
         return True
-    fd = _open_owned_dir(root.path)
+    fd = open_owned_dir(root.path)
     if not isinstance(fd, int):
         return fd is not None
     try:

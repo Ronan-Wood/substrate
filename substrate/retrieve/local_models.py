@@ -25,6 +25,8 @@ CLOUD = "cloud"
 
 # What a reranker sends a model, for its refusals.
 RERANK_SENDS = "every query and the passages it reorders"
+# What HyDE sends: the query, which is what the caller is searching their vault for.
+HYDE_SENDS = "every query it expands"
 # What an embedder sends: `embed` and the refresh pass index with it, and search embeds each query.
 EMBED_SENDS = "the text of every note it indexes and every query"
 
