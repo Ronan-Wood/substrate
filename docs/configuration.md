@@ -77,9 +77,10 @@ spine, read [`migration-vocabulary.md`](migration-vocabulary.md) first.
 | `vector-cache.db` | `embed`, `serve`, the refresh loop | content-addressed vectors that survive index rebuilds |
 | `refresh.json` | the refresh loop | what the last pass did to each scope, reported in every search reply |
 | `agent-publish.toml` | you | optional: which scopes to publish as agent-mode snapshots, and where |
+| `agent-published.json` | the refresh loop, `publish-snapshot` | every folder a snapshot was published into for an `agent-publish.toml` entry, so it is withdrawn when the entry goes |
 | `vaults.lock` | `compose`, `embed`, the refresh loop | serializes writers |
 
-`refresh.json`, `agent-publish.toml` and `vaults.lock` sit beside whichever registry is in use, so
+`refresh.json`, `agent-publish.toml`, `agent-published.json` and `vaults.lock` sit beside whichever registry is in use, so
 pointing `$SUBSTRATE_REGISTRY` at another folder gives that folder its own set.
 
 ### The registry: `scopes.toml`

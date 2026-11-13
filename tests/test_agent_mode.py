@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _swift_fixtures as fx  # noqa: E402
 
-from substrate import agent, cli, refresh_state, scopes, stack  # noqa: E402
+from substrate import agent, cli, refresh, refresh_state, scopes, stack  # noqa: E402
 from substrate.mcp import server  # noqa: E402
 from substrate.models import Chunk, Document  # noqa: E402
 from substrate.store.index_store import IndexStore  # noqa: E402
@@ -1004,18 +1004,23 @@ def test_turning_include_sources_off_rewrites_the_snapshot_without_the_calls(tmp
 
 @pytest.mark.parametrize("value", ['"true"', "1", "[]", "{}"])
 def test_a_non_bool_include_sources_is_refused(world, value):
+    """Refused when that entry is published, by a refresh or by hand — not by `load_config`, where
+    one bad entry used to refuse every other entry with it."""
     shared, registry = world
     (registry.parent / agent.CONFIG_FILENAME).write_text(
         f'[publish.demo]\ndir = "{shared}"\ninclude_sources = {value}\n', encoding="utf-8")
+    assert "include_sources must be true or false" in \
+        agent.load_config(registry).broken["demo"].error
     with pytest.raises(agent.AgentError, match="include_sources must be true or false"):
-        agent.load_config(registry)
+        agent.after_refresh_record("demo", "refreshed", registry=registry)
+    assert cli.main(["publish-snapshot", "--scope", "demo", "--registry", str(registry)]) == 2
 
 
 def test_an_entry_with_only_a_dir_still_publishes_without_sources(world):
     shared, registry = world
     (registry.parent / agent.CONFIG_FILENAME).write_text(
         f'[publish.demo]\ndir = "{shared}"\n', encoding="utf-8")
-    assert agent.load_config(registry) == {"demo": agent.Target(shared, False)}
+    assert agent.load_config(registry) == agent.Config({"demo": agent.Target(shared, False)}, {})
     (shared / "demo.snapshot.db").unlink()
     refresh_state.record("demo", "refreshed", registry=registry)
     line = agent.after_refresh_record("demo", "refreshed", registry=registry)
@@ -1064,6 +1069,396 @@ def test_revoking_include_sources_withdraws_the_snapshot_although_publish_refuse
         agent.publish("demo", shared, registry=registry)
     assert not (shared / "demo.snapshot.db").exists()
 
+
+
+# --------------------------------------------------------------------------- withdrawal follow-ups
+
+def _refresh(scope: str, registry: Path) -> list[str]:
+    """One `refresh-record` for `scope`, as the command runs it: the withdrawal sweep once, then
+    the scope's record and publish. Every line it said."""
+    said: list[str] = []
+    refresh.withdraw_snapshots(registry, say=said.append)
+    refresh.record_and_publish(scope, "refreshed", registry, say=said.append)
+    return said
+
+
+def _ledger(registry: Path) -> dict:
+    path = registry.parent / agent.LEDGER_FILENAME
+    return json.loads(path.read_text(encoding="utf-8"))["published"] if path.exists() else {}
+
+
+def _publish_entry(registry: Path, shared: Path) -> Path:
+    config = registry.parent / agent.CONFIG_FILENAME
+    config.write_text(f'[publish.demo]\ndir = "{shared}"\n', encoding="utf-8")
+    assert any("snapshot verified" in line or "snapshot published" in line
+               for line in _refresh("demo", registry))
+    return config
+
+
+@pytest.mark.parametrize("how", ["entry", "emptied", "moved"])
+def test_deleting_an_entry_withdraws_its_snapshot_at_the_next_refresh(world, tmp_path, how):
+    """The entry was the only record of the folder, so deleting it orphaned the copy there, served
+    to the agent for good. Any scope's refresh now withdraws it: `acme` has no entry at all."""
+    shared, registry = world
+    config = _publish_entry(registry, shared)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    if how == "entry":
+        config.write_text("[publish]\n", encoding="utf-8")
+    elif how == "emptied":
+        config.write_text("", encoding="utf-8")
+    else:
+        config.write_text(f'[publish.demo]\ndir = "{elsewhere}"\n', encoding="utf-8")
+    said = _refresh("acme", registry)
+    assert not (shared / "demo.snapshot.db").exists(), said
+    assert not (shared / "demo.snapshot.json").exists(), said
+    assert any("WITHDRAWN" in line and str(shared) in line for line in said), said
+    assert str(shared) not in _ledger(registry).get("demo", [])
+    assert not any("WITHDRAWN" in line for line in _refresh("acme", registry))
+    if how == "moved":
+        _refresh("demo", registry)
+        assert (elsewhere / "demo.snapshot.db").exists()
+
+
+@pytest.mark.parametrize("how", ["missing", "not-a-file"])
+def test_a_publish_file_that_cannot_be_read_right_now_withdraws_nothing(world, how):
+    """An editor saving `agent-publish.toml` can leave it missing, or something else, for a
+    moment. That is not "no entries": the pass says so and withdraws nothing."""
+    shared, registry = world
+    config = _publish_entry(registry, shared)
+    config.unlink()
+    if how == "not-a-file":
+        config.mkdir()
+    said = _refresh("acme", registry)
+    assert (shared / "demo.snapshot.db").exists(), said
+    assert any(line.startswith("WARNING (agent snapshots)") and "empty" in line
+               for line in said), said
+    assert _ledger(registry) == {"demo": [str(shared)]}
+
+
+def test_only_a_folder_published_into_is_recorded(world, tmp_path):
+    """Recorded when a snapshot is written there for the entry, never merely because the entry
+    names it: a folder that was never published into is nothing to withdraw, and a refusal there
+    must not leave a row behind. A `--dir` publish elsewhere is the operator's own, never recorded
+    and never withdrawn."""
+    shared, registry = world
+    config = registry.parent / agent.CONFIG_FILENAME
+    missing = tmp_path / "not-made-yet"
+    config.write_text(f'[publish.demo]\ndir = "{missing}"\n', encoding="utf-8")
+    _refresh("demo", registry)
+    assert _ledger(registry) == {}
+    by_hand = tmp_path / "by-hand"
+    by_hand.mkdir()
+    config.write_text(f'[publish.demo]\ndir = "{shared}"\n', encoding="utf-8")
+    assert cli.main(["publish-snapshot", "--scope", "demo", "--dir", str(by_hand),
+                     "--registry", str(registry)]) == 0
+    assert _ledger(registry) == {}
+    assert cli.main(["publish-snapshot", "--scope", "demo", "--registry", str(registry)]) == 0
+    assert _ledger(registry) == {"demo": [str(shared)]}
+    config.write_text("", encoding="utf-8")
+    _refresh("demo", registry)
+    assert not (shared / "demo.snapshot.db").exists()
+    assert (by_hand / "demo.snapshot.db").exists()
+
+
+def test_a_recorded_folder_that_cannot_be_looked_in_is_kept_for_the_next_pass(world, tmp_path):
+    """An unmounted volume, or a parent this user cannot enter: nothing is known about the copy,
+    so the row stays and the copy is withdrawn once the folder is back. Forgotten at once, the
+    copy outlived the entry for good."""
+    shared, registry = world
+    config = _publish_entry(registry, shared)
+    config.write_text("", encoding="utf-8")
+    away = tmp_path / "unmounted"
+    shared.rename(away)
+    _refresh("acme", registry)
+    assert _ledger(registry) == {"demo": [str(shared)]}
+    away.rename(shared)
+    said = _refresh("acme", registry)
+    assert not (shared / "demo.snapshot.db").exists(), said
+    assert _ledger(registry) == {}
+
+
+def test_a_recorded_folder_holding_no_snapshot_keeps_its_row_quietly(world, tmp_path):
+    """An unmounted volume's mountpoint is an empty folder, so an empty folder is not proof the
+    copy is gone: the row stays until a removal actually happens, and no pass warns about it,
+    whatever `_trusted_dir` would say of the folder."""
+    shared, registry = world
+    config = _publish_entry(registry, shared)
+    config.write_text("", encoding="utf-8")
+    away = tmp_path / "on-the-volume"
+    away.mkdir()
+    for name in ("demo.snapshot.db", "demo.snapshot.json"):
+        (shared / name).rename(away / name)
+    shared.chmod(0o777)
+    try:
+        for _ in range(2):
+            said = _refresh("acme", registry)
+            assert not any(line.startswith("WARNING") for line in said), said
+            assert _ledger(registry) == {"demo": [str(shared)]}
+    finally:
+        shared.chmod(0o755)
+    for name in ("demo.snapshot.db", "demo.snapshot.json"):
+        (away / name).rename(shared / name)
+    _refresh("acme", registry)
+    assert not (shared / "demo.snapshot.db").exists()
+    assert _ledger(registry) == {}
+
+
+def test_a_dropped_row_that_is_a_live_entrys_file_is_never_withdrawn(world):
+    """Judged by file identity, not by name: where case is ignored `Demo.snapshot.db` is
+    `demo.snapshot.db`, and a hard link is the same file under any name. A dropped row whose
+    files are a live entry's is skipped; one with files of its own is withdrawn, so a volume that
+    does not ignore case still loses a stray copy."""
+    shared, registry = world
+    _publish_entry(registry, shared)
+    os.link(shared / "demo.snapshot.db", shared / "acme.snapshot.db")
+    (registry.parent / agent.LEDGER_FILENAME).write_text(json.dumps(
+        {"version": agent.LEDGER_VERSION, "published": {"Demo": [str(shared)],
+                                                        "acme": [str(shared)],
+                                                        "demo": [str(shared)]}}),
+        encoding="utf-8")
+    said = _refresh("globex", registry)
+    assert (shared / "demo.snapshot.db").exists(), said
+    assert (shared / "acme.snapshot.db").exists(), said
+    assert set(_ledger(registry)) == {"Demo", "acme", "demo"}
+    (shared / "acme.snapshot.db").unlink()
+    (shared / "acme.snapshot.db").write_bytes(b"a copy of its own")
+    said = _refresh("globex", registry)
+    assert not (shared / "acme.snapshot.db").exists(), said
+    assert (shared / "demo.snapshot.db").exists(), said
+
+
+def test_a_row_is_decided_against_the_entry_as_it_stands_under_the_lock(world, monkeypatch):
+    """The sweep read the config once and decided later. An entry re-added, and published, in
+    between saw its fresh snapshot withdrawn by the stale decision."""
+    shared, registry = world
+    config = _publish_entry(registry, shared)
+    config.write_text("", encoding="utf-8")
+    real = agent._publish_lock
+
+    def lock(scope, reg):
+        if scope == "demo":   # the operator re-adds the entry just before the sweep's turn
+            config.write_text(f'[publish.demo]\ndir = "{shared}"\n', encoding="utf-8")
+        return real(scope, reg)
+
+    monkeypatch.setattr(agent, "_publish_lock", lock)
+    said: list[str] = []
+    refresh.withdraw_snapshots(registry, say=said.append)
+    assert (shared / "demo.snapshot.db").exists(), said
+    assert _ledger(registry) == {"demo": [str(shared)]}
+
+
+def test_a_ledger_that_cannot_be_read_is_left_alone_and_decides_nothing(tmp_path):
+    """A link planted at the ledger's name (also EIO, EACCES, over the cap): what it records is
+    unknown, so no recorded folder is withdrawn this pass and the file is not written over. A
+    broken entry's copy that may hold calls still goes."""
+    shared, registry = _sourced_scope(tmp_path)
+    _entry(registry, shared, include_sources=True)
+    _refresh("demo", registry)
+    ledger = registry.parent / agent.LEDGER_FILENAME
+    real = ledger.with_name("elsewhere.json")
+    ledger.rename(real)
+    ledger.symlink_to(real)
+    (registry.parent / agent.CONFIG_FILENAME).write_text(
+        f'[publish.demo]\ndir = "{shared}"\ninclude_sources = "no"\n', encoding="utf-8")
+    said: list[str] = []
+    refresh.withdraw_snapshots(registry, say=said.append)
+    assert not (shared / "demo.snapshot.db").exists(), said
+    assert any("cannot be read" in line and "left as it is" in line for line in said), said
+    assert ledger.is_symlink()
+
+
+def test_a_ledger_with_bad_rows_is_set_aside_and_its_good_rows_kept(world):
+    """A ledger is the only record of where copies went, so bad content is kept for reading and
+    every valid row survives it. Wiping it forgot every copy the good rows named."""
+    shared, registry = world
+    config = _publish_entry(registry, shared)
+    ledger = registry.parent / agent.LEDGER_FILENAME
+    ledger.write_text(json.dumps({"version": agent.LEDGER_VERSION, "published": {
+        "demo": [str(shared)], "bad name!": ["/x"], "acme": ["relative"]}}), encoding="utf-8")
+    config.write_text("", encoding="utf-8")
+    said: list[str] = []
+    refresh.withdraw_snapshots(registry, say=said.append)
+    assert any("set aside" in line and "invalid row" in line for line in said), said
+    assert list(registry.parent.glob(agent.LEDGER_FILENAME + ".bad-*"))
+    assert not (shared / "demo.snapshot.db").exists(), "the good row was still acted on"
+
+
+@pytest.mark.parametrize("ledger", ["{not json", json.dumps({"version": 99, "published": {}})])
+def test_an_unusable_ledger_blocks_no_withdrawal(tmp_path, ledger):
+    """Reported, set aside, and a broken entry's copy that may hold calls is still withdrawn from
+    its folder. It used to stop the sweep, and every withdrawal with it."""
+    shared, registry = _sourced_scope(tmp_path)
+    _entry(registry, shared, include_sources=True)
+    _refresh("demo", registry)
+    (registry.parent / agent.LEDGER_FILENAME).write_text(ledger, encoding="utf-8")
+    (registry.parent / agent.CONFIG_FILENAME).write_text(
+        f'[publish.demo]\ndir = "{shared}"\ninclude_sources = "no"\n', encoding="utf-8")
+    said: list[str] = []
+    refresh.withdraw_snapshots(registry, say=said.append)
+    assert not (shared / "demo.snapshot.db").exists(), said
+    assert any(line.startswith("WARNING (agent snapshots)") and agent.LEDGER_FILENAME in line
+               for line in said), said
+    assert _ledger(registry) == {}
+    assert list(registry.parent.glob(agent.LEDGER_FILENAME + ".bad-*"))
+
+
+def test_a_freeze_reaches_the_agent_when_the_ledger_cannot_record(world):
+    """`annotate` recorded the folder first, so a ledger failure skipped the frozen-state mark and
+    the agent kept reading a healthy scope."""
+    shared, registry = world
+    _publish_entry(registry, shared)
+    ledger = registry.parent / agent.LEDGER_FILENAME
+    real = ledger.with_name("elsewhere.json")
+    ledger.rename(real)
+    ledger.symlink_to(real)
+    refresh_state.record("demo", "compose_failed", registry=registry)
+    with pytest.raises(agent.AgentError, match="manifest marked"):
+        agent.after_refresh_record("demo", "compose_failed", registry=registry)
+    manifest = json.loads((shared / "demo.snapshot.json").read_text(encoding="utf-8"))
+    assert manifest["refresh"]["outcome"] == "compose_failed", manifest["refresh"]
+
+
+def test_a_malformed_entry_withholds_only_itself(tmp_path):
+    """One bad value used to make `load_config` raise, which stopped every scope's withdrawal:
+    here `demo`'s opt-in is turned off while `acme`'s entry is broken. `demo`'s copy loses its
+    calls on its next refresh; `acme` is refused, and its own copy, which may hold calls, is
+    withdrawn by its own refresh record, sweep or no sweep."""
+    shared, registry = _sourced_scope(tmp_path)
+    _scope(registry.parent, registry, "acme")
+    acme_dir = tmp_path / "acme-shared"
+    acme_dir.mkdir()
+    config = registry.parent / agent.CONFIG_FILENAME
+
+    def write(demo_sources: str, acme_sources: str) -> None:
+        config.write_text(f'[publish.demo]\ndir = "{shared}"\ninclude_sources = {demo_sources}\n'
+                          f'[publish.acme]\ndir = "{acme_dir}"\ninclude_sources = '
+                          f'{acme_sources}\n', encoding="utf-8")
+
+    write("true", "true")
+    _refresh("demo", registry)
+    _refresh("acme", registry)
+    assert b"Zqxjcalltranscript" in (shared / "demo.snapshot.db").read_bytes()
+    assert (acme_dir / "acme.snapshot.db").exists()
+
+    write("false", '"no"')
+    refresh_state.record("acme", "refreshed", registry=registry)
+    with pytest.raises(agent.AgentError, match="include_sources must be true or false") as e:
+        agent.after_refresh_record("acme", "refreshed", registry=registry)
+    assert "WITHDRAWN" in str(e.value)
+    assert not (acme_dir / "acme.snapshot.db").exists()
+    said = _refresh("demo", registry)
+    assert b"Zqxjcalltranscript" not in (shared / "demo.snapshot.db").read_bytes(), said
+
+
+@pytest.mark.parametrize("dir_value", ["relative/folder", "~zqxjnosuchuser/folder", "a\\u0000b"])
+def test_a_bad_dir_is_its_entrys_alone(world, tmp_path, dir_value):
+    """A relative `dir` would name whichever folder the refresh ran in, and a `~user` that does
+    not exist made `load_config` raise for the whole file. Each is its entry's error now."""
+    shared, registry = world
+    (registry.parent / agent.CONFIG_FILENAME).write_text(
+        f'[publish.acme]\ndir = "{dir_value}"\n[publish.demo]\ndir = "{shared}"\n',
+        encoding="utf-8")
+    config = agent.load_config(registry)
+    assert set(config.broken) == {"acme"} and set(config.targets) == {"demo"}, config
+    assert any("snapshot verified" in line for line in _refresh("demo", registry))
+
+
+def test_a_publish_file_that_does_not_parse_still_withdraws_copies_holding_calls(tmp_path):
+    """A typo while turning the opt-in off leaves the file unparseable. Where it publishes is then
+    unknown, so the folders recorded are kept and a copy there that may hold calls goes."""
+    shared, registry = _sourced_scope(tmp_path)
+    _entry(registry, shared, include_sources=True)
+    _refresh("demo", registry)
+    assert b"Zqxjcalltranscript" in (shared / "demo.snapshot.db").read_bytes()
+    (registry.parent / agent.CONFIG_FILENAME).write_text(
+        f'[publish.demo]\ndir = "{shared}"\ninclude_sources = fals\n', encoding="utf-8")
+    said = _refresh("demo", registry)
+    assert not (shared / "demo.snapshot.db").exists(), said
+    assert any(line.startswith("WARNING (agent snapshot demo)") for line in said), said
+    assert _ledger(registry) == {"demo": [str(shared)]}
+
+
+def test_a_pass_withdraws_once_not_once_per_scope(world, monkeypatch):
+    """The sweep reads every entry and every recorded folder; a pass of N scopes ran it N times."""
+    import subprocess
+
+    shared, registry = world
+    calls = []
+    monkeypatch.setattr(agent, "withdraw_dropped",
+                        lambda reg=None: calls.append(reg) or ([], []))
+    refresh.run_pass(registry, runner=lambda argv, env: subprocess.CompletedProcess(argv, 0, "", ""),
+                     log=lambda line: None)
+    assert len(calls) == 1, calls
+    calls.clear()
+    assert cli.main(["refresh-record", "--scope", "demo", "--scope", "acme", "--outcome",
+                     "refreshed", "--registry", str(registry), "--quiet"]) == 0
+    assert len(calls) == 1, calls
+
+
+def test_a_call_changing_moves_nothing_a_snapshot_without_calls_shows(tmp_path):
+    """The fingerprint, `index_version` and `published` were taken over the whole live index, so
+    an agent could watch them move whenever a call was added or edited, though it reads no call."""
+    shared, registry = _sourced_scope(tmp_path)
+    agent.publish("demo", shared, registry=registry)
+    manifest_path = shared / "demo.snapshot.json"
+    before = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    with IndexStore(str(registry.parent / "demo.db")) as s:
+        for doc_id, text in (("zqxjcallnote", _CALL_TEXT + " Edited."),
+                             ("zqxjsecondcall", "Another call.")):
+            doc = Document(doc_id=doc_id, source_path=str(tmp_path / f"{doc_id}.md"),
+                           source_sha256=hashlib.sha256(text.encode()).hexdigest(),
+                           source_pages=1, document_class="conversation", title=doc_id,
+                           status="active", doc_type="reference", confidence="stated",
+                           vault="demo-vault", tier=3, domains=[], supersedes=[])
+            s.upsert(doc, [Chunk(chunk_id=f"{doc_id}#c00000", doc_id=doc_id, kind="passage",
+                                 text=text, path=[doc_id], level=1, n_chars=len(text),
+                                 document_class="conversation")],
+                     markdown_path="x", markdown_mtime=0.0, markdown_sha256="d" * 64)
+        s.store_vectors([("zqxjsecondcall#c00000", [0.5, 0.5])], "m#raw")
+        s.replace_identity([("ada-lovelace", "Zqxjcallperson", "person", None),
+                            ("grace", "Zqxjsecondperson", "person", None)])
+        s.set_document_entities("zqxjsecondcall", [("grace", "Zqxjsecondperson")])
+
+    p = agent.publish("demo", shared, registry=registry,
+                      now=datetime.now(UTC) + timedelta(hours=1))
+    after = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert not p.rewrote
+    for key in ("fingerprint", "index_version", "published"):
+        assert after[key] == before[key], key
+    # The version named is the one the agent's engine computes over the copy it reads.
+    with IndexStore(str(shared / "demo.snapshot.db"), migrate=False, immutable=True) as snap:
+        assert snap.index_version == after["index_version"]
+    # A snapshot that carries calls still moves with them.
+    q = agent.publish("demo", shared, registry=registry, include_sources=True)
+    with IndexStore(str(registry.parent / "demo.db")) as s:
+        s.remove("zqxjsecondcall")
+    assert agent.publish("demo", shared, registry=registry, include_sources=True).rewrote, q
+
+
+def test_the_fingerprint_hashes_what_the_copy_holds_and_nothing_else(world):
+    """It counted vectors no passage holds, which the copy also carried — each under a `chunk_id`
+    naming the document it came from — and mentions of documents the copy leaves out. Neither is
+    in the copy now, and neither moves the fingerprint."""
+    shared, registry = world
+    db = registry.parent / "demo.db"
+    gone = _add_real_doc(registry, "unmatched", _BODY)
+    gone.unlink()                       # excluded: its note no longer backs the index
+    before = agent.publish("demo", shared, registry=registry)
+    manifest = json.loads((shared / "demo.snapshot.json").read_text(encoding="utf-8"))
+    with IndexStore(str(db)) as s:
+        s.db.execute("INSERT INTO chunk_vectors(chunk_id, vector, embed_model, dim) "
+                     "VALUES ('zqxjorphancall#c00000', x'00000000', 'm#raw', 1)")
+        s.replace_identity([("ada", "Ada", "person", None)])
+        s.set_document_entities("unmatched", [("ada", "Ada")])
+    p = agent.publish("demo", shared, registry=registry)
+    assert before.excluded == 1 and not p.rewrote
+    after = json.loads((shared / "demo.snapshot.json").read_text(encoding="utf-8"))
+    assert after["fingerprint"] == manifest["fingerprint"]
+    (shared / "demo.snapshot.json").unlink()      # forces a rewrite of the copy
+    agent.publish("demo", shared, registry=registry)
+    assert b"zqxjorphancall" not in (shared / "demo.snapshot.db").read_bytes()
 
 def test_a_snapshot_whose_manifest_does_not_record_include_sources_is_withdrawn(world):
     """Every snapshot the previous engine published carried calls and no `include_sources`."""

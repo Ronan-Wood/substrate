@@ -792,12 +792,18 @@ class IndexStore:
         no FSEvents watcher, so the caller must compare. Cheap: one indexed join over the (small)
         documents table. Vector-space staleness is out of scope — the embed model is a query-time
         choice, and the eval's completeness guard already refuses a partially-embedded corpus."""
-        rows = self.db.execute(
+        return self.index_version_of(None)
+
+    def index_version_of(self, doc_ids: frozenset[str] | set[str] | None) -> str:
+        """`index_version` over only `doc_ids` (every document when None): what a copy holding just
+        those documents reports as its own, which is how an agent snapshot that leaves calls out
+        names a version that does not move when a call does."""
+        rows = [r for r in self.db.execute(
             "SELECT d.doc_id, COALESCE(s.content_hash, d.source_sha256) AS h "
             "FROM documents d "
             "LEFT JOIN stage_ledger s ON s.doc_id = d.doc_id AND s.stage = 'index' "
             "ORDER BY d.doc_id"
-        ).fetchall()
+        ).fetchall() if doc_ids is None or r["doc_id"] in doc_ids]
         sv = self.db.execute("PRAGMA user_version").fetchone()[0]
         if not rows:
             return f"v{sv}:empty"

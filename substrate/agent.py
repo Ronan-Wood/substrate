@@ -50,6 +50,10 @@ SNAPSHOT_SUFFIX = ".snapshot.db"
 MANIFEST_SUFFIX = ".snapshot.json"
 MANIFEST_VERSION = 1
 CONFIG_FILENAME = "agent-publish.toml"
+# Every folder an entry has named for a scope, kept beside the registry: deleting the entry deletes
+# the only record of where its snapshot went, and a snapshot nobody records is never withdrawn.
+LEDGER_FILENAME = "agent-published.json"
+LEDGER_VERSION = 1
 
 # Older than this and the snapshot says so on every answer. A day: the in-app refresh runs only
 # while Scripta is open (substrate/CLAUDE.md), so an older copy means nobody has refreshed, and the
@@ -127,12 +131,12 @@ def _read_manifest(path: Path) -> tuple[dict | None, str | None]:
     return data, None
 
 
-def _write_atomic(path: Path, body: bytes) -> None:
+def _write_atomic(path: Path, body: bytes, mode: int = FILE_MODE) -> None:
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(body)
-        os.chmod(tmp, FILE_MODE)
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -187,8 +191,42 @@ class Target:
     include_sources: bool = False
 
 
-def load_config(registry: str | Path | None = None) -> dict[str, Target]:
-    """`{scope: Target}` from `agent-publish.toml` beside the registry; `{}` when absent.
+@dataclass(frozen=True)
+class Broken:
+    """A `[publish.<scope>]` entry that cannot be used, and why. It is never published, and a copy
+    it left that may hold calls is withdrawn (`withdraw_calls`). `dir` is None when the entry
+    names no usable folder."""
+
+    dir: Path | None
+    error: str
+
+
+@dataclass(frozen=True)
+class Config:
+    """`agent-publish.toml`: the entries that can be published, and the ones that cannot."""
+
+    targets: dict[str, Target]
+    broken: dict[str, Broken]
+
+
+def _entry_dir(raw: object) -> Path | str:
+    """The entry's folder, or why it is not one. Absolute only: a relative `dir` would mean
+    whichever folder the refresh happened to run in."""
+    if not isinstance(raw, str) or not raw.strip():
+        return "needs a `dir`"
+    if "\0" in raw:
+        return "has a `dir` holding a NUL"
+    try:
+        folder = Path(raw).expanduser()
+    except (RuntimeError, ValueError) as e:  # `~nobody`, or no home to expand `~` to
+        return f"has a `dir` that cannot be expanded ({e})"
+    if not folder.is_absolute():
+        return "needs an absolute `dir`"
+    return folder
+
+
+def load_config(registry: str | Path | None = None) -> Config:
+    """The entries of `agent-publish.toml` beside the registry; empty when it is absent.
 
         [publish.atlas]
         dir = "/Users/Shared/atlas-agent/substrate"
@@ -196,27 +234,306 @@ def load_config(registry: str | Path | None = None) -> dict[str, Target]:
 
     Opt-in by file, like the registry itself: no file, no publishing, and nothing under
     `/Users/Shared` is ever written by a machine that did not ask for it.
+
+    A malformed ENTRY is that entry's alone (`Config.broken`): one bad value written while turning
+    an opt-in off must not stop every other scope's publish and withdrawal. A file that cannot be
+    read at all still raises.
     """
     path = scopes.registry_path(registry).parent / CONFIG_FILENAME
     if not path.is_file():
-        return {}
+        return Config({}, {})
     try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raw = path.read_bytes()
+    except OSError as e:
+        raise ConfigUnknown(f"cannot read {path}: {e}") from e
+    try:
+        data = tomllib.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
         raise AgentError(f"cannot read {path}: {e}") from e
     table = data.get("publish", {})
     if not isinstance(table, dict):
         raise AgentError(f"{path}: 'publish' must be a table of scopes.")
-    out = {}
+    targets: dict[str, Target] = {}
+    broken: dict[str, Broken] = {}
     for name, row in table.items():
-        if not valid_scope_name(name) or not isinstance(row, dict) \
-                or not isinstance(row.get("dir"), str) or not row["dir"].strip():
-            raise AgentError(f"{path}: [publish.{name}] needs a valid scope name and a `dir`.")
-        include = row.get("include_sources", False)
-        if not isinstance(include, bool):
-            raise AgentError(f"{path}: [publish.{name}] include_sources must be true or false.")
-        out[name] = Target(Path(row["dir"]).expanduser(), include)
-    return out
+        folder = _entry_dir(row.get("dir") if isinstance(row, dict) else None)
+        usable = folder if isinstance(folder, Path) else None
+        if not valid_scope_name(name) or not isinstance(row, dict):
+            broken[name] = Broken(usable, f"{path}: [publish.{name}] needs a valid scope name "
+                                          f"and a `dir`.")
+        elif usable is None:
+            broken[name] = Broken(None, f"{path}: [publish.{name}] {folder}.")
+        elif not isinstance(include := row.get("include_sources", False), bool):
+            broken[name] = Broken(usable, f"{path}: [publish.{name}] include_sources must be "
+                                          f"true or false.")
+        else:
+            targets[name] = Target(usable, include)
+    return Config(targets, broken)
+
+
+# --------------------------------------------------------------------------- withdrawal
+
+def _ledger_path(registry: str | Path | None) -> Path:
+    return scopes.registry_path(registry).parent / LEDGER_FILENAME
+
+
+class LedgerUnreadable(AgentError):
+    """The ledger could not be read at all (EIO, EACCES, over the size cap, a planted link): what
+    it holds is unknown, so nothing is decided from it and nothing is written over it."""
+
+
+def _valid_row(name: object, folders: object) -> bool:
+    return valid_scope_name(name) and isinstance(folders, list) and all(
+        isinstance(d, str) and "\0" not in d and Path(d).is_absolute() for d in folders)
+
+
+def _read_ledger(path: Path) -> tuple[dict[str, list[str]], str | None]:
+    """`(rows, why)`. `why` names bad content — not JSON, not a version-1 ledger, invalid rows —
+    and `rows` are then the valid rows it still holds. `({}, None)` when there is no file. Raises
+    LedgerUnreadable when the file cannot be read."""
+    from substrate.freshness import read_bounded
+
+    try:
+        raw = read_bounded(path, refresh_state.MAX_STATE_BYTES, nofollow=True)
+    except FileNotFoundError:
+        return {}, None
+    except OSError as e:
+        raise LedgerUnreadable(f"{path} cannot be read ({type(e).__name__}: "
+                               f"{e.strerror or e}); nothing was withdrawn from it this pass, "
+                               f"and it was left as it is") from e
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return {}, f"{path} is not JSON"
+    published = data.get("published") if isinstance(data, dict) else None
+    if not isinstance(published, dict):
+        return {}, f"{path} holds no table of published folders"
+    rows = {k: list(v) for k, v in published.items() if _valid_row(k, v)}
+    if data.get("version") != LEDGER_VERSION:
+        return rows, f"{path} is not a version-{LEDGER_VERSION} ledger"
+    if len(rows) != len(published):
+        return rows, f"{path} holds {len(published) - len(rows)} invalid row(s)"
+    return rows, None
+
+
+def _write_ledger(path: Path, ledger: dict[str, list[str]]) -> None:
+    ledger = {k: v for k, v in sorted(ledger.items()) if v}
+    _write_atomic(path, (json.dumps({"version": LEDGER_VERSION, "published": ledger}, indent=2)
+                         + "\n").encode(), mode=0o600)
+
+
+def _load_ledger(path: Path) -> tuple[dict[str, list[str]], str | None]:
+    """The ledger's valid rows, under the ledger lock. A file with bad content is set aside whole,
+    beside itself, and its valid rows are written back, so a good row is never lost and the bad
+    content stays for the operator to read; `why` then says so. Raises LedgerUnreadable."""
+    rows, why = _read_ledger(path)
+    if why:
+        aside = path.with_name(f"{path.name}.bad-{_now():%Y%m%dT%H%M%S}-{os.getpid()}")
+        os.replace(path, aside)
+        _write_ledger(path, rows)
+        why = (f"{why}; set aside as {aside.name}, and its {sum(map(len, rows.values()))} valid "
+               f"folder(s) kept")
+    return rows, why
+
+
+def _remember(scope: str, directory: Path, registry: str | Path | None) -> str | None:
+    """Record that `scope` is published into `directory`: called under the scope's publish lock,
+    before the first snapshot file is written there, so a copy is never in a folder the ledger
+    does not name. Returns a note when bad content was set aside. Raises LedgerUnreadable: a row
+    that cannot be written is a copy that could never be withdrawn."""
+    path = _ledger_path(registry)
+    folder = str(private.absolute(directory))
+    with scopes.exclusive(path):
+        ledger, why = _load_ledger(path)
+        if folder not in ledger.get(scope, []):
+            ledger.setdefault(scope, []).append(folder)
+            _write_ledger(path, ledger)
+    return why
+
+
+def _forget(scope: str, folder: str, registry: str | Path | None) -> None:
+    path = _ledger_path(registry)
+    with scopes.exclusive(path):
+        ledger, _ = _load_ledger(path)
+        if folder in ledger.get(scope, []):
+            ledger[scope].remove(folder)
+            _write_ledger(path, ledger)
+
+
+def _same_folder(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return os.path.abspath(a) == os.path.abspath(b)
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except (OSError, ValueError):
+        return False
+
+
+# What `_withdraw` found.
+ABSENT, EMPTY, KEPT, REMOVED = "absent", "empty", "kept", "removed"
+
+
+def _withdraw(scope: str, directory: Path, *, unless_call_free: bool,
+              live: Iterable[tuple[str, Path]] = ()) -> str:
+    """Remove `scope`'s snapshot and manifest from `directory`, under the caller's publish lock.
+
+    ABSENT: the folder could not be looked in (gone, an unmounted volume, no permission). EMPTY:
+    it holds neither name, or what it holds under them is a LIVE entry's own file — `live` is each
+    healthy entry's `(scope, dir)`, and on a volume that ignores case `Demo.snapshot.db` is
+    `demo.snapshot.db`; judged by file identity, so a volume that does not ignore case still has
+    its own copy withdrawn. KEPT: `unless_call_free`, and the copy's manifest records
+    `include_sources: false` (`_withdraw_if_sources_revoked`). REMOVED: removed. A folder holding
+    a snapshot name that fails `_trusted_dir` raises AgentError: another user could have pointed
+    it anywhere."""
+    db_path, manifest_path = snapshot_paths(directory, scope)
+    try:
+        os.stat(directory)
+    except OSError:
+        return ABSENT
+    present = []
+    for p in (db_path, manifest_path):
+        try:
+            os.lstat(p)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return ABSENT
+        present.append(p)
+    theirs = [q for name, d in live if name != scope and valid_scope_name(name)
+              for q in snapshot_paths(d, name)]
+    if not present or any(_same_file(p, q) for p in present for q in theirs):
+        return EMPTY
+    _trusted_dir(directory)
+    if unless_call_free:
+        prior, _ = _read_manifest(manifest_path)
+        return (REMOVED if _withdraw_if_sources_revoked(False, db_path, manifest_path, prior)
+                else KEPT)
+    for p in present:
+        p.unlink(missing_ok=True)
+    return REMOVED
+
+
+def withdraw_calls(scope: str, folders: Iterable[Path],
+                   registry: str | Path | None) -> tuple[list[Path], list[str]]:
+    """For an entry that cannot be read: withdraw a copy in each of `folders` that may hold calls.
+    `(folders withdrawn from, failures)`."""
+    removed, failed = [], []
+    if not valid_scope_name(scope):
+        return removed, failed
+    with _publish_lock(scope, registry):
+        for folder in dict.fromkeys(folders):
+            try:
+                if _withdraw(scope, folder, unless_call_free=True) == REMOVED:
+                    removed.append(folder)
+            except (AgentError, OSError, ValueError) as e:
+                failed.append(f"{scope}: snapshot in {folder} not checked for calls: {e}")
+    return removed, failed
+
+
+class ConfigUnknown(AgentError):
+    """`agent-publish.toml` cannot be read right now: missing, not a regular file, or unreadable.
+    An editor saving it can leave any of these for a moment, so it is not "no entries"."""
+
+
+def _config_now(registry: str | Path | None) -> Config | None:
+    """The entries as they stand, or None when the file does not parse — which decides nothing
+    about where a scope belongs. Raises ConfigUnknown when it cannot be read at all."""
+    path = scopes.registry_path(registry).parent / CONFIG_FILENAME
+    try:
+        st = os.stat(path)
+    except OSError as e:
+        raise ConfigUnknown(f"{path} is not there right now ({e.strerror or e})") from e
+    if not stat.S_ISREG(st.st_mode):
+        raise ConfigUnknown(f"{path} is not a regular file")
+    try:
+        return load_config(registry)
+    except ConfigUnknown:
+        raise
+    except AgentError:
+        return None
+
+
+def withdraw_dropped(registry: str | Path | None = None) -> tuple[list[str], list[str]]:
+    """Withdraw every snapshot no `[publish.<scope>]` entry asks for any more: `(done, failed)`,
+    a line each. Run once per refresh pass, and once by `refresh-record`.
+
+    Every folder a snapshot was published into for an entry is recorded beside the registry
+    (`LEDGER_FILENAME`, by `_remember`). A recorded folder no entry names any more — the entry was
+    deleted, every entry was, or its `dir` moved — is withdrawn WHOLE, and only a real removal
+    forgets the row: a folder that is empty, absent or unreadable keeps it, quietly, for a later
+    pass (an unmounted volume's empty mountpoint among them). Each row is decided under its scope's
+    publish lock against the entry as it stands then, so a publish that lands meanwhile is seen.
+
+    Nothing is decided on uncertain state. An `agent-publish.toml` that cannot be read right now
+    (missing, not a file, unreadable) skips the sweep, said once; to withdraw every snapshot,
+    leave the file empty. One that does not parse, or a malformed entry, decides nothing about
+    where a scope belongs: its folders are kept, and only a copy there that may hold calls is
+    withdrawn. A ledger that cannot be read skips what it would decide and is left alone; one with
+    bad content is set aside and its valid rows kept. A `publish-snapshot --dir` copy is never
+    recorded on its own, but one placed in a folder an entry once published to goes with that
+    entry's row."""
+    path = _ledger_path(registry)
+    done: list[str] = []
+    failed: list[str] = []
+    # Nothing ever published and nothing asked for: not even the lock file is written.
+    if not os.path.lexists(path) and not (path.parent / CONFIG_FILENAME).is_file():
+        return done, failed
+    try:
+        with scopes.exclusive(path):
+            ledger, why = _load_ledger(path)
+    except LedgerUnreadable as e:
+        ledger, why = None, str(e)
+    if why:
+        failed.append(why)
+    try:
+        config = _config_now(registry)
+    except ConfigUnknown as e:
+        if ledger:
+            failed.append(f"{e}; no snapshot was withdrawn this pass. To withdraw every one, "
+                          f"leave the file empty rather than remove it.")
+        return done, failed
+
+    calls: dict[str, list[Path]] = {}       # name -> folders whose call-holding copy goes
+    if config is not None:
+        for name, b in config.broken.items():
+            if b.dir is not None:
+                calls.setdefault(name, []).append(b.dir)
+    for name, folders in sorted((ledger or {}).items()):
+        for d in folders:
+            try:
+                with _publish_lock(name, registry):
+                    # Decided here, against the entry as it stands under the lock a publish holds.
+                    now = _config_now(registry)
+                    if now is None or name in now.broken:
+                        calls.setdefault(name, []).append(Path(d))
+                        continue
+                    target = now.targets.get(name)
+                    if target is not None and _same_folder(Path(d), target.dir):
+                        continue            # the entry's own folder: its publish decides
+                    found = _withdraw(name, Path(d), unless_call_free=False,
+                                      live=[(k, t.dir) for k, t in now.targets.items()])
+                    if found == REMOVED:
+                        _forget(name, d, registry)
+            except ConfigUnknown as e:
+                failed.append(f"{e}; {name}'s snapshot in {d} was not withdrawn this pass")
+                continue
+            except (AgentError, OSError, ValueError) as e:
+                failed.append(f"{name}: snapshot in {d} not withdrawn: {e}")
+                continue
+            if found == REMOVED:
+                done.append(f"{name}: snapshot in {d} WITHDRAWN — no [publish.{name}] entry "
+                            f"names that folder")
+    for name, folders in sorted(calls.items()):
+        removed, why_not = withdraw_calls(name, folders, registry)
+        done += [f"{name}: snapshot in {f} WITHDRAWN — its entry cannot be read, and the copy "
+                 f"may hold calls" for f in removed]
+        failed += why_not
+    return done, failed
 
 
 @dataclass(frozen=True)
@@ -287,25 +604,46 @@ def _read_notes(rows: list[tuple],
     return out, frozenset(excluded)
 
 
-def _fingerprint(store, include_sources: bool, excluded: frozenset[str], docs: list[tuple],
-                 notes: list[_NoteCopy]) -> str:
+def _carried(rows: list[tuple], left_out: frozenset[str]) -> list[tuple]:
+    """The document rows a snapshot may carry: every row but the calls it leaves out. The one
+    definition `_publish` reads notes for and `_fingerprint` hashes."""
+    return [r for r in rows if r[0] not in left_out]
+
+
+def _fingerprint(store, include_sources: bool, excluded: frozenset[str], left_out: frozenset[str],
+                 docs: list[tuple], notes: list[_NoteCopy], index_version: str) -> str:
     """What the snapshot would be built from. Equal fingerprints mean an identical snapshot, so a
-    refresh that changed nothing re-verifies the manifest instead of rewriting 50MB."""
+    refresh that changed nothing re-verifies the manifest instead of rewriting 50MB.
+
+    Over what the snapshot carries only: `_carried` rows, and the vectors, mentions and
+    `index_version` of the notes it holds. Calls a snapshot leaves out are left out of this too: a fingerprint that moved when a
+    call was added or edited, and the `published` stamp and rewrite that follow it, would tell
+    the agent when calls change though it can read none. A call added since `left_out` was taken
+    is carried, so it moves the fingerprint, and the publish refuses rather than copy it."""
     from substrate.store import schema
 
+    # The documents the copy holds: `_fill` removes the rest, their vectors and mentions with them,
+    # and a vector whose passage no row holds.
+    held = (json.dumps(sorted(n.doc_id for n in notes)),)
+
     def rows(sql: str) -> list:
-        return [list(r) for r in store.db.execute(sql)]
+        return [list(r) for r in store.db.execute(sql, held)]
 
     # Identity is rebuilt by every compose from a file `index_version` does not cover, so a roster
-    # edit alone must still republish rather than re-verify the old one. The note copies are in
-    # for the same reason: a note unreadable at the last publish, or edited since compose, must
-    # not be carried forward under a fresh `verified`.
+    # edit alone must still republish rather than re-verify the old one — as far as it reaches the
+    # snapshot, which keeps each mention's surface and kind and nothing else (`_strip_roster`).
+    # The note copies are in for the same reason: a note unreadable at the last publish, or edited
+    # since compose, must not be carried forward under a fresh `verified`.
     sig = json.dumps([
-        store.index_version,
-        rows("SELECT embed_model, COUNT(*) FROM chunk_vectors GROUP BY embed_model ORDER BY 1"),
-        rows("SELECT entity_id, name, kind, gloss FROM entities ORDER BY 1"),
-        rows("SELECT doc_id, entity_id, surface FROM document_entities ORDER BY 1, 2, 3"),
-        [list(r) for r in docs],
+        index_version,
+        rows("SELECT v.embed_model, COUNT(*) FROM chunk_vectors v "
+             "JOIN chunks c ON c.chunk_id = v.chunk_id "
+             "WHERE c.doc_id IN (SELECT value FROM json_each(?)) GROUP BY 1 ORDER BY 1"),
+        # The very rows `_strip_roster` rebuilds the roster from, of the documents held.
+        rows("SELECT d.doc_id, d.surface, e.kind FROM document_entities d "
+             "JOIN entities e ON e.entity_id = d.entity_id "
+             "WHERE d.doc_id IN (SELECT value FROM json_each(?)) ORDER BY 1, 2, 3"),
+        [list(r) for r in _carried(docs, left_out)],
         [[n.doc_id, n.path, hashlib.sha256(n.text.encode()).hexdigest(), n.stale]
          for n in notes],
         include_sources, sorted(excluded), schema.SCHEMA_VERSION, MANIFEST_VERSION,
@@ -337,6 +675,9 @@ def _fill(tmp: Path, excluded: frozenset[str], notes: list[_NoteCopy], meta: dic
         db.execute("PRAGMA secure_delete=ON")
         for doc_id in sorted(excluded):
             store.remove(doc_id)
+        # A vector no passage holds is no part of a document here, and its `chunk_id` names the
+        # document it came from — a call's, for all this copy can tell.
+        db.execute("DELETE FROM chunk_vectors WHERE chunk_id NOT IN (SELECT chunk_id FROM chunks)")
         _renumber_rowids(db)
         db.execute("INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')")
         _strip_roster(db)
@@ -461,16 +802,19 @@ def _publish_lock(scope: str, registry: str | Path | None):
 
 
 def publish(scope: str, directory: str | Path, *, registry: str | Path | None = None,
-            now: datetime | None = None, include_sources: bool = False) -> Published:
+            now: datetime | None = None, include_sources: bool = False,
+            record: bool = False) -> Published:
     """Publish one scope's snapshot and manifest into `directory`, which must already exist.
-    Conversation-class documents are left out unless `include_sources`."""
+    Conversation-class documents are left out unless `include_sources`. `record`: the folder is
+    the scope's entry's own, so it goes in the ledger before anything is written there
+    (`withdraw_dropped`)."""
     with _publish_lock(scope, registry):
         return _publish(scope, Path(directory), registry=registry, now=now,
-                        include_sources=include_sources)
+                        include_sources=include_sources, record=record)
 
 
 def _publish(scope: str, directory: Path, *, registry: str | Path | None,
-             now: datetime | None, include_sources: bool) -> Published:
+             now: datetime | None, include_sources: bool, record: bool) -> Published:
     from substrate import vault as _vault
     from substrate.classes import EXCLUDED_CLASSES
     from substrate.store.index_store import IndexStore, SchemaMismatch
@@ -502,7 +846,7 @@ def _publish(scope: str, directory: Path, *, registry: str | Path | None,
         # Never read, so a call's text is not held in this process for a snapshot it stays out of.
         left_out = frozenset() if include_sources else frozenset(
             r[0] for r in rows if r[5] in EXCLUDED_CLASSES)
-        notes, excluded = _read_notes([r for r in rows if r[0] not in left_out], roots)
+        notes, excluded = _read_notes(_carried(rows, left_out), roots)
         if not notes and left_out and not excluded:
             raise AgentError(f"every note in {scope!r} is a source, which a snapshot leaves out "
                              f"unless its [publish.{scope}] entry sets include_sources = true; "
@@ -514,15 +858,26 @@ def _publish(scope: str, directory: Path, *, registry: str | Path | None,
             raise AgentError(f"no note in {scope!r} could be matched to the index "
                              f"({len(excluded)} excluded); refusing to publish an empty "
                              f"snapshot. Recompose the scope, then publish.")
-        fingerprint = _fingerprint(source, include_sources, excluded, rows, notes)
-        index_version = source.index_version
+        # The version of what the snapshot holds, as the agent's own engine computes it over the
+        # copy: calls left out, and the documents excluded below left out too. Taken again for
+        # each re-check below, so a compose landing in between is seen.
+        held = frozenset(n.doc_id for n in notes)
+        index_version = source.index_version_of(held)
+
+        def again() -> str:
+            return _fingerprint(source, include_sources, excluded, left_out, _doc_rows(source),
+                                notes, source.index_version_of(held))
+
+        fingerprint = _fingerprint(source, include_sources, excluded, left_out, rows, notes,
+                                   index_version)
         rewrite = not (prior and prior.get("fingerprint") == fingerprint and db_path.is_file())
-        if not rewrite and _fingerprint(source, include_sources, excluded, _doc_rows(source),
-                                        notes) != fingerprint:
+        if not rewrite and again() != fingerprint:
             # Re-verifying is a claim that the snapshot matches the live index NOW, so the same
             # re-check guards it: a change landing while the notes were read is not "unchanged".
             raise AgentError(f"the {scope!r} index changed while it was being checked; not "
                              f"re-verified. The next refresh will publish it.")
+        if record:
+            _remember(scope, directory, registry)
         if rewrite:
             fd, tmp_name = tempfile.mkstemp(dir=str(directory), prefix=f".{scope}.",
                                             suffix=".tmp")
@@ -533,8 +888,7 @@ def _publish(scope: str, directory: Path, *, registry: str | Path | None,
                 # A compose that committed between the fingerprint and the copy would leave a
                 # snapshot whose recorded version describes different rows. Refused, and the next
                 # refresh — which follows that compose — publishes the settled index.
-                if _fingerprint(source, include_sources, excluded, _doc_rows(source),
-                                notes) != fingerprint:
+                if again() != fingerprint:
                     raise AgentError(f"the {scope!r} index changed while it was being copied; "
                                      f"not published. The next refresh will publish it.")
                 source.close()
@@ -574,7 +928,7 @@ def _publish(scope: str, directory: Path, *, registry: str | Path | None,
 
 
 def annotate(scope: str, directory: str | Path, *, registry: str | Path | None = None,
-             include_sources: bool = False) -> str:
+             include_sources: bool = False, record: bool = False) -> str:
     """Carry a FAILED refresh to the agent without touching the snapshot: the copy stays as good
     as it was, and its manifest now says the live scope is frozen.
 
@@ -590,8 +944,19 @@ def annotate(scope: str, directory: str | Path, *, registry: str | Path | None =
             return "withdrawn"
         if prior is None:
             return "absent"
+        unrecorded = None
+        if record:
+            # The freeze still reaches the agent when the ledger cannot take the row: it is said
+            # after the manifest is marked, not instead of it.
+            try:
+                _remember(scope, directory, registry)
+            except AgentError as e:
+                unrecorded = e
         prior["refresh"] = refresh_state.stored_row(scope, registry)
         _write_atomic(manifest_path, (json.dumps(prior, indent=2) + "\n").encode())
+        if unrecorded is not None:
+            raise AgentError(f"snapshot manifest marked, but its folder is not recorded for "
+                             f"withdrawal: {unrecorded}") from unrecorded
         return "marked"
 
 
@@ -600,13 +965,27 @@ def after_refresh_record(scope: str, outcome: str, *,
     """The hook `refresh-record` calls once the outcome is recorded. Returns a line to print, or
     None when this scope is not published. Raises AgentError; the caller reports it, and a failed
     publish never turns a recorded refresh into a failed one."""
-    target = load_config(registry).get(scope)
+    config = load_config(registry)
+    if (broken := config.broken.get(scope)) is not None:
+        try:
+            ledger, _ = _read_ledger(_ledger_path(registry))
+        except LedgerUnreadable:
+            ledger = {}                 # the pass's sweep says why
+        folders = [Path(d) for d in ledger.get(scope, [])]
+        removed, failed = withdraw_calls(
+            scope, [broken.dir, *folders] if broken.dir is not None else folders, registry)
+        said = "".join(f" The copy in {f}, which may hold calls, is WITHDRAWN." for f in removed)
+        raise AgentError(f"{broken.error} Not published.{said}"
+                         + "".join(f" {why}." for why in failed))
+    target = config.targets.get(scope)
     if target is None:
         return None
     if refresh_state.OUTCOMES[outcome]["success"]:
-        p = publish(scope, target.dir, registry=registry, include_sources=target.include_sources)
+        p = publish(scope, target.dir, registry=registry, include_sources=target.include_sources,
+                    record=True)
         return f"{scope}: snapshot {'published' if p.rewrote else 'verified'} -> {p.db}"
-    done = annotate(scope, target.dir, registry=registry, include_sources=target.include_sources)
+    done = annotate(scope, target.dir, registry=registry, include_sources=target.include_sources,
+                    record=True)
     if done == "withdrawn":
         return f"{scope}: snapshot WITHDRAWN — it may hold calls its entry no longer includes"
     if done == "marked":

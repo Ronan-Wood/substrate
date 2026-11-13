@@ -72,7 +72,7 @@ from substrate import (
     wire, writelog,
 )
 from substrate.mcp import bridge
-from substrate.retrieve.local_models import RERANK_SENDS, cloud_refusal
+from substrate.retrieve.local_models import HYDE_SENDS, RERANK_SENDS, cloud_refusal
 from substrate.store import schema
 
 if TYPE_CHECKING:
@@ -700,18 +700,13 @@ def _note_text(store, doc_id: str) -> dict:
         raise ToolError(f"no document {doc_id!r} in this index.")
 
     path = Path(row["source_path"])
-    try:
-        # ONE bounded read, and the checksum computed from the SAME bytes. Reading twice let a write
-        # land in between, so the returned text and the returned staleness verdict could describe
-        # different versions of the file — and neither read was size-bounded, one function away
-        # from the guards `_read_source` applies for exactly that reason.
-        raw = _read_source(path)
-        text = raw.decode("utf-8", errors="replace")
-    except OSError as e:
-        raise ToolError(
-            f"the note for {doc_id!r} is indexed at {path} but cannot be read ({e}). The passage "
-            f"above is still valid; the source note has moved or been removed."
-        ) from e
+    # ONE bounded read, and the checksum computed from the SAME bytes. Reading twice let a write
+    # land in between, so the returned text and the returned staleness verdict could describe
+    # different versions of the file — and neither read was size-bounded, one function away from
+    # the guards `_read_source` applies for exactly that reason. `_read_source` turns every read
+    # failure into its own fixed ToolError.
+    raw = _read_source(path)
+    text = raw.decode("utf-8", errors="replace")
 
     return {
         "path": str(path),
@@ -1585,8 +1580,11 @@ class _Handler(BaseHTTPRequestHandler):
         # thread AND its connection slot for up to a second, so the cheapest possible refusals
         # exhausted the ceiling (cap 4 → four text/plain POSTs → the next legitimate request got
         # 503); and no test pinned it — stubbing it to a no-op left every smuggling test green.
-        # `close_connection` above is what actually holds that property. The RST hazard is real but
-        # was never observed here, and a reproduced denial of service is the worse trade.
+        # `close_connection` above is what actually holds that property. The RST does happen: a
+        # refusal that closes with the request unread is reset, often, on macOS loopback. In the
+        # measured runs the refusal written before it was still read every time
+        # (`test_the_ceiling_refusal_is_still_read_when_the_reset_lands_first`), and a reproduced
+        # denial of service is the worse trade.
 
     def _guarded(self) -> bool:
         """Refuse anything that smells like a browser reaching a local daemon.
@@ -2151,14 +2149,17 @@ def _main(argv: list[str] | None, refresh_every: float | None = None) -> int:
         print("substrate-mcp: --writes=granted is for the shared --socket server", file=sys.stderr)
         return 2
 
-    # Refused here, at launch, not left to `stack.build`: there the reranker would be dropped as
-    # "unreachable", which points at a daemon that is fine. Only the name can be judged before the
-    # daemon is asked; a cloud model the listing alone gives away is still never wired.
-    if args.rerank_model and not args.lexical_only:
-        refusal = cloud_refusal("--rerank-model", args.rerank_model, sends=RERANK_SENDS)
-        if refusal:
-            print(f"substrate-mcp: {refusal}", file=sys.stderr)
-            return 2
+    # Refused here, at launch, not left to `stack.build`: there HyDE or the reranker would be
+    # dropped as "unreachable", which points at a daemon that is fine. Only the name can be judged
+    # before the daemon is asked; a cloud model the listing alone gives away is still never wired.
+    # HyDE's `auto` and `off` are not model names, and `auto` never picks a cloud model.
+    if not args.lexical_only:
+        for flag, model, sends in (("--hyde-model", args.hyde_model, HYDE_SENDS),
+                                   ("--rerank-model", args.rerank_model, RERANK_SENDS)):
+            refusal = model and cloud_refusal(flag, model, sends=sends)
+            if refusal:
+                print(f"substrate-mcp: {refusal}", file=sys.stderr)
+                return 2
 
     build_args = _build_args(args)
     retrieval = stack.build(**build_args)

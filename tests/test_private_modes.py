@@ -1049,6 +1049,141 @@ def test_a_hard_link_at_an_ingest_name_in_a_shaped_folder_is_reported() -> None:
     assert str(ir) in private.exposed_index(base / "x.db", ir)
 
 
+def _plain_note(folder: Path) -> Path:
+    note = folder / "note.md"
+    note.write_text("---\nstatus: active\ndoc_type: explanation\n---\n\n# note\n\n"
+                    "Ingest writes four files into a folder named for this note.\n",
+                    encoding="utf-8")
+    return note
+
+
+def test_ingest_never_writes_through_a_name_planted_in_its_folder() -> None:
+    """compose opened each ingest file by name, so a link or a second hard link planted at one of
+    them took the note: the file it reached was overwritten with the note's text. The seal reports
+    such a name; only the write can refuse to follow it. Each name is now replaced whole."""
+    from substrate.markdown.ingest import ingest_markdown
+
+    base = Path(tempfile.mkdtemp())
+    out = base / "idx" / "v__note__89abcdef"
+    out.mkdir(parents=True)
+    victims = {}
+    for name, how in (("document.md", "symlink"), ("chunks.jsonl", "hardlink"),
+                      ("run.json", "symlink"), ("blocks.jsonl", "hardlink")):
+        victim = base / f"victim-{name}"
+        victim.write_text("the operator's own file\n", encoding="utf-8")
+        (out / name).symlink_to(victim) if how == "symlink" else os.link(victim, out / name)
+        victims[name] = victim
+    ingest_markdown(_plain_note(base), out, require_status=True)
+    for name, victim in victims.items():
+        assert victim.read_text(encoding="utf-8") == "the operator's own file\n", name
+        assert not (out / name).is_symlink() and (out / name).stat().st_nlink == 1, name
+    assert "Ingest writes four files" in (out / "document.md").read_text(encoding="utf-8")
+    assert not [n for n in os.listdir(out) if n.endswith(".tmp")]
+
+
+def test_ingest_refuses_a_link_planted_at_its_folders_name() -> None:
+    """`<vault>__<stem>__<hash>` made a link to a folder of someone else's: `mkdir(exist_ok=True)`
+    accepted it and the note was written into their folder. Refused now, as a ValueError, which
+    compose reports as that note's failure and refuses the scope on."""
+    from substrate.markdown.ingest import ingest_markdown
+
+    base = Path(tempfile.mkdtemp())
+    theirs = base / "theirs"
+    theirs.mkdir()
+    (base / "idx").mkdir()
+    out = base / "idx" / "v__note__89abcdef"
+    out.symlink_to(theirs)
+    refused = None
+    try:
+        ingest_markdown(_plain_note(base), out, require_status=True)
+    except ValueError as e:
+        refused = e
+    assert os.listdir(theirs) == [], "the note was written into the folder a planted link names"
+    assert type(refused).__name__ == "OutputDirError", refused
+
+
+def test_ingest_judges_its_folder_before_storing_the_original() -> None:
+    """`before_write` stores the original in the blob store. Run before the folder was judged, a
+    refused folder left a blob no note names."""
+    from substrate.markdown.ingest import ingest_markdown
+
+    base = Path(tempfile.mkdtemp())
+    theirs = base / "theirs"
+    theirs.mkdir()
+    (base / "idx").mkdir()
+    out = base / "idx" / "v__note__89abcdef"
+    out.symlink_to(theirs)
+    stored = []
+    try:
+        ingest_markdown(_plain_note(base), out, require_status=True,
+                        before_write=lambda doc: stored.append(doc.doc_id))
+    except ValueError:
+        pass
+    assert stored == [], "the original was stored for a note that was never written"
+
+
+def test_ingest_refuses_a_folder_every_user_can_write() -> None:
+    """Anyone who can write the folder can swap a file for their own once it is written."""
+    from substrate.markdown.ingest import ingest_markdown
+
+    base = Path(tempfile.mkdtemp())
+    out = base / "v__note__89abcdef"
+    out.mkdir()
+    out.chmod(0o777)
+    try:
+        ingest_markdown(_plain_note(base), out, require_status=True)
+    except ValueError as e:
+        assert "every user" in str(e), e
+    assert os.listdir(out) == []
+
+
+def test_ingest_accepts_a_folder_its_group_can_write() -> None:
+    """A umask of 002 with a group of one's own makes every folder group-writable, and a group
+    shared on purpose is the operator's to choose. Only every-user write is refused."""
+    from substrate.markdown.ingest import ingest_markdown
+
+    base = Path(tempfile.mkdtemp())
+    out = base / "v__note__89abcdef"
+    out.mkdir()
+    out.chmod(0o775)
+    ingest_markdown(_plain_note(base), out, require_status=True)
+    assert set(os.listdir(out)) == private.INGEST_FILES
+
+
+def test_ingest_files_are_private_whatever_the_umask() -> None:
+    """Each file is a new one made `0600`, not one the umask decides: a library caller outside
+    `private.restricted()` used to get `0644` files."""
+    from substrate.markdown.ingest import ingest_markdown
+
+    base = Path(tempfile.mkdtemp())
+    out = base / "v__note__89abcdef"
+    out.mkdir(mode=0o700)
+    with _umask(0o022):
+        ingest_markdown(_plain_note(base), out, require_status=True)
+    modes = {n: stat.S_IMODE(os.stat(out / n).st_mode) for n in os.listdir(out)}
+    assert modes == dict.fromkeys(private.INGEST_FILES, 0o600), modes
+
+
+def test_ingest_writes_into_the_folder_it_judged() -> None:
+    """The folder is held open from the check to the last write. Opened again after
+    `before_write`, a folder moved away and replaced by a link in between was a different one."""
+    from substrate.markdown.ingest import ingest_markdown
+
+    base = Path(tempfile.mkdtemp())
+    out = base / "v__note__89abcdef"
+    out.mkdir(mode=0o700)
+    moved, elsewhere = base / "moved", base / "elsewhere"
+    elsewhere.mkdir()
+
+    def swap(doc) -> None:
+        out.rename(moved)
+        out.symlink_to(elsewhere)
+
+    ingest_markdown(_plain_note(base), out, require_status=True, before_write=swap)
+    assert os.listdir(elsewhere) == []
+    assert set(os.listdir(moved)) == private.INGEST_FILES
+
+
 def test_a_holder_pass_that_settles_late_is_not_called_unsettled() -> None:
     """The holder loop is capped. Reaching the cap is not by itself proof the folders kept
     changing: only a listing that still has something new is."""

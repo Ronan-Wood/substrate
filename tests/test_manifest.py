@@ -653,6 +653,28 @@ def test_the_known_keys_include_every_key_another_module_reads() -> None:
     assert identity.IDENTITY_KEY in V.TOP_LEVEL_KEYS
 
 
+def test_a_crlf_manifest_reads_as_it_did() -> None:
+    """`_read_capped` now normalises through `reader.normalized_text`, the one helper. A pin, not a
+    regression test: CRLF and a lone CR read as LF, as they did."""
+    root = _fresh_root()
+    _core(root)
+    proj = _project(root)
+    (proj / ".substrate.toml").write_bytes(b'name = "demo"\r\ninherits = ["core-vault"]\r')
+    assert V._read_capped(proj / ".substrate.toml") == 'name = "demo"\ninherits = ["core-vault"]\n'
+    scope = V.resolve_scope(proj)
+    assert scope.name == "demo"
+    assert {v.name for v in scope.vaults} == {"demo-vault", "core-vault"}
+    # Still strict UTF-8, still refused as a VaultError, and nothing but line endings is folded.
+    (proj / ".substrate.toml").write_bytes(b'name = "d\xffmo"\n')
+    try:
+        V._read_capped(proj / ".substrate.toml")
+    except V.VaultError:
+        pass
+    else:
+        raise AssertionError("a non-UTF-8 manifest was read")
+    (proj / ".substrate.toml").write_bytes("a\tb \r\n\u00e9\n".encode())
+    assert V._read_capped(proj / ".substrate.toml") == "a\tb \n\u00e9\n"
+
 if __name__ == "__main__":
     _tests = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     _failed = 0

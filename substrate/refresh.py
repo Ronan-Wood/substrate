@@ -111,17 +111,35 @@ def record_and_publish(scope: str, outcome: str, registry: str | Path | None = N
     The catch is broad for the same reason: a full disk or a missing shared folder must not turn a
     recorded refresh into a failed one."""
     path = refresh_state.record(scope, outcome, registry=registry)
+    reg = None if registry is None else str(registry)
+    _agent_step(f"agent snapshot {scope}", say,
+                lambda agent: ([line] if (line := agent.after_refresh_record(
+                    scope, outcome, registry=reg)) else [], []))
+    return path
+
+
+def withdraw_snapshots(registry: str | Path | None = None, *, say: Say = _stderr) -> None:
+    """Withdraw every agent snapshot no entry asks for any more (`agent.withdraw_dropped`): once
+    per pass, and once per `refresh-record`, not once per scope. Never raises, for the reason
+    `record_and_publish` gives."""
+    reg = None if registry is None else str(registry)
+    _agent_step("agent snapshots", say, lambda agent: agent.withdraw_dropped(reg))
+
+
+def _agent_step(label: str, say: Say, step) -> None:
+    """Run one agent-snapshot step, which returns `(lines, failures)`, and say both. Any error is
+    a WARNING: a full disk or a missing shared folder must not fail a recorded refresh."""
     try:
         from substrate import agent
 
-        line = agent.after_refresh_record(scope, outcome,
-                                          registry=None if registry is None else str(registry))
+        lines, failures = step(agent)
     except Exception as e:  # noqa: BLE001 — see the docstring
-        say(f"WARNING (agent snapshot {scope}): {type(e).__name__}: {e}")
-    else:
-        if line:
-            say(f"  {line}")
-    return path
+        say(f"WARNING ({label}): {type(e).__name__}: {e}")
+        return
+    for line in lines:
+        say(f"  {line}")
+    for line in failures:
+        say(f"WARNING ({label}): {line}")
 
 
 @dataclass(frozen=True)
@@ -255,6 +273,7 @@ def run_pass(registry: str | Path | None = None, only: list[str] | None = None, 
     names = list(only) if only else sorted(entries)
     env = {**os.environ, scopes.ENV_VAR: str(reg)}
     cli = [sys.executable, *_interpreter_flags(), "-m", "substrate.cli"]
+    withdraw_snapshots(reg, say=say)
     results: list[ScopeResult] = []
     for name in names:
         if stopping is not None and stopping.is_set():
