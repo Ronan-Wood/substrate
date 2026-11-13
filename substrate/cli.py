@@ -258,7 +258,8 @@ def _ingest_markdown_file(args: argparse.Namespace, src: Path, spec) -> int:
     fallback — a vault note that cannot name itself is refused today and that gate is not this
     change's to move.
     """
-    from substrate.markdown.ingest import CoverageError, UnretrievableError, ingest_markdown
+    from substrate.markdown.ingest import (CoverageError, OutputDirError, UnretrievableError,
+                                           ingest_markdown)
     from substrate.models import SourceOrigin
     from substrate.spine import SpineError
 
@@ -291,6 +292,9 @@ def _ingest_markdown_file(args: argparse.Namespace, src: Path, spec) -> int:
                             before_write=_store_original)
     except blobs.BlobError as e:
         return _store_failed(e)
+    except OutputDirError as e:
+        print(f"\nFATAL (--out): {e}", file=sys.stderr)
+        return 2
     except ValueError as e:  # over-size file or non-UTF-8 bytes — refuse cleanly, no traceback
         print(f"\nFATAL: cannot read {src.name}: {e}", file=sys.stderr)
         return 2
@@ -321,7 +325,8 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
     from substrate.extract import convert
     from substrate.extract.apple_arm import AppleReaderUnavailable
     from substrate.extract.base import doc_id_for, sha256_file
-    from substrate.markdown.ingest import CoverageError, UnretrievableError, ingest_markdown
+    from substrate.markdown.ingest import (CoverageError, OutputDirError, UnretrievableError,
+                                           ingest_markdown)
     from substrate.models import SourceOrigin
     from substrate.spine import SpineError
 
@@ -378,6 +383,9 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
             )
         except blobs.BlobError as e:
             return _store_failed(e)
+        except OutputDirError as e:
+            print(f"\nFATAL (--out): {e}", file=sys.stderr)
+            return 2
         except ValueError as e:
             print(f"\nFATAL: cannot read the converted markdown for {src.name}: {e}",
                   file=sys.stderr)
@@ -2119,6 +2127,8 @@ def cmd_refresh_record(args: argparse.Namespace) -> int:
     from substrate import refresh_state
 
     failed = 0
+    # Once for the call, not per scope: what no entry asks for any more, whichever scope it was.
+    refresh.withdraw_snapshots(args.registry, say=_say_refresh_line(args.quiet))
     for name in args.scope:
         # Held until the record line is printed, so the snapshot's line still comes after it.
         said: list[str] = []
@@ -2133,11 +2143,18 @@ def cmd_refresh_record(args: argparse.Namespace) -> int:
         if not args.quiet:
             print(f"  {name}: {args.outcome}  ->  {path}")
         for line in said:
-            if line.startswith("WARNING"):
-                print(line, file=sys.stderr)
-            elif not args.quiet:
-                print(line)
+            _say_refresh_line(args.quiet)(line)
     return 2 if failed else 0
+
+
+def _say_refresh_line(quiet: bool):
+    """`refresh-record`'s printer: warnings to stderr always, the rest to stdout unless quiet."""
+    def say(line: str) -> None:
+        if line.startswith("WARNING"):
+            print(line, file=sys.stderr)
+        elif not quiet:
+            print(line)
+    return say
 
 
 def cmd_publish_snapshot(args: argparse.Namespace) -> int:
@@ -2145,16 +2162,21 @@ def cmd_publish_snapshot(args: argparse.Namespace) -> int:
     from substrate import agent
 
     try:
-        entry = agent.load_config(args.registry).get(args.scope)
+        config = agent.load_config(args.registry)
+        if (broken := config.broken.get(args.scope)) is not None:
+            print(f"FATAL (publish-snapshot): {broken.error} Not published.", file=sys.stderr)
+            return 2
+        entry = config.targets.get(args.scope)
         target = Path(args.dir).expanduser() if args.dir else entry.dir if entry else None
         if target is None:
             print(f"FATAL: no --dir, and {args.scope!r} is not under [publish] in "
                   f"{agent.CONFIG_FILENAME} beside the registry.", file=sys.stderr)
             return 2
-        # The opt-in was written for the entry's folder, so another folder gets no calls.
-        include = (entry is not None and entry.include_sources
-                   and target.resolve() == entry.dir.resolve())
-        p = agent.publish(args.scope, target, registry=args.registry, include_sources=include)
+        # The opt-in was written for the entry's folder, so another folder gets no calls, and
+        # only the entry's folder is recorded for withdrawal when the entry goes.
+        own = entry is not None and target.resolve() == entry.dir.resolve()
+        p = agent.publish(args.scope, target, registry=args.registry,
+                          include_sources=own and entry.include_sources, record=own)
     except agent.AgentError as e:
         print(f"FATAL (publish-snapshot): {e}", file=sys.stderr)
         return 2
@@ -2179,7 +2201,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
     if not args.no_vector:
         from substrate.embed.engine import DEFAULT_MODEL as EMBED_DEFAULT
         from substrate.embed.engine import OllamaEmbedder
-        from substrate.retrieve.local_models import EMBED_SENDS, cloud_message, cloud_refusal
+        from substrate.retrieve.local_models import EMBED_SENDS, cloud_refusal
 
         from substrate.embed.engine import AppleEmbedder
 
@@ -2193,11 +2215,9 @@ def cmd_eval(args: argparse.Namespace) -> int:
         cand = (AppleEmbedder() if args.embed_model.startswith("apple")
                 else OllamaEmbedder(model=args.embed_model, prefix_style=args.embed_style))
         embedder = cand if cand.available() else None
-        if embedder is None and getattr(cand, "refused_cloud", False):   # by `remote_host`
-            # The default when no flag named it: there is no flag to leave out.
-            flag = "--embed-model" if args.embed_model != EMBED_DEFAULT else None
-            why = cloud_message(flag, args.embed_model, sends=EMBED_SENDS)
-            print(f"FATAL: {why}" if flag else f"FATAL: embedder {why}", file=sys.stderr)
+        if embedder is None and _refused_as_cloud(
+                cand, "embedder", "--embed-model" if args.embed_model != EMBED_DEFAULT else None,
+                args.embed_model, EMBED_SENDS):
             return 2
         # GUARD: a vector config with no stored vectors degrades silently to lexical-only and
         # still prints a plausible MRR. That has invalidated three measurements, every time
@@ -2257,6 +2277,17 @@ def cmd_eval(args: argparse.Namespace) -> int:
             print(f"  vectors: {_n} under {embedder.key}")
         print(f"  retrieval: {'hybrid (lexical + vector)' if embedder else 'lexical only'}")
     expander = None
+    if not args.no_hyde or args.multi_query:
+        from substrate.retrieve.expand import DEFAULT_MODEL as HYDE_DEFAULT
+        from substrate.retrieve.local_models import HYDE_SENDS, cloud_refusal
+
+        # By name, before either generator is built, as the embedder's and reranker's are: left to
+        # `available()`, a cloud model reads as "expansion: unavailable" and the run is measured
+        # without it.
+        refusal = cloud_refusal("--hyde-model", args.hyde_model, sends=HYDE_SENDS)
+        if refusal:
+            print(f"FATAL: {refusal}", file=sys.stderr)
+            return 2
     if not args.no_hyde:
         from substrate.retrieve.expand import AUTO, OFF, AppleFMExpander, HyDE, LlamaServerHyDE
 
@@ -2275,6 +2306,10 @@ def cmd_eval(args: argparse.Namespace) -> int:
         else:
             cand = HyDE(model=args.hyde_model, cache=vc, prompt_id=args.hyde_prompt)
         expander = cand if cand.available() else None
+        if expander is None and _refused_as_cloud(
+                cand, "HyDE", "--hyde-model" if args.hyde_model != HYDE_DEFAULT else None,
+                args.hyde_model, HYDE_SENDS):
+            return 2
         print(f"  expansion: {'HyDE via ' + args.hyde_model if expander else 'unavailable'}")
 
     mq = None
@@ -2284,6 +2319,10 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
         cand = MultiQuery(model=args.hyde_model, n=args.multi_query, cache=_VC(args.cache))
         mq = cand if cand.available() else None
+        if mq is None and _refused_as_cloud(
+                cand, "multi-query", "--hyde-model" if args.hyde_model != HYDE_DEFAULT else None,
+                args.hyde_model, HYDE_SENDS):
+            return 2
         print(f"  multi-query: {args.multi_query} variants" if mq else "  multi-query: unavailable")
 
     # --no-gate is meaningful ONLY on a --cross-encoder rerank run. Two misuse cases, both caught
@@ -2304,7 +2343,7 @@ def cmd_eval(args: argparse.Namespace) -> int:
         if args.rerank_pool < 1:
             print("FATAL: --rerank-pool must be >= 1.", file=sys.stderr)
             return 2
-        from substrate.retrieve.local_models import RERANK_SENDS, cloud_message, cloud_refusal
+        from substrate.retrieve.local_models import RERANK_SENDS, cloud_refusal
 
         # Before the reranker is built, so the refusal says "cloud" rather than "not available".
         refusal = args.rerank_model and cloud_refusal(
@@ -2341,11 +2380,9 @@ def cmd_eval(args: argparse.Namespace) -> int:
         # gate — those are computed on the LEXICAL cohort, which the gate mostly skips — so
         # it would exit 0 while semantic MRR quietly drops by the ~0.095 the reranker is worth.
         if not cand.available():
-            if getattr(cand, "refused_cloud", False):     # by the listing's `remote_host`
-                # The arm's own default when no flag named it: there is no flag to leave out.
-                flag = "--rerank-model" if args.rerank_model else None
-                why = cloud_message(flag, model, sends=RERANK_SENDS)
-                print(f"FATAL: {why}" if flag else f"FATAL: reranker {why}", file=sys.stderr)
+            if _refused_as_cloud(cand, "reranker",
+                                 "--rerank-model" if args.rerank_model else None, model,
+                                 RERANK_SENDS):
                 return 2
             print(f"FATAL: reranker {model!r} is not available at {cand.host}. "
                   f"Refusing to report an unreranked run under a reranked label.",
@@ -2424,6 +2461,19 @@ def cmd_eval(args: argparse.Namespace) -> int:
         )
         print(f"  baseline updated -> {baseline_path}")
     return 0 if ok else 1
+
+
+def _refused_as_cloud(arm: object, label: str, flag: str | None, model: str, sends: str) -> bool:
+    """True, having printed the refusal, when `arm.available()` refused `model` as a cloud model:
+    one the listing alone gives away (`remote_host`), after the name passed `cloud_refusal`. `flag`
+    is None for the arm's own default, which no flag can be left out to avoid."""
+    from substrate.retrieve.local_models import cloud_message
+
+    if not getattr(arm, "refused_cloud", False):
+        return False
+    why = cloud_message(flag, model, sends=sends)
+    print(f"FATAL: {why}" if flag else f"FATAL: {label} {why}", file=sys.stderr)
+    return True
 
 
 def cmd_embed(args: argparse.Namespace) -> int:

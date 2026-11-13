@@ -5,6 +5,38 @@ Every release of the engine, newest first. The format follows
 [semantic versioning](https://semver.org/). Each release attaches its source tarball and a
 `SHA256SUMS` (see [`RELEASING.md`](RELEASING.md)).
 
+## Unreleased
+
+### Fixed
+
+- `substrate-mcp --hyde-model`, `substrate serve --hyde-model` and `substrate eval --hyde-model`
+  refuse a model that runs in Ollama's cloud at launch, exit 2, as `--rerank-model` already did.
+  Before, the server started with HyDE dropped, and `eval` measured the run without HyDE.
+- **Agent snapshots are withdrawn when their entry goes.** Removing a `[publish.<scope>]` entry,
+  emptying `agent-publish.toml`, or moving an entry's `dir` removes the snapshot at the next
+  refresh. The engine records each folder it publishes into for an entry, before writing there,
+  in `agent-published.json` beside the registry. A folder's record is dropped only once its copy
+  is actually removed. A missing or unreadable `agent-publish.toml`, which can happen mid-save,
+  withdraws nothing; leave it empty to withdraw everything. A snapshot published before this
+  release whose entry is already gone is not known to the engine; remove that one by hand.
+- A malformed `[publish.<scope>]` entry no longer stops every other scope's publish and
+  withdrawal. A relative `dir`, a `~user` that doesn't exist, and a non-bool `include_sources`
+  are each that entry's own error. The entry is refused, and a copy it left that
+  may hold calls is withdrawn. So is any such copy when the whole file stops parsing.
+- A snapshot without calls no longer changes its `fingerprint`, `index_version` or `published`
+  when a call changes. Its `index_version` is now the copy's own, the value the agent's engine
+  reports. Every snapshot is rewritten once after upgrading.
+- `substrate eval --multi-query` refuses a model that the listing alone marks as cloud, as HyDE
+  does.
+- Compose, and `substrate ingest` for every format but PDF, write each of the four ingest files
+  as a new `0600` file and rename it into place. They do this through a descriptor on the ingest
+  folder, held from before the original is stored until the last write. A link or hard link
+  planted at one of those names is replaced, not written through. A link, a folder of another
+  user's, or a folder every user can write, at the ingest folder's own name, is refused before
+  anything is stored, and compose refuses the scope. On those paths a `--out` that is itself a
+  symlink is refused too. A group-writable folder is still accepted.
+- An agent snapshot no longer carries vectors that no passage in it holds.
+
 ## 0.2.2
 
 ### Fixed

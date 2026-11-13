@@ -439,6 +439,8 @@ class MultiQuery:
     n: int = 3
     cache: object | None = None
     prompt_id: str = "multiquery"
+    # Set by `available()`, from the HyDE probe it runs: False was a cloud model, not a missing one.
+    refused_cloud: bool = field(default=False, init=False)
 
     def __post_init__(self) -> None:
         require_loopback(self.host, sends="the query", suggest=DEFAULT_HOST)
@@ -448,7 +450,10 @@ class MultiQuery:
         return f"{self.model}#{self.prompt_id}{self.n}"
 
     def available(self) -> bool:
-        return HyDE(model=self.model, host=self.host).available()
+        probe = HyDE(model=self.model, host=self.host)
+        ok = probe.available()
+        self.refused_cloud = probe.refused_cloud
+        return ok
 
     def variants(self, query: str) -> list[str]:
         """Return paraphrases (NOT including the original). Empty list on any failure."""

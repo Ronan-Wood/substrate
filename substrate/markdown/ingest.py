@@ -14,7 +14,10 @@ artifacts (document.md, blocks.jsonl, chunks.jsonl, run.json) reconcile later re
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
+import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -71,11 +74,53 @@ class IngestResult:
     run: dict = field(default_factory=dict)  # passage/outline counts live here under ["chunk"]
 
 
-def _write_jsonl(path: Path, rows: list[dict]) -> None:
-    path.write_text(
-        "\n".join(json.dumps(r, ensure_ascii=False, sort_keys=True) for r in rows) + "\n",
-        encoding="utf-8",
-    )
+class OutputDirError(ValueError):
+    """The output folder is not one this ingest can write into safely: a link or a file stands at
+    its name, or it belongs to another user. Nothing is written."""
+
+
+@contextlib.contextmanager
+def _output_dir(out_dir: Path):
+    """A descriptor on `out_dir` itself, never on what a link there points at, and only when it is
+    this user's (`private.open_owned_dir`) and not writable by every user. Compose names every
+    ingest folder, so under an index root another user can write, a link or a folder of theirs at
+    that name is planted, and following it hands them the note; a folder anyone can write lets
+    them swap a file after it is written. Group write is left alone: a umask of 002 with a group
+    of one's own is common, and a group shared on purpose is the operator's call."""
+    from substrate import private
+
+    fd = private.open_owned_dir(out_dir)
+    if not isinstance(fd, int):
+        why = fd[1] if fd else "it is not there"
+        raise OutputDirError(f"{out_dir} is not a folder of this user's ({why}); nothing was "
+                             f"written into it")
+    try:
+        if os.fstat(fd).st_mode & 0o002:
+            raise OutputDirError(f"{out_dir} can be written by every user on this machine; "
+                                 f"nothing was written into it")
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _write_at(dir_fd: int, name: str, text: str) -> None:
+    """`name` in the folder `dir_fd` holds, replaced whole: written to a new file there, then renamed
+    over the name. A link or a hard link planted at `name` is replaced, never written through."""
+    tmp = f".{name}.{secrets.token_hex(6)}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600,
+                 dir_fd=dir_fd)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp, dir_fd=dir_fd)
+        raise
+
+
+def _jsonl(rows: list[dict]) -> str:
+    return "\n".join(json.dumps(r, ensure_ascii=False, sort_keys=True) for r in rows) + "\n"
 
 
 def _meta_path_for(note_path: Path) -> Path | None:
@@ -129,7 +174,10 @@ def ingest_markdown(
     and an accepted one never yields a note whose original failed to store. An exception from it
     propagates, and nothing is written.
     """
-    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except FileExistsError as e:   # a file, or a link to nothing, at the folder's name
+        raise OutputDirError(f"{out_dir} is not a folder; nothing was written into it") from e
     t0 = time.monotonic()
 
     # Strict on the vault path: a value the reader cannot read under a key it reads refuses the
@@ -328,60 +376,67 @@ def ingest_markdown(
             f"{len(drops)} content block(s) dropped {drops[:8]}; missing tokens {src_missing}"
         )
 
-    if before_write is not None:
-        before_write(doc)
-    (out_dir / "document.md").write_text(frontmatter(doc, {"version_source": None}) + body, "utf-8")
-    _write_jsonl(out_dir / "blocks.jsonl", [b.to_json() for b in doc.blocks])
-    _write_jsonl(out_dir / "chunks.jsonl", [c.to_json() for c in chunks])
+    # Opened and judged BEFORE `before_write`, which stores the original: a folder refused here
+    # leaves no blob behind. Held across the four writes, so each lands in this one folder.
+    with _output_dir(out_dir) as dir_fd:
+        if before_write is not None:
+            before_write(doc)
+        files = {
+            "document.md": frontmatter(doc, {"version_source": None}) + body,
+            "blocks.jsonl": _jsonl([b.to_json() for b in doc.blocks]),
+            "chunks.jsonl": _jsonl([c.to_json() for c in chunks]),
+        }
 
-    run = {
-        "doc_id": doc.doc_id,
-        "source": doc.source_path,
-        "source_sha256": doc.source_sha256,
-        "note_sha256": doc.note_sha256,
-        "pages": doc.source_pages,
-        # The ORIGINAL format — "markdown" for a note, "docx"/"image"/… for a converted document.
-        # `ingest_arm` is the separate fact and the two must not be conflated: checks.py picks the
-        # applicable assertion set (A18/A19 on, A1/A1b off) by which ARM ran, not by what the file
-        # started as, and a converted DOCX runs the markdown arm end to end. Conflating them would
-        # have silently dropped A18 from every converted document the moment `source_format`
-        # stopped saying "markdown".
-        "source_format": origin.source_format if origin else "markdown",
-        "ingest_arm": "markdown",
-        "elapsed_s": round(time.monotonic() - t0, 1),
-        "class": meta,
-        "extract": {
-            "extractor": doc.extractor, "extractor_arm": doc.extractor_arm,
-            "layout_model": doc.layout_model,
-            "source_coverage": src_cov, "source_coverage_missing": src_missing,
-            "content_block_drops": drops, "title_source": title_source, **rstats,
-            **(origin.stats if origin else {}),
-        },
-        "emit": estats,
-        "chunk": cstats,
-        "coverage": round(cstats["sum_chunk_chars"] / max(len(body), 1), 4),
-        # Spine block travels with the ingest so reconcile rebuilds status/domains/supersession into
-        # the index; it is folded into reconcile's diff key, so editing a note's status re-indexes.
-        "spine": {
-            "status": status,
-            "domains": list(doc.domains),
-            "doc_type": doc_type,
-            "confidence": confidence,
-            "raw": doc.raw,
-            "raw_sha256": doc.raw_sha256,
-            "raw_location": doc.raw_location,
-            "superseded_by": doc.superseded_by,
-            # Normalised on the way OUT as well as in. `reconcile` normalises on the way back, so
-            # this is not what stops a bad shape reaching the store — it is what stops the ARTIFACT
-            # itself being wrong. run.json is read by more than one consumer and is what a person
-            # inspects when a note looks wrong; an artifact that disagrees with the note it
-            # describes sends the next reader after the wrong component.
-            "supersedes": reader.doc_id_list(doc.supersedes),
-        },
-    }
-    if vault is not None or tier is not None:
-        run["provenance"] = {"vault": vault, "tier": tier}
-    (out_dir / "run.json").write_text(json.dumps(run, indent=2, ensure_ascii=False), "utf-8")
+        run = {
+            "doc_id": doc.doc_id,
+            "source": doc.source_path,
+            "source_sha256": doc.source_sha256,
+            "note_sha256": doc.note_sha256,
+            "pages": doc.source_pages,
+            # The ORIGINAL format — "markdown" for a note, "docx"/"image"/… for a converted document.
+            # `ingest_arm` is the separate fact and the two must not be conflated: checks.py picks the
+            # applicable assertion set (A18/A19 on, A1/A1b off) by which ARM ran, not by what the file
+            # started as, and a converted DOCX runs the markdown arm end to end. Conflating them would
+            # have silently dropped A18 from every converted document the moment `source_format`
+            # stopped saying "markdown".
+            "source_format": origin.source_format if origin else "markdown",
+            "ingest_arm": "markdown",
+            "elapsed_s": round(time.monotonic() - t0, 1),
+            "class": meta,
+            "extract": {
+                "extractor": doc.extractor, "extractor_arm": doc.extractor_arm,
+                "layout_model": doc.layout_model,
+                "source_coverage": src_cov, "source_coverage_missing": src_missing,
+                "content_block_drops": drops, "title_source": title_source, **rstats,
+                **(origin.stats if origin else {}),
+            },
+            "emit": estats,
+            "chunk": cstats,
+            "coverage": round(cstats["sum_chunk_chars"] / max(len(body), 1), 4),
+            # Spine block travels with the ingest so reconcile rebuilds status/domains/supersession into
+            # the index; it is folded into reconcile's diff key, so editing a note's status re-indexes.
+            "spine": {
+                "status": status,
+                "domains": list(doc.domains),
+                "doc_type": doc_type,
+                "confidence": confidence,
+                "raw": doc.raw,
+                "raw_sha256": doc.raw_sha256,
+                "raw_location": doc.raw_location,
+                "superseded_by": doc.superseded_by,
+                # Normalised on the way OUT as well as in. `reconcile` normalises on the way back, so
+                # this is not what stops a bad shape reaching the store — it is what stops the ARTIFACT
+                # itself being wrong. run.json is read by more than one consumer and is what a person
+                # inspects when a note looks wrong; an artifact that disagrees with the note it
+                # describes sends the next reader after the wrong component.
+                "supersedes": reader.doc_id_list(doc.supersedes),
+            },
+        }
+        if vault is not None or tier is not None:
+            run["provenance"] = {"vault": vault, "tier": tier}
+        files["run.json"] = json.dumps(run, indent=2, ensure_ascii=False)
+        for name, text in files.items():
+            _write_at(dir_fd, name, text)
 
     return IngestResult(
         doc_id=doc.doc_id, out_dir=out_dir, status=status, domains=list(doc.domains),

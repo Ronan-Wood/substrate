@@ -30,7 +30,8 @@ from pathlib import Path
 
 from substrate.extract.base import doc_id_for  # stdlib-only; no Docling/torch pulled in
 from substrate.markdown.reader import (
-    _DOC_ID, _DOMAIN, FrontmatterError, _parse_frontmatter, _parse_list, unread_keys,
+    _DOC_ID, _DOMAIN, FrontmatterError, _parse_frontmatter, _parse_list, normalized_text,
+    unread_keys,
 )
 
 MANIFEST = ".substrate.toml"
@@ -74,7 +75,7 @@ def _read_capped(path: Path) -> str:
     if size > _MAX_BYTES:
         raise VaultError(f"{path} is {size} bytes (> {_MAX_BYTES} cap) — refusing to read.")
     try:
-        return path.read_bytes().decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+        return normalized_text(path.read_bytes())
     except (OSError, UnicodeDecodeError) as e:
         raise VaultError(f"cannot read {path}: {e}") from e
 
