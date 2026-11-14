@@ -7,8 +7,36 @@ Every release of the engine, newest first. The format follows
 
 ## Unreleased
 
+### Added
+
+- **A vault's manifest may declare `skip`,** the file and folder names compose never indexes in
+  that vault. The list used to be fixed: `_meta.md`, `structure.md`, `MEMORY.md`, `log.md`,
+  `WRITING.md` and anything under `99-templates/`. That list is now the default, so a vault that
+  declares nothing composes as before. `skip = []` indexes every `.md` file. Each vault's list
+  governs its own files, and a vault with no manifest has the default. A skipped file that
+  declares a spine still fails the compose, under whichever list is in effect.
+  [`docs/configuration.md`](docs/configuration.md) has the rules.
+- After `skip` changes, the next compose or refresh pass takes the notes under a newly skipped
+  folder out of the index, without `--clean`, and adds the newly unskipped ones. Compose removes
+  such a note's ingest folder as it removes a deleted note's, and says so on a `pruned:` line.
+
+### Changed
+
+- `skip` is a reserved manifest key. Written inside a `[table]`, it fails the compose, as the
+  other top-level keys do, so a reference pin can no longer be named `skip`. A `skip` that is not
+  a list of exact names fails the compose too.
+- `ingest` and `amend` refuse a name or a folder the vault's own `skip` list names, in place of
+  the fixed list. A default name the list leaves out can be written, so under `skip = []` an
+  `amend` of `log.md` works. `_meta.md` is still refused in every vault, whatever its list says.
+  They now read the project vault's manifest, and write nothing while it doesn't parse or its
+  `skip` is refused.
+
 ### Fixed
 
+- `ingest` and `amend` refuse `_META.md` and every other spelling of `_meta.md` that a volume can
+  serve as it: any letter case, and on HFS+ the code points it leaves out of a name. On such a
+  volume the file is read as its source's `_meta.md` and sets the spine of the passages beside it,
+  and the refusal compared the name exactly.
 - `substrate-mcp --hyde-model`, `substrate serve --hyde-model` and `substrate eval --hyde-model`
   refuse a model that runs in Ollama's cloud at launch, exit 2, as `--rerank-model` already did.
   Before, the server started with HyDE dropped, and `eval` measured the run without HyDE.

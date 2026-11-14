@@ -1393,19 +1393,20 @@ def cmd_compose(args: argparse.Namespace) -> int:
             print(f"    {path}: {name} — {detail}", file=sys.stderr)
         return 3
 
-    # DELETED NOTES. Their ingest folders are the only stale content a plain compose leaves, and
-    # `assert_composed` below refuses a scope that still holds one; `prune` says what it may remove.
-    deleted = prune.stale(index_root, scope.vaults, {d.name for _, d in ingest_dirs})
+    # DELETED NOTES, AND NOTES A VAULT NOW SKIPS. Their ingest folders are the only stale content
+    # a plain compose leaves, and `assert_composed` below refuses a scope that still holds one;
+    # `prune` says what it may remove.
+    stale = prune.stale(index_root, scope.vaults, {d.name for _, d in ingest_dirs})
     try:
-        emptied = prune.refuse_missing(deleted, scope.vaults, Counter(n.vault for n in scope.notes))
-        prune.remove(deleted, lambda s: print(f"  {prune.line(s)}", flush=True))
+        emptied = prune.refuse_missing(stale, scope.vaults, Counter(n.vault for n in scope.notes))
+        prune.remove(stale, lambda s: print(f"  {prune.line(s)}", flush=True))
         for name in emptied:
-            print(f"  {prune.emptied_line(name, deleted)}", flush=True)
+            print(f"  {prune.emptied_line(name, stale)}", flush=True)
     except prune.PruneError as e:
         print(f"\nFATAL (prune): {e}", file=sys.stderr)
         return 3
     except OSError as e:
-        print(f"\nFATAL (prune): could not remove a deleted note's ingest folder: {e}",
+        print(f"\nFATAL (prune): could not remove a deleted or skipped note's ingest folder: {e}",
               file=sys.stderr)
         return 3
 

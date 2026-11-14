@@ -1,9 +1,13 @@
-"""The ingest folders of notes that have been deleted, found and removed by `compose`.
+"""The ingest folders of notes that have been deleted, or that their vault now skips, found and
+removed by `compose`.
 
 A compose without `--clean` re-ingests every note into its own folder under the index root and
 leaves the rest. A deleted note's folder therefore stayed, and `assert_composed` refused the scope
 for the stale document it held, so a refresh pass froze the scope until someone ran `--clean` by
-hand. Deleting a note is ordinary vault use, so compose now removes those folders itself.
+hand. Deleting a note is ordinary vault use, so compose now removes those folders itself. A note
+the manifest's `skip` list newly names is the same: it is still on disk, and its folder is as stale
+as a deleted one's. In practice that is a note under a newly skipped folder, because a note skipped
+by its file name that still declares a spine refuses the compose before this runs.
 
 What it removes is narrow, and each condition is checked rather than assumed:
 
@@ -11,13 +15,16 @@ What it removes is narrow, and each condition is checked rather than assumed:
     whose name is the one compose gives the note its `run.json` names (`ingest_dir_name`), that
     note inside one of the scope's vaults, and that note known to be gone: "no such file", never a
     note that cannot be read. Nothing inside a vault is touched.
+  * **Or a note its vault's skip list names.** That is a rule about the note's path, read from
+    the vault's own manifest, and not something observed on disk: compose cannot have ingested the
+    note this run whether or not it can be read.
   * **A missing vault is not a deleted note.** When a vault this would prune is missing or
     unreadable, nothing is pruned and the compose fails, naming the vault: an unmounted drive must
     not empty its index. A vault that composed zero notes is pruned down to zero only while it
     still carries its manifest (`.substrate.toml`, which every project vault has), and that is said
     in its own line; without one (a root vault, which has none) it is refused the same way.
   * **Anything else is left,** so `assert_composed` refuses it as before: a folder that cannot be
-    attributed, or the folder of a note that still exists but is no longer composed.
+    attributed, or the folder of a note that still exists, is not skipped and was not composed.
 
 Every removed folder is printed, as it goes, on a line starting `pruned:`, which a refresh pass
 carries into its report, whatever the pass then records.
@@ -44,8 +51,9 @@ class PruneError(RuntimeError):
 
 class Stale(NamedTuple):
     vault: str
-    note: Path        # the deleted note, relative to its vault
+    note: Path        # the deleted or skipped note, relative to its vault
     folder: Path      # its ingest folder under the index root
+    skipped: bool = False   # still on disk, and named by its vault's skip list
 
 
 def _source(folder: Path) -> Path | None:
@@ -68,8 +76,9 @@ def _source(folder: Path) -> Path | None:
 
 
 def stale(index_root: Path, vaults: Iterable, produced: set[str]) -> list[Stale]:
-    """Each folder under `index_root`, not among `produced`, that holds a deleted note of one of
-    `vaults` (each with `.name` and `.path`)."""
+    """Each folder under `index_root`, not among `produced`, that holds a note of one of `vaults`
+    (each with `.name`, `.path` and `.skip`) that is deleted, or that the vault's skip list
+    names."""
     vaults = list(vaults)
     found: list[Stale] = []
     try:
@@ -88,8 +97,11 @@ def stale(index_root: Path, vaults: Iterable, produced: set[str]) -> list[Stale]
         for v in vaults:
             if (source.is_relative_to(v.path)
                     and entry.name == private.ingest_dir_name(v.name, source)):
+                note = source.relative_to(v.path)
                 if _deleted(source, v.path):
-                    found.append(Stale(v.name, source.relative_to(v.path), folder))
+                    found.append(Stale(v.name, note, folder))
+                elif v.skip.skips(note.parts):
+                    found.append(Stale(v.name, note, folder, skipped=True))
                 break
     return found
 
@@ -151,9 +163,9 @@ def refuse_missing(found: list[Stale], vaults: Iterable, composed: dict[str, int
                    f"folder")
         raise PruneError(
             f"vault {name!r}: {why}. That looks like a vault that is unmounted, unsynced or moved, "
-            f"not {held} deleted note(s), so none of its notes were pruned and the index was not "
-            f"rebuilt. Bring the vault back and the next compose prunes only the notes it no "
-            f"longer has; if it was emptied on purpose, compose once with --clean.")
+            f"not {held} deleted or skipped note(s), so none of its notes were pruned and the index "
+            f"was not rebuilt. Bring the vault back and the next compose prunes only the notes it "
+            f"no longer has; if it was emptied on purpose, compose once with --clean.")
     return emptied
 
 
@@ -181,4 +193,5 @@ def remove(found: list[Stale], removed: Callable[[Stale], None]) -> None:
 
 
 def line(s: Stale) -> str:
-    return f"{PRUNED} {s.vault}/{s.note.as_posix()}  (note deleted; removed {s.folder.name})"
+    why = "note skipped by its vault's skip list" if s.skipped else "note deleted"
+    return f"{PRUNED} {s.vault}/{s.note.as_posix()}  ({why}; removed {s.folder.name})"

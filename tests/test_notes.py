@@ -317,12 +317,12 @@ def test_ingest_refuses_a_skip_list_filename() -> None:
     """
     import tempfile
     from substrate.notes import NoteError, _resolve_target
-    from substrate.vault import SKIP_NAMES
+    from substrate.vault import DEFAULT_SKIP
 
     with tempfile.TemporaryDirectory() as td:
         v = Path(td) / "proj"
         (v / "02-areas").mkdir(parents=True)
-        for name in sorted(SKIP_NAMES):
+        for name in sorted(DEFAULT_SKIP.files):
             try:
                 _resolve_target(v, "02-areas", name)
             except NoteError as e:
