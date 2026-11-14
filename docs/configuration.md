@@ -69,9 +69,11 @@ everything else is tier 3.
 
 ## A note's frontmatter
 
-Every note declares its spine in YAML frontmatter. A passage under `10-reference/` takes its spine
-from the source's `_meta.md` instead. A note with no `status` fails the compose, because the
-engine won't guess which retrieval set it belongs in. This is the smallest note that composes:
+A note declares its spine in YAML frontmatter. A passage under `10-reference/` takes its spine
+from the source's `_meta.md` instead. A note with no `status` composes as `active`, and a note with
+no `doc_type` composes as `reference`. `substrate status --scope <name>` reports how many notes
+were defaulted on each field, so you can tell when notes are retrieved by default without having
+said so. A declared value outside the vocabulary fails the compose. This note declares both:
 
 ```markdown
 ---
@@ -87,6 +89,8 @@ domains: [storage]
 - `doc_id` is derived from the file name when it is absent. Declare one to keep a note's identity
   stable across renames.
 - `confidence` is optional. Without it, a note is stored as `unjudged`.
+- A note written through the `ingest` or `amend` tool must declare `status`, `doc_type` and
+  `confidence`. The defaults apply only to notes already in a vault.
 - A note that replaces another declares `supersedes: <doc_id>`, and the replaced note takes
   `status: superseded` and `superseded_by: <doc_id>`, as the two `engine-boundary` notes in the
   demo vault do.
@@ -95,6 +99,49 @@ The vocabularies are in [`contract/contract.json`](../contract/contract.json) un
 [`WRITING.md`](../vaults/demo-core-vault/00-operator/WRITING.md) describes how to write a note,
 and `vaults/demo-vault/99-templates/` has templates to copy. To move an existing vault onto the
 spine, read [`migration-vocabulary.md`](migration-vocabulary.md) first.
+
+### When a default doesn't apply
+
+A default stands in for a field a note doesn't declare. It doesn't stand in for frontmatter the
+engine couldn't read, or for an engine key spelled another way. These are the cases, and what
+compose does with each. For a passage, the same rules apply to its source's `_meta.md`.
+
+| the note | what compose does |
+|---|---|
+| has no frontmatter, and doesn't start with a `---` line | composes with the defaults |
+| starts with frontmatter the engine reads, or an empty `---`/`---` block | composes, with the defaults for what it doesn't declare |
+| has no `status` or no `doc_type`, and starts with a `---` line that isn't frontmatter the engine reads | fails. This covers a byte-order mark, a blank line or an invisible character before the `---`, spaces after it, fences that smart punctuation turned into `—-` or `—`, a block that never closes or closes with `...`, a line that isn't a plain key (below), a key the engine reads written twice, and a horizontal rule as the note's first line |
+| writes `status`, `doc_type`, `class`, `document_class` or `superseded_by` in another spelling: `Status:`, `doc-type:`, `docType:`, `"class":`, `superseded-by:` | fails, whatever else it declares. The message names the note, the key as written and the spelling to write |
+
+**Exact spelling only.** The engine reads those five keys under exactly those names and no other.
+`Status: archived` is not read as `status`, so the note fails rather than being indexed as live.
+`Class: conversation` fails rather than being indexed as an ordinary note. A key counts as another
+spelling of one of the five when they match after these steps: one pair of quotes and every
+character that renders as nothing removed, letter case folded, and each run of `-`, `_` and
+spaces made one `_`, where a capital after a lower-case letter may count as a word break or not.
+So `DOC TYPE`, `DocType`, `docType` and `sTATUS` are spellings of engine keys, while `doctype`,
+Pandoc's `documentclass` and Marp's `_class` are keys of their own and compose. **A vault that keeps a `Status` or `Class` property of
+its own has those notes refused**, even beside a real `status`. Engine issue #53 decides how such
+a vault is served.
+
+**A plain key** is one YAML reads as a key. Either it is wrapped in one pair of matching quotes,
+or it doesn't start with a YAML indicator character (`?` `:` `,` `[` `]` `{` `}` `#` `&` `*` `!`
+`|` `>` `'` `"` `%` `@` or a backtick, or `-`), where `-`, `?` and `:` count only before a space
+or nothing, so `-1` and `-x` are keys and `- x` is a list item. It also holds no ` #` and isn't
+`<<`. Any script, spaces, hyphens, digits and punctuation inside a name are plain:
+`Date created`, `related-notes`, `Rating (1-5)`, `автор` and `创建时间戳` all are. A list written
+without indenting it (`source:` above `- https://…`) composes when YAML reads the block as the
+same mapping, with the same value for each key that decides the spine or class (`status`,
+`doc_type`, `class`, `document_class`, `superseded_by`, `supersedes`, `confidence`).
+A key nested under another key belongs to that key, not to the note. Values aren't affected: they
+are compared exactly as written, so `status: Archived` fails as a value outside the vocabulary.
+
+**Frontmatter only.** The engine reads a note's spine and class only from its YAML frontmatter.
+A `key:: value` line in the body is body text to the engine, whatever Dataview or Logseq make of
+it, so a note that declares its class only that way is `unclassified`.
+
+Until a later release lets one bad note be left out on its own, a note that fails the compose
+stops the whole scope from composing, as before.
 
 ## The engine's folder: `~/.substrate`
 

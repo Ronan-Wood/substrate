@@ -96,9 +96,9 @@ def test_plan_names_what_it_did_not_check() -> None:
     assert any("A22" in w for w in _plan(_vault()).warnings)
 
 
-def test_plan_refuses_a_note_compose_would_refuse() -> None:
-    """The vault path requires a declared status and doc_type. Catching it here means the note
-    never lands in the vault to refuse the whole scope's next compose."""
+def test_plan_refuses_a_note_that_declares_no_status_or_doc_type() -> None:
+    """The write path requires a declared status and doc_type. Compose would index the note
+    without them, but a note being written now has someone present to declare them."""
     v = _vault()
     _refuses(lambda: _plan(v, content=NO_SPINE))
     assert list((v / "04-synthesis").iterdir()) == [], "a refused plan leaves nothing behind"

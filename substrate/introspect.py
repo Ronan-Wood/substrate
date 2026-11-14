@@ -96,6 +96,11 @@ def status_payload(store, entry, *, stack, registry: str | None = None,
         "by_status": store.counts_by("status"),
         "by_doc_type": store.counts_by("doc_type"),
         "by_confidence": store.counts_by("confidence"),
+        # How many of those notes declare no status, and how many no doc_type: compose indexed
+        # them as `active` and `reference`, and the counts above cannot tell them from notes that
+        # declared it. Null when this index keeps no record, which is not zero
+        # (`IndexStore.defaulted_counts`).
+        "defaulted": store.defaulted_counts(),
         # WHO THIS CORPUS IS ABOUT, ordered by how many notes name each. Empty when the scope's
         # vault declares no identity roster, which is most of them — an absent list here means
         # "nobody was resolved", never "nobody was mentioned".

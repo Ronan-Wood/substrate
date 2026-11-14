@@ -123,11 +123,30 @@ SCHEMA_VERSION = 11
 #     `IF NOT EXISTS`, so the next compose adds the table and triggers to a v11 file in place, and
 #     a file without them is read by the scan it always was. The triggers live in the file, so an
 #     engine that predates them still moves `n` when it writes.
+#     2026-11-13, still v11: `spine_defaults`, one row per (note, spine field) compose gave its
+#     default because the note declared none. `substrate status` counts them. NO BUMP, for the
+#     reason above: the statement is `IF NOT EXISTS`, so the next compose adds the table to a v11
+#     file in place, and a bump would drop every scope's vectors to add a count. A file without the
+#     table reports the counts as not kept (`IndexStore.defaulted_counts`), never as zero. An
+#     engine that predates the table adds no row, and its compose refuses any note that would need
+#     one. A row goes with its document there too, because the cascade is in the file, so that
+#     engine's `index --rebuild` drops the rows of the notes it re-indexes. The next compose by
+#     this engine puts them back (`reconcile`).
 
 # The triggers that keep `vector_generation.n` moving. A reader trusts `n` only while all of them
 # exist: an engine that predates them can rebuild `chunk_vectors` without them and then write
 # vectors that move nothing (`IndexStore._vector_search_cached`).
 VECTOR_GENERATION_TRIGGERS = ("chunk_vectors_gen_ai", "chunk_vectors_gen_au", "chunk_vectors_gen_ad")
+
+# The spine fields compose gave a default for a note that declared none (added within v11; the
+# history above says why). `field` is one of `spine.DEFAULTED_FIELDS`. Written with the document's
+# row and removed with it, so a count `status` reports is always of notes indexed now. Its own
+# statement because `IndexStore.upsert` runs it too.
+SPINE_DEFAULTS = """CREATE TABLE IF NOT EXISTS spine_defaults(
+    doc_id TEXT NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+    field  TEXT NOT NULL,
+    PRIMARY KEY (doc_id, field)
+);"""
 
 DDL = """CREATE TABLE IF NOT EXISTS documents(
     doc_id            TEXT PRIMARY KEY,
@@ -199,6 +218,8 @@ CREATE TABLE IF NOT EXISTS document_entities(
     PRIMARY KEY (doc_id, entity_id, surface)
 );
 CREATE INDEX IF NOT EXISTS idx_document_entities_entity ON document_entities(entity_id);
+
+""" + SPINE_DEFAULTS + """
 
 CREATE INDEX IF NOT EXISTS idx_documents_class    ON documents(document_class);
 CREATE INDEX IF NOT EXISTS idx_documents_status   ON documents(status);
@@ -317,6 +338,7 @@ DROP = """
 DROP TRIGGER IF EXISTS chunks_ai;
 DROP TRIGGER IF EXISTS chunks_ad;
 DROP TABLE IF EXISTS document_entities;
+DROP TABLE IF EXISTS spine_defaults;
 DROP TABLE IF EXISTS entities;
 DROP TABLE IF EXISTS chunks_fts;
 DROP TABLE IF EXISTS chunk_vectors;

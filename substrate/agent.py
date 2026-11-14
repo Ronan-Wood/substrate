@@ -629,6 +629,19 @@ def _fingerprint(store, include_sources: bool, excluded: frozenset[str], left_ou
     def rows(sql: str) -> list:
         return [list(r) for r in store.db.execute(sql, held)]
 
+    def defaulted() -> list:
+        # The held documents' defaulted spine fields, which `status` counts: a compose that changes
+        # only these (`reconcile`, after an older engine dropped them) moves nothing else here.
+        # In the signature only when there are some, so a scope with none keeps the fingerprint it
+        # had before the table existed, and its snapshot is not rewritten for nothing.
+        try:
+            return rows("SELECT doc_id, field FROM spine_defaults "
+                        "WHERE doc_id IN (SELECT value FROM json_each(?)) ORDER BY 1, 2")
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e):
+                raise
+            return []
+
     # Identity is rebuilt by every compose from a file `index_version` does not cover, so a roster
     # edit alone must still republish rather than re-verify the old one — as far as it reaches the
     # snapshot, which keeps each mention's surface and kind and nothing else (`_strip_roster`).
@@ -643,6 +656,7 @@ def _fingerprint(store, include_sources: bool, excluded: frozenset[str], left_ou
         rows("SELECT d.doc_id, d.surface, e.kind FROM document_entities d "
              "JOIN entities e ON e.entity_id = d.entity_id "
              "WHERE d.doc_id IN (SELECT value FROM json_each(?)) ORDER BY 1, 2, 3"),
+        *([spine_rows] if (spine_rows := defaulted()) else []),
         [list(r) for r in _carried(docs, left_out)],
         [[n.doc_id, n.path, hashlib.sha256(n.text.encode()).hexdigest(), n.stale]
          for n in notes],

@@ -178,3 +178,30 @@ Conversations (`class: conversation`, such as call transcripts under `_sources/`
 retrieved unless the caller passes `include_sources`. A passage from the middle of a transcript can
 misrepresent what was finally decided. This rule is about accuracy rather than access, and each
 reply's `filters` field says what it left out.
+
+**Withholding follows the class a note declares, never the folder it is in.** A note with no
+frontmatter, anywhere in a vault and under `_sources/` too, is `unclassified` and `active`. It is
+retrieved by default and copied into agent snapshots. Up to and including 0.2.2 such a note
+failed the compose and froze its scope. It now composes, and `substrate status` counts it under
+`defaulted`. Declare `class: conversation` on a transcript before it goes into a vault.
+
+A class the engine can't read is refused, so it can't quietly become `unclassified`. The engine
+reads `class`, `document_class`, `status`, `doc_type` and `superseded_by` under exactly those
+names. A note that writes one of them another way (`Class:`, `"class":`, `Status:`) is refused,
+naming the key and the spelling to use. So is a note that declares no status or no doc_type but
+opens with frontmatter the engine can't read. **`Status: archived` is never indexed as live**, and
+**`Class: conversation` is never indexed as unclassified.** A vault that uses `Status` or `Class`
+as a property of its own has those notes refused; engine issue #53 decides how such a vault is
+served.
+
+**What this guard is for: mistakes, not disguise.** It catches the mistakes people and editors
+make: letter case, `-` for `_`, a quoted key, a byte-order mark, an invisible character, smart
+dashes in a fence, a key written twice, a block the reader can't take. It isn't a defence against
+someone deliberately disguising a key, for example by spelling `class` with letters from another
+script that look like Latin ones. Whoever can write a note into a vault can leave the class off
+altogether, and a note that declares no class was `unclassified` before this guard existed too.
+
+**Frontmatter only.** The engine reads a note's spine and class only from its YAML frontmatter. A
+`key:: value` line in the body is body text to the engine, whatever Dataview or Logseq make of it,
+so a note that declares its class only that way is `unclassified`: retrieved by default and copied
+into agent snapshots.

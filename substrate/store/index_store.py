@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from substrate.markdown import reader
 from substrate.models import Chunk, Document
-from substrate.spine import UNJUDGED_CONFIDENCE
+from substrate.spine import DEFAULTED_FIELDS, UNJUDGED_CONFIDENCE
 from substrate.store import fts, schema, sections
 
 if TYPE_CHECKING:
@@ -407,16 +407,22 @@ class IndexStore:
         markdown_mtime: float,
         markdown_sha256: str,
         coverage: float | None = None,
+        defaulted: list[str] | None = None,
     ) -> int:
-        """Replace a document and all its chunks atomically."""
+        """Replace a document and all its chunks atomically.
+
+        `defaulted` is the spine fields compose gave this note a default for, as
+        `spine.defaulted_fields` reads them from its `run.json`. It replaces the note's
+        `spine_defaults` rows."""
         db = self.db
         db.execute("BEGIN")
         try:
             self._delete_rows(doc.doc_id)
             # `status` defaults to 'active' and `doc_type` to 'reference' when the document declares
-            # none — the standalone ingest path allows that (the vault path refuses an absent one
-            # upstream via spine.validate_{status,doc_type}), so the existing corpus, which predates
-            # both fields, stays on the live surface as reference lookup material. `domains` is stored
+            # none — the standalone ingest path allows that, so the existing corpus, which predates
+            # both fields, stays on the live surface as reference lookup material. A composed note
+            # reaches here with both set (`run.json` holds the value ingest resolved), and the ones
+            # ingest defaulted are named in `defaulted`. `domains` is stored
             # as a JSON array so the multi-valued tag survives a round-trip losslessly.
             status = doc.status or "active"
             doc_type = doc.doc_type or "reference"
@@ -425,8 +431,8 @@ class IndexStore:
             # claimed. It is 'unjudged' rather than 'unstated' because those are different facts —
             # nobody looked, versus judged-and-claims-nothing — and collapsing them made six
             # deliberate `confidence: unstated` declarations indistinguishable from 530 unexamined
-            # notes (spine.UNJUDGED_CONFIDENCE). Unlike status/doc_type this default is also what
-            # the compose path produces; only the vault WRITE path requires a declaration.
+            # notes (spine.UNJUDGED_CONFIDENCE). As with status and doc_type, the compose path
+            # accepts a note that declares none; only the vault WRITE path requires a declaration.
             confidence = doc.confidence or UNJUDGED_CONFIDENCE
             db.execute(
                 """INSERT INTO documents(
@@ -459,6 +465,8 @@ class IndexStore:
                     doc.note_sha256,
                 ),
             )
+            # Deleting the document's row above removed its old rows here (ON DELETE CASCADE).
+            self._insert_defaulted(doc.doc_id, defaulted or [])
             db.executemany(
                 """INSERT INTO chunks(
                     chunk_id, doc_id, kind, seq, text, text_with_path, path_str, path_depth, section_kind,
@@ -487,6 +495,42 @@ class IndexStore:
             db.execute("ROLLBACK")
             raise
         return len(chunks)
+
+    def _insert_defaulted(self, doc_id: str, fields: list[str]) -> None:
+        """Nothing is written, and the table is not needed, for a note that declares its spine."""
+        if not fields:
+            return
+        # `index` can write to a v11 file from before the table without running the DDL.
+        self.db.execute(schema.SPINE_DEFAULTS)
+        self.db.executemany("INSERT INTO spine_defaults(doc_id, field) VALUES (?,?)",
+                            [(doc_id, f) for f in fields])
+
+    def set_defaulted(self, doc_id: str, fields: list[str]) -> None:
+        """Replace one document's `spine_defaults` rows and nothing else of it. `reconcile` calls
+        it for a note it will not re-index whose rows are not what its `run.json` names."""
+        self.db.execute("BEGIN")
+        try:
+            self.db.execute(schema.SPINE_DEFAULTS)
+            self.db.execute("DELETE FROM spine_defaults WHERE doc_id=?", (doc_id,))
+            self._insert_defaulted(doc_id, fields)
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def defaulted_by_doc(self) -> dict[str, list[str]]:
+        """Each document's `spine_defaults` rows, in `spine.DEFAULTED_FIELDS` order."""
+        try:
+            rows = self.db.execute("SELECT doc_id, field FROM spine_defaults").fetchall()
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e):
+                raise
+            return {}
+        held: dict[str, set[str]] = {}
+        for doc_id, name in rows:
+            held.setdefault(doc_id, set()).add(name)
+        return {doc_id: [f for f in DEFAULTED_FIELDS if f in names]
+                for doc_id, names in held.items()}
 
     def _delete_rows(self, doc_id: str) -> None:
         self.db.execute(
@@ -852,6 +896,23 @@ class IndexStore:
         return {r[0] if r[0] is not None else "(none)": r[1]
                 for r in self.db.execute(
                     f"SELECT {column}, COUNT(*) FROM documents GROUP BY {column}")}
+
+    def defaulted_counts(self) -> dict[str, int] | None:
+        """How many indexed notes compose gave each of `spine.DEFAULTED_FIELDS`'s defaults, because
+        the note declared none: `{"status": n, "doc_type": n}`.
+
+        None when this index keeps no such record: a file last composed by an engine from before
+        the table existed. That engine refused a note with no status, so the true count there is
+        zero, but it is reported as not kept rather than inferred. The next compose adds the table.
+        """
+        try:
+            counts = dict(self.db.execute(
+                "SELECT field, COUNT(*) FROM spine_defaults GROUP BY field").fetchall())
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e):
+                raise
+            return None
+        return {f: counts.get(f, 0) for f in DEFAULTED_FIELDS}
 
     def _count_status_filtered(self, statuses: frozenset[str] | None) -> int:
         """Count chunks the PRODUCTION filter builder selects for a status set — the same

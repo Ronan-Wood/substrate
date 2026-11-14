@@ -123,13 +123,75 @@ def _jsonl(rows: list[dict]) -> str:
     return "\n".join(json.dumps(r, ensure_ascii=False, sort_keys=True) for r in rows) + "\n"
 
 
-def _meta_path_for(note_path: Path) -> Path | None:
-    """The `_meta.md` a passage inherits from, for error attribution only. Mirrors vault._source_meta
-    (nearest enclosing `passages/` ancestor); None when the note is not under one."""
-    parts = note_path.parts
-    if "passages" not in parts:
+def _meta_path_for(note_path: Path, vault_root: Path | None) -> Path | None:
+    """The `_meta.md` a passage inherits from, as the vault layer resolves it
+    (`vault.source_meta_path`), or None with no vault root (a caller outside compose)."""
+    if vault_root is None:
         return None
-    return Path(*parts[: len(parts) - 1 - parts[::-1].index("passages")]) / "_meta.md"
+    from substrate import vault as _vault
+
+    return _vault.source_meta_path(note_path, vault_root)
+
+
+# Each engine key's forms (`reader.canonical_forms`), for the spelling check in `_judge_opening`.
+_ENGINE_FORMS: dict[str, str] = {f: k for k in spine.EXACT_SPELLING for f in reader.canonical_forms(k)}
+
+
+def _judge_opening(doc: Document, src: Path, opening: reader.OpeningBlock,
+                   defaulted: tuple[str, ...], vault_root: Path | None, *,
+                   why: str | None = None) -> None:
+    """Refuse a vault note whose opening a default must not stand in for. A passage is judged with
+    its `_meta.md`, where its spine is written. Two refusals, both for MISTAKES a person or an
+    editor makes; neither is a defence against a key disguised on purpose, since whoever can
+    write a note into a vault can leave its class off altogether (docs/security.md):
+
+      * AN ENGINE KEY SPELLED ANOTHER WAY: a key whose `reader.canonical_forms` include one of
+        `spine.EXACT_SPELLING`'s keys, written otherwise (`Status`, `doc-type`, `"class"`). It
+        is not read, so it would leave `Status: archived` live and `Class: conversation`
+        retrieved by default. What it does is that table's, and today every entry refuses.
+      * A DEFAULT OVER A BLOCK THE READER DID NOT TAKE WHOLE. Until compose defaulted an absent
+        status, "no status" refused every note whose opening block the reader could not take,
+        whatever stopped it. So a note that would take a default is refused when it opens with a
+        `---`-like line that the reader did not read as frontmatter whole (`reader.OpeningBlock`):
+        a byte-order mark before it, a block that never closes, a line YAML would not read as a
+        key (`reader.plain_key`). The test is the shape, not the keys a block might hide.
+
+    `why` is the reader's reason the note's own block is body text, when it gave one."""
+    blocks = [(src, opening, why)]
+    meta_path = _meta_path_for(src, vault_root)
+    if meta_path is not None:
+        from substrate import vault as _vault
+
+        try:
+            blocks.append((meta_path, reader.opening_block(_vault._read_capped(meta_path)), None))
+        except _vault.VaultError as e:
+            raise ValueError(str(e)) from e
+
+    for path, block, _ in blocks:
+        for key, forms in block.keys:
+            exact = next((_ENGINE_FORMS[f] for f in forms if f in _ENGINE_FORMS), None)
+            if exact is None or key == exact:
+                continue
+            raise spine.SpineError(
+                f"{doc.doc_id}: {path.name} writes `{reader._shown(key)}`, which the engine "
+                f"does not read as `{exact}`: it reads only `{exact}`, spelled exactly so. "
+                f"Write `{exact}:` if this is the note's {exact}. If it is a property of the "
+                "vault's own, it cannot share that name with an engine key; refusing rather "
+                "than indexing the note as if it had declared none."
+            )
+    if defaulted:
+        for path, block, reason in blocks:
+            reason = block.why or reason
+            if block.opens and not block.whole:
+                raise spine.SpineError(
+                    f"{doc.doc_id}: declares no {' and no '.join(defaulted)}, and {path.name} "
+                    "opens with a `---` line the engine does not read as frontmatter"
+                    + (f" ({reason})" if reason else "") + ". "
+                    "Frontmatter is a line of `---` alone as the file's first characters, "
+                    "`key: value` lines, and a line of `---` alone. Refusing to index the note "
+                    "on defaults over a block that may say otherwise. If the `---` is a "
+                    "horizontal rule, start the file with something else."
+                )
 
 
 def ingest_markdown(
@@ -148,6 +210,7 @@ def ingest_markdown(
     override_version: str | None = None,
     extra_domains: list[str] | None = None,
     vault: str | None = None,
+    vault_root: Path | None = None,
     tier: int | None = None,
     origin: SourceOrigin | None = None,
     before_write: Callable[[Document], None] | None = None,
@@ -158,6 +221,12 @@ def ingest_markdown(
     ``spine.SpineError`` (status contract), ``CoverageError`` (A18). The caller maps these to exit
     codes or per-note failures — the point is that a silently-lossy or mislabeled note NEVER
     reaches the index.
+
+    `require_status` refuses a note that declares no `status` or no `doc_type`; the vault write
+    path passes it. Without it an absent one takes its default (`active`, `reference`), and on the
+    vault path `run.json` names the fields defaulted (`spine.DEFAULTED_FIELDS`). `vault_root`
+    is the root of the vault the note is in; compose passes it, so a passage's `_meta.md` is found
+    inside that vault and judged with the note.
 
     `override_status` / `extra_domains` carry a reference source's `_meta.md` context down onto a
     passage file that has no frontmatter of its own: the passage inherits the source's status and
@@ -185,6 +254,7 @@ def ingest_markdown(
     # declares is optional, so its unreadable values are only left out.
     doc, body_md, rstats = read_markdown(src, doc_class=doc_class, strict=origin is None)
     unread = rstats.pop("frontmatter_unread", None)
+    opening = rstats.pop("opening_block")
 
     # Identity moves to the REAL artifact before anything reads it. Done here rather than after
     # the gates because `classes.apply` enforces `source_sha256` as a required field and
@@ -274,17 +344,17 @@ def ingest_markdown(
     inherited: dict[str, Path | None] = {}
     if override_status and doc.status is None:
         doc.status = override_status
-        inherited["status"] = _meta_path_for(src)
+        inherited["status"] = _meta_path_for(src, vault_root)
     # doc_type inherits the same way: a reference passage carries no frontmatter, so its source's
     # `_meta.md` doc_type (reference) fills the absence; a note that declares its own job always wins.
     if override_doc_type and doc.doc_type is None:
         doc.doc_type = override_doc_type
-        inherited["doc_type"] = _meta_path_for(src)
+        inherited["doc_type"] = _meta_path_for(src, vault_root)
     # confidence inherits identically: a reference source states once, in its `_meta.md`, how
     # settled its passages are; a passage that declares its own always wins.
     if override_confidence and doc.confidence is None:
         doc.confidence = override_confidence
-        inherited["confidence"] = _meta_path_for(src)
+        inherited["confidence"] = _meta_path_for(src, vault_root)
     # §3b: a passage inherits its source's raw pointer. This is the mechanism by which a chunk can
     # name the artifact it ultimately came from — the passage file itself has no idea.
     doc.raw = doc.raw or raw
@@ -315,16 +385,25 @@ def ingest_markdown(
         title_source = title_source or ("filename" if doc.title else None)
 
     meta = classes.apply(doc)
+    # Which spine fields this note leaves to the default: read here, after `_meta.md` has filled
+    # what it supplies, so an inherited value is not counted as defaulted. Only on the vault path.
+    # A foreign document's spine was cleared above and is never its own to declare, so it has no
+    # declaration to be missing.
+    defaulted = tuple(f for f in spine.DEFAULTED_FIELDS
+                      if origin is None and getattr(doc, f) is None)
+    # Before the values are judged: a key the engine did not read under its spelling says more
+    # about what is wrong than the value check it leads to (`superseded-by:` leaves a superseded
+    # note with no link).
+    if origin is None:
+        _judge_opening(doc, src, opening, defaulted, vault_root, why=unread)
     try:
         status = spine.validate_status(doc, require_present=require_status)
         doc_type = spine.validate_doc_type(doc, require_present=require_status)
-        # Confidence rides its OWN flag, not require_status, because the two gates have different
-        # blast radii. require_status is safe to demand everywhere: the migration authored a status
-        # for every note. Demanding confidence on the same flag would refuse 530 of 657 indexed
-        # notes at the next compose — run unattended every 15 minutes by a launchd agent, and
-        # silent, because compose returns before opening the IndexStore, so each scope keeps
-        # answering queries from its last good DB while frozen. So `notes.py` (a human is writing
-        # this note now) passes True and `compose` does not. See spine.validate_confidence.
+        # Confidence rides its OWN flag, not require_status. The two were split while `compose`
+        # demanded a status and could not demand a confidence: 530 of 657 indexed notes declared
+        # none, and refusing them would have frozen every scope at its next compose. Compose now
+        # demands neither, and `notes.py` (someone is writing this note now) passes both. See
+        # spine.validate_confidence.
         confidence = spine.validate_confidence(doc, require_present=require_confidence)
     except spine.SpineError as e:
         # Attach the ORIGIN of the offending value. Which field failed is in the message already;
@@ -332,10 +411,6 @@ def ingest_markdown(
         for field, meta_path in inherited.items():
             if meta_path is not None and f"{field} " in str(e):
                 raise spine.SpineError(f"{e} (inherited from {meta_path})") from e
-        # A note that opens with a `---` block the reader took for a divider declared nothing, so
-        # say which line made it one, or the refusal names a field the operator can see written.
-        if unread is not None:
-            raise spine.SpineError(f"{e} Its frontmatter is not read: {unread}.") from e
         raise
 
     # repair=False: markdown carries no glyph artifacts, so PDF-tier hyphen/ligature repair could
@@ -432,6 +507,11 @@ def ingest_markdown(
                 "supersedes": reader.doc_id_list(doc.supersedes),
             },
         }
+        # ONLY WHEN THERE IS ONE TO NAME. `reconcile` hashes this block into its diff key, so a key
+        # written for every note would re-index every note already indexed, and re-indexing a
+        # note drops its vectors. A note that declares its spine writes the block it always did.
+        if defaulted:
+            run["spine"]["defaulted"] = list(defaulted)
         if vault is not None or tier is not None:
             run["provenance"] = {"vault": vault, "tier": tier}
         files["run.json"] = json.dumps(run, indent=2, ensure_ascii=False)

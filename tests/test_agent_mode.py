@@ -947,6 +947,36 @@ def test_a_snapshot_leaves_out_every_trace_of_a_call_by_default(tmp_path):
         "said only to a caller who asked for sources"
 
 
+def test_a_snapshot_counts_only_the_defaulted_notes_it_carries(tmp_path):
+    """A call that declares no status has a `spine_defaults` row under its doc_id. The row goes
+    with the call, so the snapshot names no call there and the agent's count is of its own notes."""
+    shared, registry = _sourced_scope(tmp_path)
+    with IndexStore(str(registry.parent / "demo.db")) as s:
+        s.db.executemany("INSERT INTO spine_defaults(doc_id, field) VALUES (?,?)",
+                         [("zqxjcallnote", "status"), ("zqxjcallnote", "doc_type"),
+                          ("decision", "doc_type")])
+        assert s.defaulted_counts() == {"status": 1, "doc_type": 2}
+    agent.publish("demo", shared, registry=registry)
+    assert b"zqxjcallnote" not in (shared / "demo.snapshot.db").read_bytes()
+    with IndexStore(str(shared / "demo.snapshot.db"), migrate=False, immutable=True) as snap:
+        assert [tuple(r) for r in snap.db.execute("SELECT doc_id, field FROM spine_defaults")] \
+            == [("decision", "doc_type")]
+        assert snap.defaulted_counts() == {"status": 0, "doc_type": 1}
+
+
+def test_a_change_to_the_defaulted_record_alone_republishes_the_snapshot(tmp_path):
+    """`reconcile` can put back a note's `spine_defaults` rows and move nothing else. The snapshot
+    must not keep the old count."""
+    shared, registry = _sourced_scope(tmp_path)
+    agent.publish("demo", shared, registry=registry)
+    assert not agent.publish("demo", shared, registry=registry).rewrote, "nothing changed"
+    with IndexStore(str(registry.parent / "demo.db")) as s:
+        s.set_defaulted("decision", ["status"])
+    assert agent.publish("demo", shared, registry=registry).rewrote, "the snapshot was kept"
+    with IndexStore(str(shared / "demo.snapshot.db"), migrate=False, immutable=True) as snap:
+        assert snap.defaulted_counts()["status"] == 1
+
+
 def test_include_sources_carries_the_calls_into_the_snapshot(tmp_path):
     shared, registry = _sourced_scope(tmp_path)
     (registry.parent / agent.CONFIG_FILENAME).write_text(

@@ -46,6 +46,18 @@ from substrate.models import Block, Document, Kind
 # reads it. `--- ` closes here, but Obsidian reads on past it: there the two still differ.
 _FRONTMATTER = re.compile(r"\A---\n(.*?)\n---[ \t]*(?:\n|\Z)", re.DOTALL)
 _UNCLOSED = re.compile(r"\A---\n(.*?)\n---", re.DOTALL)  # where the old rule closed it
+# YAML's indicator characters (YAML 1.2 §5.3): a plain scalar cannot start with one, because each
+# makes the line something other than a key: a list item, a flow collection, a comment, a tag, an
+# anchor or alias, a block scalar, a directive, a reserved character. The set is YAML's and closed,
+# so `plain_key` is an allowlist by YAML's own grammar rather than a list of shapes to refuse.
+_YAML_INDICATORS = frozenset("-?:,[]{}#&*!|>'\"%@`")
+# A frontmatter block with nothing in it, which the reader leaves in the body. Nothing can hide in it.
+_EMPTY_BLOCK = re.compile(r"\A---\n---[ \t]*(?:\n|\Z)")
+# Code points that render as nothing yet are none of Cf, Mn or Me: the Hangul fillers (Lo), and the
+# unassigned default-ignorable ranges (Cn), which a renderer also draws as nothing. With Cf, Mn and
+# Me they cover Unicode's Default_Ignorable_Code_Point property.
+_FILLERS = frozenset("\u115f\u1160\u3164\uffa0")
+_IGNORABLE_UNASSIGNED = ((0x2065, 0x2065), (0xFFF0, 0xFFF8), (0xE0000, 0xE0FFF))
 _PAGE = re.compile(r"^<!--\s*page:(\d+)\s*-->\s*$")
 _PAGE_ANCHOR = re.compile(r"<!--\s*page:\d+\s*-->")  # linear; strips anchors for coverage
 # Loose ATX match — closing-hash trimming is done in Python (a regex that trims it backtracks
@@ -177,13 +189,13 @@ def _parse_frontmatter(text: str, *, strict: bool = False,
 
 
 def _read_frontmatter(text: str, strict: bool = False, keys: frozenset[str] | None = None,
-                      ) -> tuple[dict[str, str], str, str | None]:
-    """`_parse_frontmatter`'s (front, body), and why a leading `---` block was read as body text,
-    from one scan."""
+                      ) -> tuple[dict[str, str], str, _Scan]:
+    """`_parse_frontmatter`'s (front, body), and the scan they came from (`scan.prose` says why a
+    leading `---` block was read as body text), from one scan."""
     pairs, end, scan = _frontmatter_scan(text, strict, READ_KEYS if keys is None else keys)
     if pairs is None:
-        return {}, text, scan.prose
-    return dict(pairs), text[end:], None
+        return {}, text, scan
+    return dict(pairs), text[end:], scan
 
 
 def normalized_text(data: bytes) -> str:
@@ -258,6 +270,7 @@ class _Scan:
     block: str = ""
     problems: tuple[tuple[str, str], ...] = ()  # (key, why) for each value left out of `pairs`
     prose: str | None = None  # a leading `---` block read as body text: why
+    flat: bool = False  # read by the line reader, not by YAML
 
 
 def _shown(text: str, cap: int = 60) -> str:
@@ -314,7 +327,7 @@ def _raw_scan(text: str) -> _Scan:
             return _yaml_scan(block, m.end())
         k, _, v = line.partition(":")
         pairs.append((k.strip(), v.strip()))
-    return _Scan(pairs, m.end(), block)
+    return _Scan(pairs, m.end(), block, flat=True)
 
 
 def _text(node) -> str | None:
@@ -394,8 +407,13 @@ def _yaml_scan(block: str, end: int) -> _Scan:
         return None
 
     for knode, vnode in root.value:
-        if not isinstance(knode, yaml.ScalarNode) or odd(knode):
+        if not isinstance(knode, yaml.ScalarNode):
             left_out("?", knode, "a key that is not plain text")
+            continue
+        if odd(knode):
+            # Under its own text, not `?`: YAML reads `!!str status:` as `status`, so a strict read
+            # refuses it as one of `READ_KEYS` it cannot take, and compose compares its spelling.
+            left_out(knode.value, knode, "a key written with a YAML tag or as an alias")
             continue
         key = knode.value
         if key in keys_seen:
@@ -620,6 +638,199 @@ def uncovered_content_blocks(
     return bad
 
 
+@dataclass(frozen=True)
+class OpeningBlock:
+    """What a file's opening shows, for compose to decide whether a default may stand in for it.
+
+    `opens`: the file's first visible line is a fence of three or more dashes (`_opens`). `keys`:
+    every key its frontmatter writes, with its `canonical_forms`, whether the reader read its value
+    or left it out (a YAML tag, an alias, a key written twice). `whole`: the reader took the block
+    as frontmatter, and every line of it the line reader took for a key is one YAML reads as a key
+    (`plain_key`). When a line is not plain, YAML must read the block as the same mapping, with the
+    same value for each key that decides the spine or class (`_yaml_disagrees`). A key nested
+    under another key does not stop a block being whole. `why`: when it is not whole, what stopped
+    it, if the reader can say.
+
+    THE FRONTMATTER BLOCK IS ALL IT LOOKS AT. The engine reads a note's spine and class from its
+    YAML frontmatter and nowhere else, so this judges that block and nothing below it: a
+    `key:: value` line in the body is body text, whatever Dataview or Logseq make of it."""
+    opens: bool
+    whole: bool
+    keys: tuple[tuple[str, frozenset[str]], ...]
+    why: str | None = None
+
+
+def _dash(ch: str) -> bool:
+    import unicodedata
+
+    return ch == "\u2212" or unicodedata.category(ch) == "Pd"
+
+
+def _opens(text: str) -> bool:
+    """Whether the first visible line of `text` is a fence of dashes, once white space and every
+    character that renders as nothing (`invisible`) are set aside: three or more `-`, or dashes of
+    which one is not ASCII, as smart punctuation makes of a typed `---` (`—-`, `—`, `–-`)."""
+    i = 0
+    while i < len(text) and invisible(text[i]):
+        i += 1
+    core = "".join(ch for ch in text[i:].split("\n", 1)[0] if not invisible(ch))
+    if not core or not all(_dash(ch) for ch in core):
+        return False
+    return len(core) >= 3 or not core.isascii()
+
+
+def invisible(ch: str) -> bool:
+    """Whether `ch` is white space or renders as nothing (`_FILLERS`, `_IGNORABLE_UNASSIGNED`)."""
+    import unicodedata
+
+    if ch.isspace() or ch in _FILLERS:
+        return True
+    cat = unicodedata.category(ch)
+    if cat in ("Cf", "Mn", "Me"):
+        return True
+    return cat == "Cn" and any(lo <= ord(ch) <= hi for lo, hi in _IGNORABLE_UNASSIGNED)
+
+
+def canonical_forms(key: str) -> frozenset[str]:
+    """`key`'s forms as compared with the keys the engine reads (`spine.EXACT_SPELLING`): a key is
+    one of them written another way when either form is that key's. The steps: one pair of
+    surrounding quotes, and characters that render as nothing at either end, removed; NFC; every
+    character that renders as nothing inside left out; letter case folded; each run of `-`, `_`
+    and white space made one `_`. One form also marks a word break where a lower-case letter meets
+    a capital (`docType`), and one does not (`cLASS`, `StaTus`), so a key typed in camelCase and
+    one typed with the wrong letters capitalised both count. `doctype`, Pandoc's `documentclass`
+    and Marp's `_class` keep forms of their own.
+
+    It catches the spellings people and editors write by mistake. It does not try to catch a key
+    built from letters of another script that look like Latin ones."""
+    import unicodedata
+
+    k = key.strip()
+    if len(k) >= 2 and k[0] == k[-1] and k[0] in "\"'":
+        k = k[1:-1]
+    k = unicodedata.normalize("NFC", k)
+    i, j = 0, len(k)
+    while i < j and invisible(k[i]):
+        i += 1
+    while j > i and invisible(k[j - 1]):
+        j -= 1
+
+    def form(camel: bool) -> str:
+        out: list[str] = []
+        prev = ""
+        for ch in k[i:j]:
+            if ch in "-_" or ch.isspace():
+                if not out or out[-1] != "_":
+                    out.append("_")
+                prev = ""
+                continue
+            if invisible(ch):
+                continue
+            if camel and prev.islower() and ch.isupper() and out[-1:] != ["_"]:
+                out.append("_")
+            out.append(ch.casefold())
+            prev = ch
+        return "".join(out)
+
+    return frozenset({form(True), form(False)})
+
+
+def plain_key(key: str) -> bool:
+    """Whether the line reader took `key` as YAML would take it: wrapped in one pair of matching
+    quotes, or a plain scalar. A plain scalar starts with no YAML indicator (`_YAML_INDICATORS`),
+    where `-`, `?` and `:` are indicators only before a space or nothing (so `-1` and `-x` are
+    keys, `- x` is a list item); it holds no ` #` (a comment); it is not the merge key `<<`. Any
+    script, spaces, hyphens, digits and punctuation inside a name are plain: `Date created`,
+    `related-notes`, `Rating (1-5)`, `автор`, `创建时间戳`."""
+    if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'":
+        return key[0] not in key[1:-1]
+    if not key or " #" in key or key == "<<":
+        return False
+    if key[0] in "-?:":
+        return len(key) > 1 and not key[1].isspace()
+    return key[0] not in _YAML_INDICATORS
+
+
+def opening_block(text: str, scan: _Scan | None = None) -> OpeningBlock:
+    """`text`'s `OpeningBlock`, from the reader's own scan (`scan`, when the caller has it): it
+    reads nothing the reader does not, and each key's `canonical_forms` are computed here, once."""
+    scan = _raw_scan(text) if scan is None else scan
+    if scan.pairs is None:
+        if _EMPTY_BLOCK.match(text):
+            return OpeningBlock(opens=True, whole=True, keys=())
+        return OpeningBlock(opens=_opens(text), whole=False, keys=(), why=scan.prose)
+    if not scan.flat:
+        every = [k for k, _ in scan.pairs] + [k for k, _ in scan.problems]
+        return OpeningBlock(opens=_opens(text), whole=True,
+                            keys=tuple((k, canonical_forms(k)) for k in dict.fromkeys(every)))
+    flat = [k for k, _ in scan.pairs]
+    plain = [k for k in flat if plain_key(k)]
+    not_plain = [k for k in flat if not plain_key(k)]
+    keys = list(dict.fromkeys(plain))
+    whole, why = True, None
+    twice = next((k for k in keys if k in READ_KEYS and flat.count(k) > 1), None)
+    if twice is not None:
+        # The line reader keeps the last value; YAML 1.2 and Obsidian refuse the block. Neither is
+        # a reading of what the note says.
+        whole, why = False, f"`{_shown(twice)}` is written more than once"
+    elif not_plain:
+        # A line that is not a key to the line reader may still be part of a mapping YAML reads: a
+        # list written without indenting it, `source:` above `- https://…`. The block counts as
+        # whole when YAML reads it as a mapping whose every key the line reader also took, leaves
+        # out no key the engine reads, and gives each key that decides a note's spine or class
+        # (`_SPINE_VALUES`) the value the line reader gave it. So the reader's frontmatter, which
+        # is what is indexed, says what YAML's does wherever the spine is concerned. Keys are
+        # compared without their quotes, as YAML gives them.
+        y = _yaml_scan(scan.block, scan.end)
+        why = _yaml_disagrees(scan, y, not_plain[0])
+        if why is None:
+            seen = [k for k, _ in y.pairs] + [k for k, _ in y.problems]
+            keys += [k for k in seen if k not in {_unquoted(k) for k in plain}]
+        else:
+            whole = False
+    return OpeningBlock(opens=_opens(text), whole=whole, why=why,
+                        keys=tuple((k, canonical_forms(k)) for k in keys))
+
+
+# The keys whose value decides a note's spine or class. The unindented-list fallback compares
+# these; another key the engine reads (`title`, `domains`) may read differently to YAML without
+# the note being taken for something it is not.
+_SPINE_VALUES = frozenset({"status", "doc_type", "class", "document_class", "superseded_by",
+                           "supersedes", "confidence"})
+
+
+def _spine_value(key: str, value: str) -> object:
+    """`value` as the engine reads it under `key`: a list of doc ids for `supersedes`, else the
+    decoded scalar."""
+    text = yaml_scalar.decode(value)
+    return doc_id_list(text) if key == "supersedes" else text
+
+
+def _yaml_disagrees(scan: _Scan, y: _Scan, first_not_plain: str) -> str | None:
+    """Why YAML's reading `y` of a flat block holding `first_not_plain` is not the line reader's
+    (`scan`), or None when they agree as `opening_block` requires."""
+    if y.pairs is None:
+        return (f"its line `{_shown(first_not_plain)}: …` is not a key, and YAML does not read "
+                "the block as frontmatter either")
+    flat = {_unquoted(k): v for k, v in scan.pairs if plain_key(k)}
+    for k in [k for k, _ in y.pairs] + [k for k, _ in y.problems]:
+        if k not in flat:
+            return f"YAML reads `{_shown(k)}` as a key, and the engine's reader does not"
+    for k, _ in y.problems:
+        if k in READ_KEYS:
+            return f"YAML cannot read the value of `{_shown(k)}` the way this block is written"
+    for k, v in y.pairs:
+        if k in _SPINE_VALUES and _spine_value(k, flat[k]) != _spine_value(k, v):
+            return (f"`{_shown(k)}` reads as `{_shown(yaml_scalar.decode(flat[k]))}` to the engine "
+                    f"and as `{_shown(yaml_scalar.decode(v))}` to YAML")
+    return None
+
+
+def _unquoted(key: str) -> str:
+    """`key` without one pair of matching quotes around it."""
+    return key[1:-1] if len(key) >= 2 and key[0] == key[-1] and key[0] in "\"'" else key
+
+
 def read_markdown(path: Path, doc_class: str | None = None, *,
                   strict: bool = True) -> tuple[Document, str, dict]:
     """Read a markdown file into a canonical Document. Returns (doc, body_md, reader_stats).
@@ -645,7 +856,8 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
 
     # `unread`: why a leading `---` block was read as body text, for ingest to name if the note is
     # then refused for a spine it shows written; popped there, never reported.
-    front, body_md, unread = _read_frontmatter(raw, strict=strict)
+    front, body_md, scan = _read_frontmatter(raw, strict=strict)
+    unread = scan.prose if scan.pairs is None else None
     blocks = _blocks(body_md)
     anchors = [b.page for b in blocks if b.page is not None]
 
@@ -658,7 +870,8 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
     # than carried, so a crafted link cannot smuggle in a value the reconcile/index keys on. The
     # reader stays a pure PARSER — it does not enforce "superseded requires a link" or "status is
     # one of the four"; that is spine.validate_status, called by the ingest paths (which decide how
-    # strict to be: the vault path requires status, a standalone ingest defaults it to active).
+    # strict to be: the vault write path requires status, compose and a standalone ingest default
+    # it to active).
     fraw = front.get("raw_sha256", "")
     fsup_by = front.get("superseded_by", "")
     fsup = front.get("supersedes", "")
@@ -700,7 +913,7 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
         supersedes=doc_id_list(fsup),
         domains=_parse_list(front.get("domains")),
         # doc_type (§6a) is carried raw like status; spine.validate_doc_type is the gate that
-        # refuses an unknown value or an absent one on the strict vault path. The reader stays a
+        # refuses an unknown value, or an absent one on the vault write path. The reader stays a
         # pure parser and does not decide strictness.
         doc_type=(front.get("doc_type") or None),
         # confidence likewise: parsed raw, gated by spine.validate_confidence. Absent stays None
@@ -727,5 +940,7 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
         "domains": list(doc.domains),
         "doc_type": doc.doc_type,
         "frontmatter_unread": unread,
+        # Popped by ingest like the line above, never reported.
+        "opening_block": opening_block(raw, scan),
     }
     return doc, body_md, stats

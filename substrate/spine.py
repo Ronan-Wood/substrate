@@ -6,11 +6,14 @@ the "green gates, silent loss" shape this project keeps hitting. This module is 
 check: a status outside the known set, or a `superseded` note with no link to what replaced it,
 is refused with the condition attached rather than indexed into a silently-wrong retrieval set.
 
-The reader stays a pure parser; strictness lives HERE and is chosen by the caller. The
-manifest-composition path requires status on every note (`require_present=True`) — a vault whose
-notes do not declare status is not honouring the contract. A standalone `ingest-md` of a single
-reference file defaults an absent status to `active` (`require_present=False`), so the existing
-PDF/markdown corpus, which predates the field, keeps ingesting unchanged.
+The reader stays a pure parser; strictness lives HERE and is chosen by the caller. Two callers
+default an absent status to `active` and an absent doc_type to `reference`
+(`require_present=False`): `compose`, so a vault of notes that declare neither still composes, and
+a standalone `ingest-md` of one file. On the compose path each note defaulted is recorded
+(`spine_defaults`) and counted by `substrate status`, so a note that joined the live retrieval set
+without declaring a status is reported there. The vault WRITE path (`notes.py`) still requires
+both (`require_present=True`): a note being written now has someone present to declare them. A
+DECLARED value outside the vocabulary is refused on every path.
 """
 
 from __future__ import annotations
@@ -52,6 +55,43 @@ DEFAULT_DOC_TYPE = "reference"
 # would be a second author for a vocabulary this module owns — the shape `cli._refresh_outcomes`
 # already refuses for the refresh outcomes.
 DIGEST_DOC_TYPE = "digest"
+
+# The spine fields `compose` fills with a default when a note declares none: `status` as `active`,
+# `doc_type` as `DEFAULT_DOC_TYPE`. `confidence` is not one of them: its absence is stored as its
+# own value, `unjudged`, so `by_confidence` already counts it. Compose records each default it
+# gives in the note's `run.json` (`spine.defaulted`) and in the index (`spine_defaults`), and
+# `substrate status` counts them.
+DEFAULTED_FIELDS: tuple[str, ...] = ("status", "doc_type")
+
+# EXACT SPELLING ONLY, and the one place that says so. The engine reads each of these keys under
+# this spelling and no other. What a key does whose `markdown.reader.canonical_forms` include one of
+# these but whose spelling is not (`Status`, `doc-type`, `"class"`, `superseded-by`) is decided
+# here and nowhere else: it REFUSES the note, naming the key as written and the spelling to use.
+# Not read: `Status: archived` would be indexed as live, `Class: conversation` as an ordinary
+# note retrieved by default and copied into agent snapshots. A vault that keeps a `Status` or
+# `Class` property of its own has those notes refused (engine issue #53 decides how such a vault
+# is served). Values are not part of this: they are compared exactly as written, as before.
+REFUSE = "refuse"
+EXACT_SPELLING: dict[str, str] = {
+    "status": REFUSE,
+    "doc_type": REFUSE,
+    "class": REFUSE,
+    "document_class": REFUSE,
+    "superseded_by": REFUSE,
+}
+# Refusing is the one thing a non-exact spelling does, and `markdown.ingest._judge_opening` does
+# nothing else with this table. A different action belongs there before it belongs here.
+assert set(EXACT_SPELLING.values()) == {REFUSE}, EXACT_SPELLING
+
+
+def defaulted_fields(value: object) -> list[str]:
+    """The `DEFAULTED_FIELDS` named in `value`, in that order. `value` is what a `run.json` holds
+    under `spine.defaulted`, which is JSON on disk a person may have edited: anything that is not a
+    list names none, and a name outside the vocabulary is left out."""
+    if not isinstance(value, list):
+        return []
+    return [f for f in DEFAULTED_FIELDS if f in value]
+
 
 # CONFIDENCE — how settled a note's claims are, and the axis `status` was silently absorbing.
 #
@@ -112,8 +152,10 @@ def validate_status(doc: Document, *, require_present: bool) -> str:
     Three ways a note misleads, each refused:
       * status declared but outside the known four — an unknown value would be silently EXCLUDED by
         the default filter (it is not in INCLUDED_STATUSES), reading as absence with no signal.
-      * status absent where the caller requires it (the vault path) — an undeclared note would
-        default to `active` and join the live surface without anyone having said it should.
+      * status absent where the caller requires it (the vault write path) — an undeclared note
+        would default to `active` and join the live surface without anyone having said it should.
+        Where the caller does not (`compose`, a standalone ingest), it IS `active`, and compose
+        records that it was defaulted (`spine_defaults`).
       * status `superseded` with no `superseded_by` — a dead fact excluded from retrieval AND with
         no pointer to the live one that replaced it: the history it exists to preserve is lost.
     """
@@ -143,16 +185,16 @@ def validate_doc_type(doc: Document, *, require_present: bool) -> str:
     """Enforce the Doc-2 §6a doc_type contract and return the effective doc_type. Raises on violation.
 
     Mirrors validate_status's two strictness modes (chosen by the caller, not the reader):
-      * doc_type absent where required (the vault path) — every note must DECLARE its job. Defaulting
-        it would defeat the point of the field: the split into decision/explanation/reference/how-to/
-        digest is what keeps a note readable, and a silent default hides a note that blends two jobs
-        (§6a rule 8). A reference source supplies `doc_type: reference` via its `_meta.md`, same as
-        status.
+      * doc_type absent where required (the vault write path) — a note being written must DECLARE
+        its job. Defaulting it there would defeat the point of the field: the split into decision/
+        explanation/reference/how-to/digest is what keeps a note readable, and a silent default
+        hides a note that blends two jobs (§6a rule 8). A reference source supplies
+        `doc_type: reference` via its `_meta.md`, same as status.
       * doc_type outside the known five — an unknown value is not a retrieval job the engine or a
         reader can act on; refuse it rather than carry a phantom axis value.
 
-    Absent-and-lenient (the standalone ingest of the existing reference corpus) returns the
-    `reference` default, so that corpus keeps ingesting unchanged.
+    Absent-and-lenient (`compose`, and the standalone ingest of the existing reference corpus)
+    returns the `reference` default. Compose records that it was defaulted (`spine_defaults`).
     """
     dt = doc.doc_type
     if dt is None:

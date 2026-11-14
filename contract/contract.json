@@ -376,6 +376,7 @@
       "by_vault",
       "composed",
       "db",
+      "defaulted",
       "documents",
       "drift",
       "entities",

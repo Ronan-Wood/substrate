@@ -24,6 +24,7 @@ from pathlib import Path
 from substrate.classes import UNCLASSIFIED_CLASS
 from substrate.markdown import reader
 from substrate.models import Chunk, Document
+from substrate.spine import defaulted_fields
 from substrate.store.index_store import IndexStore
 
 
@@ -129,6 +130,7 @@ def reconcile(store: IndexStore, out_root: Path) -> Report:
     """Bring the index in line with every ingested document under out_root."""
     rep = Report()
     seen: set[str] = set()
+    held = store.defaulted_by_doc()
 
     for d in sorted(p for p in out_root.iterdir() if p.is_dir()):
         loaded = _load_dir(d)
@@ -183,7 +185,14 @@ def reconcile(store: IndexStore, out_root: Path) -> Report:
             ))
         ).hexdigest()
         known = store.stage_hash(doc.doc_id, "index")
+        named = defaulted_fields(run.get("spine", {}).get("defaulted"))
         if known == content_sha:
+            # The diff key says the index holds this note as its `run.json` describes it, and an
+            # engine from before `spine_defaults` keeps that key true while dropping the note's rows
+            # there (its `index --rebuild` re-indexes the note and writes none). Put back here, or
+            # `status` would count the note as declared from then on.
+            if held.get(doc.doc_id, []) != named:
+                store.set_defaulted(doc.doc_id, named)
             rep.unchanged.append(doc.doc_id)
             continue
 
@@ -192,6 +201,7 @@ def reconcile(store: IndexStore, out_root: Path) -> Report:
             doc, chunks,
             markdown_path=md_path, markdown_mtime=mtime, markdown_sha256=markdown_sha256,
             coverage=run.get("coverage"),
+            defaulted=named,
         )
         rep.chunks += n
         # upsert commits the chunks BEFORE record_stage writes the ledger, so the ledger can

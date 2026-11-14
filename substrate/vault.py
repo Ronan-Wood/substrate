@@ -399,6 +399,26 @@ _META_KEYS: frozenset[str] = frozenset({"class", "document_class", "status", "do
                                         "domains", "version"})
 
 
+def source_meta_path(note_path: Path, vault_root: Path) -> Path | None:
+    """The `_meta.md` whose spine a passage inherits, or None: the source folder is the nearest
+    enclosing `passages/` folder's parent, found from the note's path INSIDE the vault, and the
+    file counts only when it is a file inside the vault. The one resolution, which `_source_meta`
+    reads and compose's ingest judges (`markdown.ingest._judge_opening`)."""
+    try:
+        rel_parts = note_path.relative_to(vault_root).parts
+    except ValueError:
+        return None
+    if "passages" not in rel_parts:
+        return None
+    src_dir = vault_root.joinpath(*rel_parts[: len(rel_parts) - 1 - rel_parts[::-1].index("passages")])
+    meta_file = src_dir / SOURCE_META
+    # Belt-and-braces: the slice above cannot escape, but an `_meta.md` outside the vault must never
+    # govern a note inside it, so assert the resolved path rather than trusting the arithmetic.
+    if not meta_file.is_file() or vault_root not in meta_file.parents:
+        return None
+    return meta_file
+
+
 def _source_meta(note_path: Path, vault_root: Path) -> dict:
     """`_meta.md` context for a reference passage: the `class`/`status`/`doc_type`/`confidence`/
     `domains` a passage under `<source>/passages/` inherits from its source. Empty for a note that
@@ -412,17 +432,8 @@ def _source_meta(note_path: Path, vault_root: Path) -> dict:
     exact way, for this exact reason. `rindex` rather than `index` so a nested `passages/…/passages/`
     resolves to the NEAREST enclosing source, not the outermost.
     """
-    try:
-        rel_parts = note_path.relative_to(vault_root).parts
-    except ValueError:
-        return {}
-    if "passages" not in rel_parts:
-        return {}
-    src_dir = vault_root.joinpath(*rel_parts[: len(rel_parts) - 1 - rel_parts[::-1].index("passages")])
-    meta_file = src_dir / SOURCE_META
-    # Belt-and-braces: the slice above cannot escape, but an `_meta.md` outside the vault must never
-    # govern a note inside it, so assert the resolved path rather than trusting the arithmetic.
-    if not meta_file.is_file() or vault_root not in meta_file.parents:
+    meta_file = source_meta_path(note_path, vault_root)
+    if meta_file is None:
         return {}
     # Strict over the fields read below: nothing ingests a `_meta.md` itself, so one of them the
     # reader cannot read must refuse here, or every passage under it loses it without a word.

@@ -30,6 +30,45 @@ Every release of the engine, newest first. The format follows
   `amend` of `log.md` works. `_meta.md` is still refused in every vault, whatever its list says.
   They now read the project vault's manifest, and write nothing while it doesn't parse or its
   `skip` is refused.
+- **A note with no `status` or no `doc_type` composes with the defaults.** It is indexed as
+  `active` and as `reference`, the defaults a standalone `ingest-md` already used. Before, one
+  such note failed the compose and froze its scope, so a vault of plain notes could not compose.
+  `substrate status --scope <name>` and the `status` tool report how many notes were defaulted on
+  each field, as `defaulted` (`{"status": n, "doc_type": n}`). It is `null` for an index
+  composed before this release, until its next compose. An empty value (`status:`) is read as no
+  value, as it always was. A declared value outside the vocabulary still fails the compose, as does
+  `superseded` with no `superseded_by`. The `ingest` and `amend` tools still require both fields.
+  The index schema stays at 11 and no index is rebuilt: the record is a table the next compose
+  adds.
+  - A default does not stand in for frontmatter the engine could not read. A note with no
+    `status` or no `doc_type` that starts with a `---` line the engine does not read as
+    frontmatter still fails the compose. That covers a byte-order mark or an invisible character
+    before it, fences that smart punctuation turned into `—-` or `—`, a block that never closes,
+    a line that is not a plain key (a flow mapping, a YAML tag or anchor), a key the engine reads
+    written twice, and a horizontal rule as the first line. An empty `---`/`---` block is empty
+    frontmatter and composes, and so does a list written without indenting it when YAML reads the
+    block as the same mapping, with the same value for each key that decides the spine or class.
+    The same holds for a passage's `_meta.md`.
+  - **Frontmatter only.** The engine reads a note's spine and class only from its YAML
+    frontmatter. A `key:: value` line in the body is body text, whatever Dataview or Logseq make
+    of it, so a note that declares its class only that way is `unclassified`.
+  - **Exact spelling only.** The engine reads `status`, `doc_type`, `class`, `document_class` and
+    `superseded_by` under exactly those names. A note that writes one of them another way
+    (`Status:`, `doc-type:`, `docType:`, `"class":`, `superseded-by:`, or with an invisible
+    character) fails
+    the compose, naming the note, the key as written and the spelling to use, whatever else it
+    declares. `Status: archived` is never indexed as live, and `Class: conversation` never as an
+    ordinary note. A vault that keeps a `Status` or `Class` property of its own has those notes
+    refused; issue #53 decides how such a vault is served. Keys of their own such as Pandoc's
+    `documentclass`, Marp's `_class` and `doctype` are not taken for spellings, and compose.
+    Values are unchanged: they are compared exactly as written.
+  - A YAML tag or alias on a key the engine reads, in a block read as YAML, is now refused by
+    name. Before, the key was left out without a word.
+  - A key under another key is not the note's, and does not stop it composing.
+  - **Withholding follows the class a note declares, never its folder.** A note with no
+    frontmatter under `_sources/` used to freeze its scope. It now composes as `unclassified`
+    and `active`, is retrieved by default, and is copied into agent snapshots. Declare
+    `class: conversation` on a transcript before it goes into a vault.
 
 ### Fixed
 

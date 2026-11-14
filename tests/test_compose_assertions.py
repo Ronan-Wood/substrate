@@ -41,7 +41,7 @@ def _note(dir_: Path, name: str, body: str, *, status: str = "active",
 
 def _ingest(tmp: Path, note: Path) -> Path:
     out = tmp / "ingest" / note.stem
-    ingest_markdown(note, out, require_status=True)
+    ingest_markdown(note, out)   # as compose calls it
     return out
 
 

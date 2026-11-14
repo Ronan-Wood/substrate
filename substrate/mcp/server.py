@@ -535,7 +535,11 @@ TOOLS = [
             "`refresh` is the same block `search` returns — what the background job last managed "
             "on this scope. Read it WITH `drift`, not instead of it: `drift.stale` with "
             "`refresh.frozen` is an index whose rebuild refused, while `drift.stale` with a clean "
-            "refresh is only an edit made since the last pass."
+            "refresh is only an edit made since the last pass.\n\n"
+            "`defaulted` counts the notes that declare no `status` (indexed as `active`) and the "
+            "notes that declare no `doc_type` (indexed as `reference`). They are inside the "
+            "counts by status and doc_type, where nothing tells them from notes that declared "
+            "it. Null means this index keeps no count yet, not zero."
         ),
         "inputSchema": {
             "type": "object",

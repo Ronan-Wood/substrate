@@ -43,8 +43,8 @@ settledness (`proposed`, `draft`, `design-agreed-unbuilt`) belong on `confidence
 ### `superseded-by` vs `superseded_by`
 
 Vaults commonly write **`superseded-by:`**. The engine reads **`superseded_by:`**
-(`reader.py`). The hyphenated key is silently ignored, so a `status: superseded` note refuses at
-compose with *"superseded with no superseded_by"* while visibly carrying one. Two edits, not one:
+(`reader.py`) and no other spelling: the hyphenated key refuses the note at compose, naming
+`superseded-by` and the spelling to write. Two edits, not one:
 rename the key, **and** replace a `[[wikilink]]` value with the target's `doc_id`, because
 `_DOC_ID` rejects brackets, spaces and uppercase.
 

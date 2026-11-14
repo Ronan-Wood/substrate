@@ -163,11 +163,14 @@ def test_a_value_the_reader_cannot_read_under_a_read_key_is_refused_by_key_and_l
     assert "no status" not in str(e.value)
 
 
+@pytest.mark.parametrize("require_status", [False, True], ids=["compose", "the write path"])
 @pytest.mark.parametrize("shape, key, line", UNREADABLE)
-def test_compose_s_ingest_names_the_shape_not_a_missing_status(tmp_path, shape, key, line):
+def test_compose_s_ingest_names_the_shape_not_a_missing_status(tmp_path, shape, key, line,
+                                                               require_status):
     """Fails before: compose refused these notes with "no status", which named nothing."""
     with pytest.raises(ValueError) as e:
-        ingest_markdown(_note(tmp_path, _with(shape)), tmp_path / "out", require_status=True)
+        ingest_markdown(_note(tmp_path, _with(shape)), tmp_path / "out",
+                        require_status=require_status)
     assert f"`{key}`" in str(e.value) and f"line {line}" in str(e.value)
     assert "no status" not in str(e.value)
 

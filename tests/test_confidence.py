@@ -163,7 +163,7 @@ def test_confidence_is_optional_on_the_compose_path() -> None:
     unattended refresh tick, so the gate lives on the write path only (test below)."""
     tmp = Path(tempfile.mkdtemp())
     note = _note(tmp, "a.md", "status: active\ndoc_type: reference")
-    r = ingest_markdown(note, tmp / "out", require_status=True)
+    r = ingest_markdown(note, tmp / "out")   # as compose calls it
     assert r.confidence == UNJUDGED_CONFIDENCE, r.confidence
     assert r.run["spine"]["confidence"] == UNJUDGED_CONFIDENCE
 
@@ -175,7 +175,7 @@ def test_require_confidence_gates_only_when_asked() -> None:
     tmp = Path(tempfile.mkdtemp())
     body = "status: active\ndoc_type: reference"
 
-    lenient = ingest_markdown(_note(tmp, "l.md", body), tmp / "outl", require_status=True)
+    lenient = ingest_markdown(_note(tmp, "l.md", body), tmp / "outl")   # as compose calls it
     assert lenient.confidence == UNJUDGED_CONFIDENCE
 
     try:

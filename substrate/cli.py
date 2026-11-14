@@ -250,7 +250,7 @@ def _ingest_markdown_file(args: argparse.Namespace, src: Path, spec) -> int:
     / none). The spine gates therefore have nothing to refuse here — they are not lenient, they are
     inapplicable, and the file that reaches them is not the one that made the claim. `compose` is
     where a declaration is believed, because there the operator wrote it into their own vault, and
-    that is the path the gates run on (`require_status`). The three axes an ingested source needs
+    that is the path the gates run on. The three axes an ingested source needs
     are supplied afterwards by the `_meta.md` beside it — the channel the Library already uses.
 
     Plain text rides the SAME reader, with one difference carried in the `SourceOrigin`: a `.txt`
@@ -1209,13 +1209,16 @@ def cmd_compose(args: argparse.Namespace) -> int:
     """Resolve a project vault's manifest, ingest the composed note set, index it, and PROVE the
     composition — the inheritance mechanism end to end (Doc 2 §1–2, §6).
 
-    Strict where a single-file ingest is lenient: every note must declare a status and a doc_type
-    (require_status=True), and the whole scope is refused if ANY note fails to ingest — a partially
-    composed scope is a silently-wrong retrieval set. Confidence stays optional on this path
-    (absent → `unjudged`), because a forced settledness marker is a guessed one and this path must
-    keep accepting a migrated corpus that is 530/657 unjudged. The vault WRITE path (`notes.py`) is
-    stricter and requires it — the one place a gate here is looser than the gate upstream of it,
-    because that is what let the gate ship without freezing six scopes at the next refresh tick.
+    The whole scope is refused if ANY note fails to ingest — a partially composed scope is a
+    silently-wrong retrieval set. A note that declares no status composes as `active`, and one that
+    declares no doc_type as `reference`, so a vault of plain notes composes; each is recorded as
+    defaulted (`spine.DEFAULTED_FIELDS`) and `substrate status` counts them, which is what keeps an
+    undeclared note from joining the live retrieval set unnoticed. A DECLARED value outside the
+    vocabulary still refuses, and so does a note a default must not stand in for
+    (`markdown.ingest._judge_opening`). Confidence is optional on this path too (absent → `unjudged`),
+    because a forced settledness marker is a guessed one and this path must keep accepting a
+    migrated corpus that is 530/657 unjudged. The vault WRITE path (`notes.py`) is stricter and
+    requires all three: a note being written now has someone present to declare them.
 
     Five assertions run, so a green run is a proof rather than a hope:
 
@@ -1343,18 +1346,20 @@ def cmd_compose(args: argparse.Namespace) -> int:
     ingested: set[str] = set()
     ingest_dirs: list[tuple[Path, Path]] = []   # (note path, its ingest dir) for the A22 sweep
     failures: list[tuple[Path, str]] = []
+    roots = {v.name: v.path for v in scope.vaults}
     for n in scope.notes:
         # A per-note out dir: vault + filename stem + a short path hash, so two same-named files
         # (e.g. each source's passages/00-*.md) never collide on one ingest directory.
         out_dir = index_root / private.ingest_dir_name(n.vault, n.path)
         try:
             r = ingest_markdown(
-                n.path, out_dir, doc_class=n.doc_class, require_status=True,
+                n.path, out_dir, doc_class=n.doc_class,
                 override_status=n.override_status, override_doc_type=n.override_doc_type,
                 override_confidence=n.override_confidence,
                 raw=n.raw, raw_sha256=n.raw_sha256, raw_location=n.raw_location,
                 override_version=n.override_version,
-                extra_domains=n.extra_domains, vault=n.vault, tier=n.tier,
+                extra_domains=n.extra_domains, vault=n.vault, vault_root=roots.get(n.vault),
+                tier=n.tier,
             )
         except (ValueError, classes.ClassPolicyError, SpineError, CoverageError) as e:
             failures.append((n.path, f"{type(e).__name__}: {e}"))
@@ -1822,6 +1827,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"  by vault {payload['by_vault']} · by tier {payload['by_tier']}")
     print(f"  by status {payload['by_status']} · by doc_type {payload['by_doc_type']}")
     print(f"  by confidence {payload['by_confidence']}")
+    # Its own line, and said when it is zero: these notes are in `by status` and `by doc_type`
+    # above as `active` and `reference`, where nothing tells them from notes that declared it.
+    dflt = payload["defaulted"]
+    if dflt is None:
+        print("  defaulted: NOT COUNTED — this index was composed before the engine kept the "
+              "count; the next `substrate compose` keeps it")
+    else:
+        print(f"  defaulted: {dflt['status']} note(s) declare no status (indexed as active) · "
+              f"{dflt['doc_type']} declare no doc_type (indexed as reference)")
     v = payload["vectors"]
     if v is None:
         # "Not asked for" and "asked for, could not start" are the SAME None here, and stating the

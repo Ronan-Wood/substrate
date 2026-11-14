@@ -143,7 +143,8 @@ def test_a_refused_compose_still_seals_the_index() -> None:
 
     assert compose() == 0
     _loosen(*_index(db, ir))
-    (root / "demo-vault" / "no-status.md").write_text("# No status\n\nA note with no spine.\n")
+    (root / "demo-vault" / "bad-status.md").write_text(
+        "---\nstatus: someday\n---\n\n# Bad status\n\nA status outside the vocabulary.\n")
     assert compose() == 3, "the fixture must make compose refuse"
     loose = _loose(*_index(db, ir))
     assert not loose, f"a refused compose left the index readable: {loose[:5]}"
