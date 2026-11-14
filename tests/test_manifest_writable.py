@@ -628,9 +628,17 @@ def test_amend_compares_passages_and_skipped_names_as_compose_does(root: Path) -
     assert _amend(v, "Notes/Passages/n.md") == v / "Notes" / "Passages" / "n.md"
 
 
-def test_an_existing_decomposed_twin_of_a_declared_folder_is_not_declared(root: Path) -> None:
+@pytest.mark.parametrize("listing", ["volume", "faked"])
+def test_an_existing_decomposed_twin_of_a_declared_folder_is_not_declared(
+        root: Path, listing: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """On a volume that keeps NFC and NFD names apart, `Cafe\u0301/` beside a declared `Caf\u00e9/` is
-    another folder, and compared in NFC it passed as the declared one (adversary, 2026-11-13)."""
+    another folder, and compared in NFC it passed as the declared one (adversary, 2026-11-13).
+
+    `covers` compares the caller's folder exactly, before the walk, so the rule holds on any
+    volume. Where the volume can't hold both names (APFS), `faked` lists the twin to the walk,
+    which is all the walk can see of one; `volume` there asserts the declaration refuses the
+    NFD spelling before the walk's spelling check is reached. Neither branch skips: the docling
+    job on macOS fails on any skip."""
     import unicodedata
 
     v = _vault(root, '["Caf\u00e9"]')
@@ -638,11 +646,28 @@ def test_an_existing_decomposed_twin_of_a_declared_folder_is_not_declared(root: 
     nfd = unicodedata.normalize("NFD", "Caf\u00e9")
     try:
         (v / nfd).mkdir()
+        twin = True
     except FileExistsError:
-        pytest.skip("this volume does not keep NFC and NFD names apart")
+        twin = False
+    if listing == "faked" and not twin:
+        real_listdir = os.listdir
+
+        def listdir(path=".", /):
+            names = real_listdir(path)
+            return [*names, nfd] if "Caf\u00e9" in names and nfd not in names else names
+        monkeypatch.setattr(notes.os, "listdir", listdir)
+    walked: list[tuple[str, ...]] = []
+    real_walk = notes._walk_folder
+
+    def walk(r, parts, **kw):
+        walked.append(parts)
+        return real_walk(r, parts, **kw)
+    monkeypatch.setattr(notes, "_walk_folder", walk)
+
     said = _refusal(lambda: _write(v, nfd))
     assert "not in a writable folder" in said, said
-    assert not list((v / nfd).iterdir())
+    assert (nfd,) not in walked, walked
+    assert not list((v / nfd).iterdir()) and not list((v / "Caf\u00e9").iterdir())
 
 
 # ---------------------------------------------------------------- an inherited vault inside the project vault
