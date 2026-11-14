@@ -179,7 +179,8 @@ _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 # test keeps the two in step. `reference_pins` is the only table, and its keys are the operator's
 # reference names, so no table has a fixed schema to hold unknown keys against.
 TOP_LEVEL_KEYS: frozenset[str] = frozenset(
-    {"name", "inherits", "reference_domains", "reference_pins", "identity", "skip"})
+    {"name", "inherits", "reference_domains", "reference_pins", "identity", "skip",
+     "writable_folders"})
 
 
 def misplaced_keys(manifest: dict) -> list[tuple[str, str]]:
@@ -330,17 +331,112 @@ def skip_list(vault_dir: Path) -> SkipList:
     still says what it skips. A manifest that cannot be read or parsed, or a `skip` that is
     misplaced or malformed, makes the list unknowable, and that raises VaultError.
     """
+    read = _own_key(vault_dir, "skip", "what the vault skips")
+    if read is None:
+        return DEFAULT_SKIP
+    path, manifest = read
+    return _declared_skip(manifest, path)
+
+
+def folder_fault(entry: str) -> str | None:
+    """Why `entry` is not a folder path relative to a vault, as the write path takes one, or None.
+
+    `/` separates folders, and the vault root is `.`, written alone. Refused: empty; absolute; a
+    NUL or a `\\` (a separator elsewhere, so far likelier a slip than a name); a separator at the
+    end or doubled; `.` or `..` as a component; a hidden component; a component with white space at
+    either end, refused as `skip` refuses one (`_not_a_name`); a component ending in `.md`, which
+    compose's walk would take for a note and fail to read, refusing the scope. Nothing is
+    normalised, so the folder checked is the folder written.
+    """
+    if entry == ".":
+        return None
+    if not entry:
+        return "is empty"
+    if "\0" in entry or "\\" in entry:
+        return "holds a NUL or a `\\`; folders are separated by `/`"
+    if entry.startswith("/"):
+        return "is absolute; it is relative to the vault"
+    if entry.endswith("/") or "//" in entry:
+        return "ends with `/` or doubles one"
+    parts = entry.split("/")
+    if any(p in (".", "..") for p in parts):
+        return "names `.` or `..` as a folder (the vault root is `.` alone)"
+    if any(p.startswith(".") for p in parts):
+        return "names a hidden folder, which is never a note's"
+    if any(p != p.strip() for p in parts):
+        return "has white space at either end of a folder name"
+    if any(folded(p).endswith(".md") for p in parts):
+        return "names a folder ending in `.md`, which compose would read as a note"
+    return None
+
+
+def folder_parts(entry: str) -> tuple[str, ...]:
+    """The components of a folder path `folder_fault` accepts; `()` for the root, `.`."""
+    return () if entry == "." else tuple(entry.split("/"))
+
+
+def _own_key(vault_dir: Path, key: str, what: str) -> tuple[Path, dict] | None:
+    """(manifest path, parsed manifest) for a reader of ONE key, or None when the vault has no
+    manifest. Refuses, as VaultError, a manifest that cannot be read or parsed (`what` says what
+    that leaves unknown) and a `key` swallowed into a table. The other keys are not validated: a
+    fault elsewhere in the manifest does not change what this key says."""
     path = vault_dir / MANIFEST
     if not path.is_file():
-        return DEFAULT_SKIP
+        return None
     try:
         manifest = tomllib.loads(_read_capped(path))
     except (tomllib.TOMLDecodeError, RecursionError, ValueError) as e:
-        raise VaultError(f"cannot parse {path}, so what the vault skips is unknown: {e}") from e
-    swallowed = [(k, t) for k, t in misplaced_keys(manifest) if k == "skip"]
+        raise VaultError(f"cannot parse {path}, so {what} is unknown: {e}") from e
+    swallowed = [(k, t) for k, t in misplaced_keys(manifest) if k == key]
     if swallowed:
         raise VaultError(misplaced_refusal(path, swallowed))
-    return _declared_skip(manifest, path)
+    return path, manifest
+
+
+def writable_folders(vault_dir: Path, skip: SkipList) -> tuple[tuple[str, ...], ...] | None:
+    """The folders a vault's OWN manifest declares writable (`writable_folders`), each as its
+    components (`()` is the root, `.`) as written, or None when it declares none. Read for the write
+    path only:
+    compose indexes the same notes whatever it says. `skip` is the vault's own list in effect.
+
+    ONLY `writable_folders` IS READ (`_own_key`). A declaration the engine cannot apply raises
+    VaultError, naming entries by position: no manifest at all; not a list of strings; an entry
+    `folder_fault` refuses;
+    or one `skip` skips, where a note would never be indexed. Whether each entry exists on disk is
+    the write path's to check, the way it reaches folders (`notes._writable`).
+    """
+    read = _own_key(vault_dir, "writable_folders", "where a note may be written")
+    if read is None:
+        # A registered scope's project vault has a manifest. Without one (moved, or mid-save in an
+        # editor that unlinks first) nothing says where a write may go, and None would widen a
+        # declared list to the default. Decided on this one read, not a check before it.
+        raise VaultError(f"{vault_dir} has no {MANIFEST}, so where a note may be written is "
+                         f"unknown.")
+    if "writable_folders" not in read[1]:
+        return None
+    path, declared = read[0], read[1]["writable_folders"]
+    what = "'writable_folders' must be a top-level list of folder paths relative to the vault"
+    if not isinstance(declared, list):
+        raise VaultError(f"{path}: {what}; it is a {type(declared).__name__}.")
+    not_strings = [i for i, x in enumerate(declared, 1) if not isinstance(x, str)]
+    if not_strings:
+        raise VaultError(f"{path}: {what}; entries {not_strings} (counting from 1) are not "
+                         f"strings.")
+    malformed = [i for i, x in enumerate(declared, 1) if folder_fault(x)]
+    if malformed:
+        raise VaultError(
+            f"{path}: 'writable_folders' entries {malformed} (counting from 1) are not folder "
+            f"paths. Each is relative to the vault, with `/` between folders and `.` alone for the "
+            f"root: never empty or absolute, no `..`, `.` or hidden folder, no `\\` or NUL, no "
+            f"`/` at the end or doubled, no white space at either end of a name, and no folder "
+            f"ending in `.md`.")
+    folders = tuple(folder_parts(x) for x in declared)
+    skipped = [i for i, parts in enumerate(folders, 1) if skip.skips_folder(parts)]
+    if skipped:
+        raise VaultError(
+            f"{path}: 'writable_folders' entries {skipped} (counting from 1) are under a folder "
+            f"the vault's skip list skips, so a note written there would never be indexed.")
+    return folders
 
 
 def _resolve_inherit(entry: str, project_dir: Path) -> Path:
@@ -386,7 +482,13 @@ def is_source_meta(name: str) -> bool:
     a volume that ignores case serves `_META.md` to `_source_meta`'s open of `_meta.md`, and
     without the code points HFS+ ignores in a name, which it serves the same way. Folded on every
     platform, so the write path's refusal is one rule wherever the vault lives."""
-    return _nfc(name).translate(_HFS_IGNORED).casefold() == SOURCE_META.casefold()
+    return folded(name) == folded(SOURCE_META)
+
+
+def folded(name: str) -> str:
+    """A name as a volume that ignores case compares it: NFC, without the code points HFS+ leaves
+    out of a name, and case folded. For a refusal that must hold wherever the vault lives."""
+    return _nfc(name).translate(_HFS_IGNORED).casefold()
 
 
 # The code points HFS+ leaves out when it compares two names, as git lists them for `.git`.
@@ -569,6 +671,33 @@ def resolve_vaults(project_vault: Path) -> tuple[VaultRef, ...]:
 
     visit(project_vault, ())
     return tuple(ordered)
+
+
+def inherited_entries(project_vault: Path) -> list[tuple[Path, str, Path]]:
+    """Every vault the chain names, whether or not it exists: (the manifest naming it, the entry as
+    written, the path it resolves to as `_resolve_inherit` resolves it). For PROTECTION only, as
+    `chain_best_effort` is, and built on it: the manifests read are those of the vaults it reaches,
+    and its refusals (a manifest that cannot be read, an `inherits` that is not a list) are its."""
+    found: list[tuple[Path, str, Path]] = []
+    for vault_dir in chain_best_effort(project_vault):
+        manifest = vault_dir / MANIFEST
+        if not manifest.is_file():
+            continue
+        try:
+            data = tomllib.loads(_read_capped(manifest))
+        except (tomllib.TOMLDecodeError, RecursionError, ValueError, VaultError):
+            continue  # changed since `chain_best_effort` read it; that read is what refuses
+        inherits = data.get("inherits", [])
+        for entry in inherits if isinstance(inherits, list) else []:
+            if isinstance(entry, str) and entry:
+                try:
+                    p = Path(entry).expanduser()
+                except (RuntimeError, ValueError) as e:
+                    # Skipped, an entry could name a vault inside the project vault unseen.
+                    raise VaultError(f"{manifest}: `inherits` entry {entry!r} does not resolve "
+                                     f"({e}).") from e
+                found.append((manifest, entry, p if p.is_absolute() else vault_dir.parent / entry))
+    return found
 
 
 def chain_best_effort(project_vault: Path) -> tuple[Path, ...]:

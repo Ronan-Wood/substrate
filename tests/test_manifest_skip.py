@@ -30,6 +30,9 @@ from substrate import freshness, notes, prune, refresh  # noqa: E402
 from substrate import vault as V  # noqa: E402
 from substrate.store.index_store import IndexStore  # noqa: E402
 
+# Doc 2 §4's project skeleton, the folders the demo layout writes notes to.
+DOC2_FOLDERS = ("02-areas", "03-references", "04-synthesis")
+
 DEFAULT_NAMES = ("_meta.md", "structure.md", "MEMORY.md", "log.md", "WRITING.md", "99-templates")
 SPINE = "---\nstatus: active\ndoc_type: reference\nconfidence: proposed\n---\n"
 
@@ -301,7 +304,7 @@ GOOD = (SPINE.replace("---\n", "---\ndomains: [retrieval]\n", 1)
 
 def _writable(root: Path, skip: str | None) -> Path:
     v = _vault(root, skip)
-    for folder in notes.WRITABLE_FOLDERS:
+    for folder in DOC2_FOLDERS:
         (v / folder).mkdir(exist_ok=True)
     return v
 
@@ -361,11 +364,11 @@ def test_a_source_s_meta_is_never_written_whatever_the_list_says(root: Path, ski
 
     said = _note_refusal(lambda: _amend(v, "03-references/src/_meta.md", book))
     assert "'03-references/src/_meta.md'" in said and "whatever the vault's `skip`" in said, said
-    for folder in notes.WRITABLE_FOLDERS:
+    for folder in DOC2_FOLDERS:
         said = _note_refusal(lambda folder=folder: _plan(v, "_meta.md", folder=folder))
         assert "'_meta.md'" in said and "whatever the vault's `skip`" in said, said
     assert meta.read_bytes() == GOOD and not book._issued
-    assert not any((v / f / "_meta.md").exists() for f in notes.WRITABLE_FOLDERS)
+    assert not any((v / f / "_meta.md").exists() for f in DOC2_FOLDERS)
 
 
 @pytest.mark.parametrize("skip", [None, "[]"])

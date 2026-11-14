@@ -46,9 +46,10 @@ What the model server on loopback does with a request is up to that server, so u
 
 The write tools are `ingest` and `amend`. `ingest` adds a note from the text it is given, and
 `amend` overwrites an existing note. `ingest` reads no file, and `amend` reads only the note at
-`path`, inside the project vault's writable folders. Both refuse `source_path`, and the
-`--connect` bridge refuses it for `ingest` before forwarding, because a model's arguments can be
-steered by content it just read. A read-only server leaves both out of its tool list. A client
+`path`, inside the project vault's writable folders: its manifest's `writable_folders`, or any
+folder compose doesn't skip when it declares none ([`configuration.md`](configuration.md)). Both
+refuse `source_path`, and the `--connect` bridge refuses it for `ingest` before forwarding, because
+a model's arguments can be steered by content it just read. A read-only server leaves both out of its tool list. A client
 that can read a file itself can still pass that file's text as a note, so give write access only
 to a client whose own file access you trust that far. `substrate ingest <file>` on the command
 line still takes a path, since there you typed it.

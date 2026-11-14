@@ -49,17 +49,21 @@ import os
 import secrets
 import shutil
 import tempfile
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from substrate.vault import MANIFEST, SOURCE_META, SkipList, VaultError, is_source_meta, skip_list
+from substrate.vault import (
+    MANIFEST, SOURCE_META, SkipList, VaultError, _tier_for, folded,
+    folder_fault, folder_parts, inherited_entries, is_source_meta, skip_list,
+    writable_folders,
+)
 from substrate import writelog
 from substrate.writelog import WriteLogError
 
-# Doc 2 §4's project skeleton. A note lands in one of these, and `04-synthesis` is the default
-# because that is the folder the spec designates for model-entered synthesis notes.
-WRITABLE_FOLDERS = ("02-areas", "03-references", "04-synthesis")
+# Where `ingest` writes when the caller names no folder: Doc 2 §4 designates it for model-entered
+# synthesis notes. Like any other folder it must be writable in the vault (`_writable`).
 DEFAULT_FOLDER = "04-synthesis"
 
 
@@ -173,56 +177,430 @@ def _source_meta_refusal(what: str) -> NoteError:
     )
 
 
-def _resolve_target(project_vault: Path, folder: str, filename: str) -> Path:
+@dataclass(frozen=True)
+class Writable:
+    """The folders a write may go to in one project vault, each as its components (`()` is the
+    vault root), with every folder below each, less any top-level folder in `excluded` (folded
+    names, `vault.folded`). `declared` says whether the vault's manifest named them
+    (`writable_folders`) or they are the default (`_default_writable`).
+
+    "Below" holds for `amend` as it always did (a note anywhere under `02-areas/` was amendable)
+    and now for `ingest` too, so one rule says where a note may be added and where it may be
+    changed. What else a write must pass (hidden folders, the skip list, `passages/`, symlinks) is
+    checked beside this, not by it."""
+
+    folders: tuple[tuple[str, ...], ...]
+    declared: bool
+    excluded: frozenset[str] = frozenset()
+
+    def excluding(self, parts: tuple[str, ...]) -> str | None:
+        """The excluded top-level folder `parts` is under, as the caller spelled it, or None."""
+        return parts[0] if parts and folded(parts[0]) in self.excluded else None
+
+    def covers(self, parts: tuple[str, ...]) -> bool:
+        # Exactly, as the walk compares: a declared folder exists spelled as written
+        # (`_writable`), and on a volume that keeps NFC and NFD names apart an NFD twin beside
+        # it is another folder, which the declaration does not name.
+        if self.excluding(parts):
+            return False
+        return any(parts[:len(f)] == f for f in self.folders)
+
+    def shown(self) -> list[str]:
+        return ["/".join(f) or "." for f in self.folders]
+
+
+# THE TWO FOLDERS THE DEFAULT LEAVES OUT, at the top of the vault. Before `writable_folders`
+# existed the write path took only `02-areas`, `03-references` and `04-synthesis`, and that list was
+# the only thing keeping a client out of these two: `_sources/` holds what was said, call
+# transcripts among it, where only a class-frozen call was protected otherwise, and `_archive/` the
+# record of what was filed away. A vault opts them in by declaring them, since a declaration
+# replaces the default. Compared folded (`vault.folded`), not exactly as `skip` compares: on a
+# volume that ignores case a client's `_SOURCES/` would otherwise be created as, and from then on
+# be, the folder a later `_sources/call.md` is written into. Owner decision, 2026-11-13.
+DEFAULT_UNWRITABLE: frozenset[str] = frozenset({"_sources", "_archive"})
+
+
+def _default_writable(root: Path, skip: SkipList) -> Writable:
+    """Where a write may go in a vault whose manifest declares no `writable_folders`: any folder
+    compose does not skip, the root included, except the top-level `DEFAULT_UNWRITABLE`. Skipped
+    and hidden folders are refused beside this, for every vault. The one place the default is
+    decided."""
+    return Writable(folders=((),), declared=False,
+                    excluded=frozenset(folded(n) for n in DEFAULT_UNWRITABLE))
+
+
+def _writable(root: Path, skip: SkipList) -> Writable:
+    """The project vault's writable folders: its manifest's `writable_folders`, else the default.
+    Read on every plan and commit, as the skip list is. A declaration the engine cannot apply
+    writes nothing, and its fault is passed on: the list is not confidential, and the refusal
+    names entries by position only.
+
+    A declared folder must exist as the write path reaches it (`_walk_folder`: no link followed,
+    each name spelled as it is on disk), and is never created: the owner wrote it down as there."""
+    try:
+        declared = writable_folders(root, skip)
+    except VaultError as e:
+        raise NoteError(f"{e} Nothing is written until it does.") from e
+    if declared is None:
+        return _default_writable(root, skip)
+    missing = []
+    for i, parts in enumerate(declared, 1):
+        try:
+            fd = _walk_folder(root, parts, create=False)
+        except NoteError:
+            fd = None
+        if fd is None:
+            missing.append(i)
+        else:
+            os.close(fd)
+    if missing:
+        raise NoteError(
+            f"{root / MANIFEST}: 'writable_folders' entries {missing} (counting from 1) are not "
+            f"folders in the vault: each must exist, be reached through no symlink, and be spelled "
+            f"as it is on disk. A declared folder is not created. Nothing is written until it does.")
+    return Writable(folders=declared, declared=True)
+
+
+def _not_writable(what: str, writable: Writable, parts: tuple[str, ...]) -> NoteError:
+    if (top := writable.excluding(parts)) is not None:
+        return NoteError(
+            f"{what} is under {top + '/'!r}, which a vault that declares no `writable_folders` "
+            f"keeps unwritable, as it was before the manifest could say so. A declaration opens "
+            f"it: list it in `writable_folders` in the vault's {MANIFEST}. A declaration replaces "
+            f"the default, so list every folder that should take a write."
+        )
+    said = (f"Its {MANIFEST} declares `writable_folders` = {writable.shown()}" if writable.declared
+            else f"Its {MANIFEST} declares no `writable_folders`, and the default is "
+                 f"{writable.shown()}")
+    return NoteError(
+        f"{what} is not in a writable folder of this vault. {said}, and a note is written only in "
+        f"one of those or a folder below one ('.' is the vault root). Notes are never written "
+        f"into the shared core tier: promoting something there is a deliberate manual act."
+    )
+
+
+@dataclass(frozen=True)
+class _Dest:
+    """Where `ingest` writes: the resolved project vault, the folder's components below it, and
+    the note's bare filename. Built only by `_resolve_target`, which checks every part."""
+
+    root: Path
+    parts: tuple[str, ...]
+    filename: str
+
+    @property
+    def target(self) -> Path:
+        return self.root.joinpath(*self.parts, self.filename)
+
+
+def _resolve_target(project_vault: Path, folder: object, filename: object) -> _Dest:
+    if folder is None:
+        return _default_target(project_vault, filename)
+    return _named_target(project_vault, folder, filename)
+
+
+def _default_target(project_vault: Path, filename: object) -> _Dest:
+    """No `folder` given: `DEFAULT_FOLDER`, only where it already exists and is writable. Never
+    created, because a folder nobody named would appear in a vault laid out another way (owner
+    decision, 2026-11-13). Whether it qualifies is decided first, on the folder alone, so a
+    refusal of the note itself (its name, an existing file) still says what it is."""
+    root = project_vault.expanduser().resolve()
+    writable = _writable(root, _skip_list(root))
+    fd = None
+    if writable.covers((DEFAULT_FOLDER,)):
+        try:
+            fd = _walk_folder(root, (DEFAULT_FOLDER,), create=False)
+        except NoteError:
+            fd = None  # a link, a file, or another spelling: not the folder, so ask for one
+    if fd is None:
+        listed = f" Writable here: {writable.shown()}." if writable.declared else ""
+        raise NoteError(
+            f"no `folder` was given, and {DEFAULT_FOLDER!r} does not exist or is not writable in "
+            f"this vault, so nothing is written. Name a `folder`, relative to the project vault; "
+            f"'.' is the vault root.{listed}")
+    os.close(fd)
+    return _named_target(project_vault, DEFAULT_FOLDER, filename)
+
+
+def _named_target(project_vault: Path, folder: object, filename: object) -> _Dest:
+    """Check a new note's destination and return it. Writes nothing; a missing folder is allowed,
+    and `_create` makes it.
+
+    The folder is the caller's, so every component is checked lexically (`folder_fault`, then
+    `_folder_gates`) and then walked on disk, no link followed and each name spelled as it is
+    there: a symlinked folder is refused wherever it points, even inside the vault, because a check
+    of the caller's string says nothing about where a link leads."""
+    if not isinstance(filename, str) or not isinstance(folder, str):
+        raise NoteError("`filename` and `folder` must be strings.")
     if not filename.endswith(".md"):
         raise NoteError(f"{filename!r} is not markdown. Only .md notes are added this way; a PDF "
                         "goes through the supervised reference-ingest path.")
-    if folder not in WRITABLE_FOLDERS:
-        raise NoteError(
-            f"{folder!r} is not a writable project folder. Choose one of "
-            f"{list(WRITABLE_FOLDERS)} (Doc 2 §4). Notes are never written into the shared core "
-            f"tier — promoting something there is a deliberate manual act."
-        )
-    if Path(filename).name != filename:
+    if "\0" in filename or Path(filename).name != filename:
         raise NoteError(f"{filename!r} must be a bare filename, not a path.")
+    fault = folder_fault(folder)
+    if fault:
+        raise NoteError(f"`folder` {folder!r} {fault}. Name a folder relative to the project "
+                        f"vault, with `/` between folders, or '.' for the vault root.")
+    parts = folder_parts(folder)
 
-    project_vault = project_vault.expanduser().resolve()
+    root = project_vault.expanduser().resolve()
     # A skip-list filename in a writable folder is a note that would be written, reported as
     # indexed, and then refused by every subsequent compose — and this path is additive-only, so
     # the MCP surface offers no way to undo it. Refuse at plan time, before anything is on disk.
-    # The list is the vault's own: its manifest may declare one, and then a writable folder can be
-    # in it too, where a note would be written and never indexed without a word.
-    skip = _skip_list(project_vault)
-    if skip.skips_file(filename):
+    # The list is the vault's own: its manifest may declare one. Folded as well as exact: on a
+    # volume that ignores case, a `LOG.md` created first is the file a later `log.md` is.
+    skip = _skip_list(root)
+    if is_source_meta(filename):
+        raise _source_meta_refusal(repr(filename))
+    if skip.skips_file(filename) or folded(filename) in {folded(n) for n in skip.files}:
         raise NoteError(
             f"{filename!r} is in this vault's skip list, so a note under that name is never "
             f"indexed no matter which folder it is in. Give it an ordinary filename "
             f"(e.g. `{folder}/<area>-digest.md` for a Doc 2 §6a digest)."
         )
-    if skip.skips_folder((folder,)):
+    _refuse_hidden_characters(filename, "`filename`")
+    _refuse_hidden_characters(folder, "`folder`")
+    _folder_gates(root, parts, repr(folder), skip, adding=True, name=filename)
+
+    dest = _Dest(root, parts, filename)
+    _refuse_too_long(dest)
+    fd = _walk_folder(root, parts, create=False)
+    if fd is not None:
+        try:
+            os.stat(filename, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            raise NoteError(f"cannot inspect {dest.target}: {e}") from e
+        else:
+            raise NoteError(
+                f"{dest.target} already exists. This path is additive-only: to change an existing "
+                f"note use `amend`, which shows the diff and refuses if the note changes before "
+                f"the write."
+            )
+        finally:
+            os.close(fd)
+    return dest
+
+
+def _folder_gates(root: Path, parts: tuple[str, ...], what: str, skip: SkipList, *,
+                  adding: bool, name: str) -> None:
+    """The refusals of a destination folder that `ingest` and `amend` share, in one order.
+    `parts` is the folder's components below the project vault, already free of `..`, `.` and
+    hidden ones.
+
+    When `adding`, skipped and `passages` folders are refused folded (`vault.folded`) as well as
+    exactly, as the default's `_sources/` is: `ingest` may create the folder, and on a volume that
+    ignores case a `PASSAGES/` or `PRIVATE/` a client created first is the folder a later
+    `passages/` or `Private/` is, which compose then reads under the client's spelling, neither
+    skipped nor a source's passages. `amend` creates nothing, so it compares as compose does, and
+    an indexed note under `Passages/` stays amendable."""
+    def named(p: str, n: str) -> bool:
+        return p == n or (adding and folded(p) == folded(n))
+
+    # TIER 1 AND 2 ARE NEVER WRITTEN OR EDITED BY A CLIENT, whatever `writable_folders` says:
+    # operator and reference knowledge is promoted by hand (owner decision, 2026-11-13). A note's
+    # tier comes from its path's names (`vault._tier_for`), which compose reads as they are on
+    # disk and matches as a PREFIX. So each name is asked three ways: as given (what a volume that
+    # keeps names as written stores), folded (a case twin a client creates must not become the
+    # folder a later operator note lands in), and folded then decomposed (`00-operatoŕ` folds to
+    # one character `ŕ`, while a volume storing NFD keeps `00-operator` + U+0301, which compose
+    # reads as tier 1).
+    raw = (*parts, name)
+    if any(_tier_for(form) != 3 for form in (
+            raw, tuple(folded(p) for p in raw),
+            tuple(unicodedata.normalize("NFD", folded(p)) for p in raw))):
         raise NoteError(
-            f"{folder!r} is in this vault's skip list (`skip` in its {MANIFEST}), so a note "
-            f"written there is never indexed. Choose another folder."
+            f"{what} gives a note the operator or reference tier (a name starting `00-operator` "
+            f"or `10-reference`), which is promoted by hand: a client never adds or edits such a "
+            f"note, whatever the vault's `writable_folders` says."
         )
-    if is_source_meta(filename):
-        raise _source_meta_refusal(repr(filename))
-    target = (project_vault / folder / filename).resolve()
-    # Belt-and-braces after the component checks above: assert the RESOLVED path is inside the
-    # project vault rather than trusting that the checks covered every way out.
-    if project_vault not in target.parents:
-        raise NoteError(f"{target} resolves outside the project vault {project_vault}.")
-    if target.exists():
+
+    if skip.skips_folder(parts) or any(named(p, n) for p in parts for n in skip.folders):
         raise NoteError(
-            f"{target} already exists. This path is additive-only: to change an existing note use "
-            f"`amend`, which shows the diff and refuses if the note changes before the write."
+            f"{what} is in this vault's skip list (`skip` in its {MANIFEST}), so a note written "
+            f"there is never indexed. Choose another folder."
         )
-    return target
+    # A note under `passages/` takes its class and spine from its source's `_meta.md`, which the
+    # plan's staged ingestion never reads, so what it validated is not what compose would index.
+    if any(named(p, "passages") for p in parts):
+        raise NoteError(
+            f"{what} is in a folder of reference passages, whose class and spine come from their "
+            f"source's `{SOURCE_META}`, which a plan cannot reproduce. Notes are not written there "
+            f"this way."
+        )
+    writable = _writable(root, skip)
+    if not writable.covers(parts):
+        raise _not_writable(what, writable, parts)
+    _refuse_nested_inherited(root)
+
+
+def _refuse_nested_inherited(root: Path) -> None:
+    """NO WRITE AT ALL in a project vault whose chain names a vault at or below its own root,
+    whether that vault exists yet or not. Compose reads such a folder as the inherited vault, the
+    tier every inheriting scope reads, and writes go only to the project vault.
+
+    A LAYOUT RULE, NOT A TARGET MATCH. Matching each write's folder against the inherited vaults
+    was got past three times: by path, by `inherits` spelling the folder in another case than the
+    disk (a volume that ignores case serves both), and by naming a folder that does not exist yet,
+    which `ingest` would create and compose would then read as the vault. So the question asked is
+    only where each named vault is. Each is resolved as compose resolves it, then the nearest part
+    of that path which exists is compared by IDENTITY (device and inode), with every folder above
+    it, against the project vault: that is one answer for an existing vault and a missing one, in
+    any spelling. The cost: a vault that inherits a nested vault it also skips composes, and takes
+    no write here until the nested vault is moved out."""
+    try:
+        named = inherited_entries(root)
+        home = os.stat(root)
+    except (VaultError, OSError) as e:
+        # The fault is the owner's to read, in `substrate compose`, as `_skip_list` says.
+        raise NoteError(f"cannot tell which vaults this scope inherits: its {MANIFEST} does not "
+                        f"read (`substrate compose` says why), so nothing is written.") from e
+    home_id = (home.st_dev, home.st_ino)
+    for manifest, entry, path in named:
+        try:
+            here = Path(os.path.realpath(path))
+        except (ValueError, OSError) as e:
+            raise NoteError(f"{entry!r}, in `inherits` in {manifest}, is not a path the engine "
+                            f"can resolve ({e}), so whether this vault holds it is unknown and "
+                            f"nothing is written.") from e
+        while not os.path.lexists(here) and here != here.parent:
+            here = here.parent
+        for folder in (here, *here.parents):
+            try:
+                st = os.stat(folder)
+            except OSError:
+                continue
+            if (st.st_dev, st.st_ino) == home_id:
+                raise NoteError(
+                    f"this scope's project vault holds a vault it inherits: {entry!r}, in "
+                    f"`inherits` in {manifest}, is at or inside {root}. Compose reads that folder "
+                    f"as the inherited vault, so `ingest` and `amend` write nothing in this vault "
+                    f"until the layout is fixed: move the inherited vault out of the project "
+                    f"vault's folder and update `inherits`."
+                )
+
+
+def _refuse_hidden_characters(text: str, what: str) -> None:
+    """A name holding a character a viewer would hide (`_hidden`: controls, format characters such
+    as a bidi override, separators), or a tab, is refused. The plan's target is the text a person
+    approves, and such a name can make it read as another place. (`_hidden` passes a tab because a
+    note's text may hold one; a name has no use for it.)"""
+    if "\t" in text or any(_hidden(text, i) for i in range(len(text))):
+        shown, _, _ = _visible(text.replace("\t", "\u2409"))
+        raise NoteError(f"{what} {shown!r} holds a tab or a character a viewer would hide (marked "
+                        f"⟨U+XXXX⟩). Name it with visible characters only.")
+
+
+def _refuse_too_long(dest: _Dest) -> None:
+    """A path compose's walk of the vault cannot open is a note compose never finds, without an
+    error. The walk below writes relative to a folder descriptor, so nothing else stops one."""
+    try:
+        limit = os.pathconf(dest.root, "PC_PATH_MAX")
+    except (OSError, ValueError):
+        limit = 1024
+    size = len(os.fsencode(str(dest.target)))
+    if size >= limit:
+        raise NoteError(f"the note's path is {size} bytes long, and compose cannot read a path of "
+                        f"{limit} bytes or more on this volume. Choose a shorter folder or "
+                        f"filename.")
+    # Checked at the plan, so an approved plan is not refused half way through making its folders.
+    try:
+        name_max = os.pathconf(dest.root, "PC_NAME_MAX")
+    except (OSError, ValueError):
+        name_max = 255
+    long = [n for n in (*dest.parts, dest.filename) if len(os.fsencode(n)) > name_max]
+    if long:
+        raise NoteError(f"a name in the note's path is {len(os.fsencode(long[0]))} bytes long, over "
+                        f"the {name_max} a name may be on this volume. Choose a shorter one.")
+
+
+def _walk_folder(root: Path, parts: tuple[str, ...], *, create: bool,
+                 verb: str = "added") -> int | None:
+    """A descriptor for the folder `parts` names under `root`, reached one component at a time,
+    or None when one is missing and `create` is False. With `create`, a missing one is made.
+
+    NOTHING BELOW THE ROOT IS FOLLOWED. Each folder is opened `O_NOFOLLOW` relative to the one
+    before it, and every read and write is made relative to the descriptor this returns, so a
+    folder swapped for a symlink after a check cannot redirect it. An earlier `amend` re-resolved
+    the whole path string for every syscall, so only the last component was protected.
+
+    Each existing name must be spelled exactly as it is on disk. The lexical refusals compare the
+    CALLER'S string, and APFS is case-insensitive: `PASSAGES/` reaches `passages/`, so without this
+    every one of them could be walked around by changing case. A name this walk creates is made
+    only in NFC, so it reads back as written on a volume that keeps names as given, and is not
+    held to the spelling check, which a volume that stores names decomposed would fail. The caller
+    closes the descriptor."""
+    import errno
+    import stat as _stat
+
+    link = f"A note is {verb} only at its real location inside the project vault, never through a link."
+    try:
+        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as e:
+        raise NoteError(f"cannot open the project vault {root}: {e}") from e
+    try:
+        for i, part in enumerate(parts):
+            here = root.joinpath(*parts[: i + 1])
+            created = False
+            try:
+                st = os.stat(part, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                # This folder and every one below it would be new, so each is made only in NFC,
+                # refused at the plan as at the commit.
+                for new in parts[i:]:
+                    if unicodedata.normalize("NFC", new) != new:
+                        raise NoteError(f"{root.joinpath(*parts)} would make a new folder named "
+                                        f"in decomposed Unicode (not NFC). Write its name "
+                                        f"composed.") from None
+                if not create:
+                    os.close(fd)
+                    return None
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                    created = True
+                except FileExistsError:
+                    pass
+                except OSError as e:
+                    raise NoteError(f"cannot create the folder {here}: {e}") from e
+                try:
+                    st = os.stat(part, dir_fd=fd, follow_symlinks=False)
+                except OSError as e:
+                    raise NoteError(f"cannot inspect {here}: {e}") from e
+            except OSError as e:
+                raise NoteError(f"cannot inspect {here}: {e}") from e
+            if not created:
+                try:
+                    spelled = part in os.listdir(fd)
+                except OSError as e:
+                    raise NoteError(f"cannot list {here.parent}: {e}") from e
+                if not spelled:
+                    raise NoteError(
+                        f"{here} is not spelled the way it is on disk (case or Unicode form "
+                        f"differs). Name it exactly as it is (`expand` reports a note's path)."
+                    )
+            if _stat.S_ISLNK(st.st_mode):
+                raise NoteError(f"{here} is a symlink. {link}")
+            if not _stat.S_ISDIR(st.st_mode):
+                raise NoteError(f"{here} is not a folder.")
+            try:
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            except OSError as e:
+                if e.errno in (errno.ELOOP, errno.ENOTDIR):
+                    raise NoteError(f"{here} is a symlink. {link}") from e
+                raise NoteError(f"cannot open {here}: {e}") from e
+            os.close(fd)
+            fd = nxt
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def _validate(
-    *, project_vault: Path, content: bytes, filename: str, folder: str,
-) -> tuple[Path, dict]:
-    """Run every gate against this note and return (target, the plan's fields). Issues NOTHING.
+    *, project_vault: Path, content: bytes, filename: str, folder: str | None,
+) -> tuple[_Dest, dict]:
+    """Run every gate against this note and return (destination, the plan's fields). Issues NOTHING.
 
     Split from `plan` because `commit` needs the validation and must NOT mint a token: minting one
     per commit left an unredeemable nonce in the PlanBook on every call, successful or refused, so
@@ -233,7 +611,7 @@ def _validate(
     from substrate.markdown.ingest import CoverageError, ingest_markdown
     from substrate.spine import SpineError
 
-    target = _resolve_target(project_vault, folder, filename)
+    dest = _resolve_target(project_vault, folder, filename)
 
     tmp = Path(tempfile.mkdtemp())
     try:
@@ -256,7 +634,7 @@ def _validate(
         except (ValueError, classes.ClassPolicyError, SpineError, CoverageError) as e:
             raise NoteError(f"{type(e).__name__}: {e}") from e
 
-        return target, {
+        return dest, {
             "doc_id": result.doc_id,
             "status": result.status,
             "doc_type": result.doc_type,
@@ -272,7 +650,7 @@ def _validate(
 
 
 def plan(
-    *, project_vault: Path, content: bytes, filename: str, folder: str = DEFAULT_FOLDER,
+    *, project_vault: Path, content: bytes, filename: str, folder: str | None = None,
     book: PlanBook, author: str | None = None, bound_to: str = "",
 ) -> Plan:
     """Validate a note against the real ingestion gates without writing anything, and issue a
@@ -288,14 +666,14 @@ def plan(
     """
     if author is not None:
         content = stamp_new(content, author)
-    target, fields = _validate(project_vault=project_vault, content=content, filename=filename,
-                               folder=folder)
-    return Plan(target=target, confirm_token=book.issue(_binding(target, content, bound_to)),
-                **fields)
+    dest, fields = _validate(project_vault=project_vault, content=content, filename=filename,
+                             folder=folder)
+    return Plan(target=dest.target,
+                confirm_token=book.issue(_binding(dest.target, content, bound_to)), **fields)
 
 
 def commit(
-    *, project_vault: Path, content: bytes, filename: str, folder: str = DEFAULT_FOLDER,
+    *, project_vault: Path, content: bytes, filename: str, folder: str | None = None,
     confirm_token: str, book: PlanBook, author: str | None = None, bound_to: str = "",
     who: writelog.Identity | None = None,
 ) -> Path:
@@ -309,8 +687,9 @@ def commit(
     """
     if author is not None:
         content = stamp_new(content, author)
-    target, fields = _validate(project_vault=project_vault, content=content, filename=filename,
-                               folder=folder)
+    dest, fields = _validate(project_vault=project_vault, content=content, filename=filename,
+                             folder=folder)
+    target = dest.target
     if not book.redeem(confirm_token, _binding(target, content, bound_to)):
         raise NoteError(
             "confirm_token was not issued by this server for this note and destination, or has "
@@ -321,38 +700,47 @@ def commit(
     try:
         with writelog.recorded(who, op="ingest", target=target, doc_id=fields.get("doc_id"),
                                before=None, after=_sha(content)):
-            _create(target, content)
+            _create(dest, content)
     except WriteLogError as e:
         # The log refused the intent, so nothing was written.
         raise NoteError(f"{e} No note was written.") from e
     return target
 
 
-def _create(target: Path, content: bytes) -> None:
+def _create(dest: _Dest, content: bytes) -> None:
     # Inside the logged section, so a write the log refuses does not leave a new folder behind.
-    target.parent.mkdir(parents=True, exist_ok=True)
     # The additive-only and stay-inside-the-vault guarantees are enforced by the SYSCALL, not by
-    # the earlier `target.exists()` check — that check is a check-then-act pair with a window, and
-    # a staging file at a fixed sibling name (`<note>.md.tmp`) was itself an unguarded write: a
+    # the earlier existence check — that check is a check-then-act pair with a window, and a
+    # staging file at a fixed sibling name (`<note>.md.tmp`) was itself an unguarded write: a
     # symlink planted there redirected the content outside the vault entirely, which is exactly
-    # what the containment checks above exist to refuse. O_EXCL makes "never overwrite" atomic;
-    # O_NOFOLLOW refuses a symlinked target outright.
+    # what the containment checks exist to refuse. O_EXCL makes "never overwrite" atomic;
+    # O_NOFOLLOW refuses a symlinked target outright; and the open is relative to the folder
+    # descriptor `_walk_folder` reached without following a link, so no folder can be swapped.
+    target = dest.target
+    dfd = _walk_folder(dest.root, dest.parts, create=True)
     try:
-        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
-    except FileExistsError as e:
-        raise NoteError(
-            f"{target} appeared between the plan and the write. This path is additive-only; "
-            f"refusing to overwrite it."
-        ) from e
-    except OSError as e:
-        raise NoteError(f"cannot create {target}: {e}") from e
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(content)
-    except OSError as e:
-        # A partial note in the vault would compose as a truncated one. Remove it and refuse.
-        target.unlink(missing_ok=True)
-        raise NoteError(f"failed writing {target}: {e}") from e
+        try:
+            fd = os.open(dest.filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o644, dir_fd=dfd)
+        except FileExistsError as e:
+            raise NoteError(
+                f"{target} appeared between the plan and the write. This path is additive-only; "
+                f"refusing to overwrite it."
+            ) from e
+        except OSError as e:
+            raise NoteError(f"cannot create {target}: {e}") from e
+        try:
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(content)
+        except OSError as e:
+            # A partial note in the vault would compose as a truncated one. Remove it and refuse.
+            try:
+                os.unlink(dest.filename, dir_fd=dfd)
+            except OSError:
+                pass
+            raise NoteError(f"failed writing {target}: {e}") from e
+    finally:
+        os.close(dfd)
 
 
 # --------------------------------------------------------------------------- amending a note
@@ -459,92 +847,57 @@ def _resolve_existing(project_vault: Path, path: str) -> tuple[Path, tuple[str, 
     parts = rel.parts
     if not parts or any(p in ("", ".", "..") for p in parts):
         raise NoteError(f"{path!r} must name a note inside the project vault, without `..`.")
-    if parts[0] not in WRITABLE_FOLDERS:
-        raise NoteError(
-            f"{path!r} is not in a writable project folder. Notes under {list(WRITABLE_FOLDERS)} "
-            f"can be amended (Doc 2 §4); `_sources/`, `_archive/` and the shared core tier cannot."
-        )
     if any(p.startswith(".") for p in parts):
         raise NoteError(f"{path!r} names a hidden file or folder, which is never a note.")
-    if _skip_list(root).skips(parts):
+    skip = _skip_list(root)
+    if skip.skips_file(parts[-1]):
         raise NoteError(f"{path!r} is in this vault's skip list, so it is never indexed as a note.")
     if is_source_meta(parts[-1]):
         raise _source_meta_refusal(repr(path))
-    if "passages" in parts:
-        raise NoteError(
-            f"{path!r} is a reference passage. Its class and spine come from its source's "
-            f"`_meta.md`, which a plan cannot reproduce, so it is not amended this way."
-        )
+    # The same folders `ingest` writes to, refused the same way: a note the engine may add, it may
+    # change.
+    _folder_gates(root, parts[:-1], repr(path), skip, adding=False, name=parts[-1])
     if not parts[-1].endswith(".md"):
         raise NoteError(f"{path!r} is not markdown. Only .md notes are amended.")
     return root, parts, root.joinpath(*parts), rel.as_posix()
 
 
 def _open_note_dir(root: Path, parts: tuple[str, ...]) -> int:
-    """A descriptor for the folder holding the note, reached one component at a time.
-
-    NOTHING BELOW THE ROOT IS FOLLOWED. Each folder is opened `O_NOFOLLOW` relative to the one
-    before it, and the read, the staging file and the `rename` all happen relative to the
-    descriptor this returns. A folder swapped for a symlink after a check therefore cannot redirect
-    the write — the earlier version re-resolved the whole path string for every syscall, so only
-    the last component was protected. The caller closes the descriptor.
-
-    Each component must also be spelled exactly as it is on disk. The lexical refusals compare the
-    CALLER'S string, and APFS is case-insensitive: `PASSAGES/` reaches `passages/`, so without this
-    every one of them could be walked around by changing case.
-    """
-    import errno
+    """A descriptor for the folder holding the note, reached by `_walk_folder` (no link followed,
+    each name spelled as it is on disk), with the note itself checked there: a regular file, spelled
+    as it is, not a link. The read, the staging file and the `rename` all happen relative to the
+    descriptor this returns. The caller closes it."""
     import stat as _stat
 
+    missing = NoteError(f"{root.joinpath(*parts)} does not exist. `amend` changes an existing "
+                        f"note; use `ingest` to add a new one.")
+    fd = _walk_folder(root, parts[:-1], create=False, verb="amended")
+    if fd is None:
+        raise missing
+    here, name = root.joinpath(*parts), parts[-1]
     try:
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-    except OSError as e:
-        raise NoteError(f"cannot open the project vault {root}: {e}") from e
-    try:
-        for i, part in enumerate(parts):
-            here = root.joinpath(*parts[: i + 1])
-            try:
-                st = os.stat(part, dir_fd=fd, follow_symlinks=False)
-            except FileNotFoundError as e:
-                raise NoteError(
-                    f"{root.joinpath(*parts)} does not exist. `amend` changes an existing note; "
-                    f"use `ingest` to add a new one."
-                ) from e
-            except OSError as e:
-                raise NoteError(f"cannot inspect {here}: {e}") from e
-            try:
-                spelled = part in os.listdir(fd)
-            except OSError as e:
-                raise NoteError(f"cannot list {here.parent}: {e}") from e
-            if not spelled:
-                raise NoteError(
-                    f"{here} is not spelled the way it is on disk (case or Unicode form differs). "
-                    f"Name the note exactly as `expand` reports it."
-                )
-            if _stat.S_ISLNK(st.st_mode):
-                raise NoteError(
-                    f"{here} is a symlink. A note is amended only at its real location inside the "
-                    f"project vault, never through a link."
-                )
-            if i == len(parts) - 1:
-                if not _stat.S_ISREG(st.st_mode):
-                    raise NoteError(f"{here} is not a regular file.")
-                return fd
-            if not _stat.S_ISDIR(st.st_mode):
-                raise NoteError(f"{here} is not a folder.")
-            try:
-                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            except OSError as e:
-                if e.errno in (errno.ELOOP, errno.ENOTDIR):
-                    raise NoteError(f"{here} is a symlink. A note is amended only at its real "
-                                    f"location inside the project vault, never through a link.") from e
-                raise NoteError(f"cannot open {here}: {e}") from e
-            os.close(fd)
-            fd = nxt
+        try:
+            st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        except FileNotFoundError:
+            raise missing from None
+        except OSError as e:
+            raise NoteError(f"cannot inspect {here}: {e}") from e
+        try:
+            spelled = name in os.listdir(fd)
+        except OSError as e:
+            raise NoteError(f"cannot list {here.parent}: {e}") from e
+        if not spelled:
+            raise NoteError(f"{here} is not spelled the way it is on disk (case or Unicode form "
+                            f"differs). Name the note exactly as `expand` reports it.")
+        if _stat.S_ISLNK(st.st_mode):
+            raise NoteError(f"{here} is a symlink. A note is amended only at its real location "
+                            f"inside the project vault, never through a link.")
+        if not _stat.S_ISREG(st.st_mode):
+            raise NoteError(f"{here} is not a regular file.")
     except BaseException:
         os.close(fd)
         raise
-    raise AssertionError("unreachable: the loop returns on the last component")
+    return fd
 
 
 def _read_at(dfd: int, name: str, shown: Path) -> bytes:

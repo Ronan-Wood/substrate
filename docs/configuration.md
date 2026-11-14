@@ -27,11 +27,13 @@ go = "1.21"
 | `reference_pins` | table, name to version | which version of a versioned reference counts as current for this project |
 | `identity` | absolute path | a JSON file of people and things that notes mention, resolved on every compose |
 | `skip` | list of names | the file and folder names compose never indexes in this vault. Without it, the default list below applies |
+| `writable_folders` | list of folder paths | where `ingest` adds a note and `amend` changes one. Without it, any folder compose doesn't skip |
 
 In TOML, every key written after a `[table]` header belongs to that table, so keep every top-level
 key above `[reference_pins]`. Any key listed above, found inside a `[table]`, fails the compose
 with a message naming the key and the table. The engine also checks the shape of `name`, `inherits`,
-`reference_domains`, `reference_pins` and `skip`, and refuses a malformed one.
+`reference_domains`, `reference_pins` and `skip`, and refuses a malformed one. The write path
+checks `writable_folders` the same way.
 
 `skip` names what compose leaves out of the index:
 
@@ -63,6 +65,53 @@ with a message naming the key and the table. The engine also checks the shape of
   in any letter case, whatever its list says, because it sets the spine of the passages beside
   it. While the project
   vault's manifest doesn't parse, or its `skip` fails as above, they write nothing.
+
+`writable_folders` says where a write through `ingest` or `amend` may go:
+
+- **An entry is a folder path relative to the project vault,** with `/` between folders, such as
+  `"Notes"` or `"Projects/ideas"`. The vault root is `"."`. Each entry covers its folder and every
+  folder below it, and `ingest` creates a missing folder below one.
+- **With no `writable_folders`, any folder compose doesn't skip takes a write, the root
+  included, except `_sources/` and `_archive/` at the top of the vault,** and `ingest` creates a
+  missing folder. Those two stay unwritable because, until this key existed, the write path took
+  only `02-areas`, `03-references` and `04-synthesis`, and that list was all that protected them:
+  in `_sources/`, only a call whose class is frozen was protected otherwise. Their names are
+  compared ignoring case, so `_SOURCES/` is refused too. A declaration replaces the default, so a
+  vault that lists `_sources` opens it. To keep the folders the engine wrote to before, declare
+  `writable_folders = ["02-areas", "03-references", "04-synthesis"]`. That restores them exactly
+  for `amend`. `ingest` then also takes a folder below one of them, which it did not before.
+- **Whatever the list says,** a write never goes outside the project vault, into a vault it
+  inherits, into a skipped or hidden folder, into a
+  `passages/` folder, through a symlink or to `_meta.md`, and `ingest` never overwrites a note.
+  `ingest` refuses skipped names and `passages` in any letter case, because a folder it creates
+  in another case is, on a volume that ignores case, the folder a later write to the real name
+  lands in. `amend` creates nothing and compares them exactly, as compose does. `ingest` also never
+  writes into a folder whose name ends in `.md`. A name holding a tab or a character a viewer would hide,
+  a name too long for the volume, and a path too long for compose to read are refused. An existing
+  folder is named exactly as it is on disk, case included, and a new one is created in NFC.
+- **A client never adds or edits a tier 1 or 2 note,** in any vault, whatever `writable_folders`
+  says: one whose path has a name starting `00-operator` or `10-reference`, compared ignoring case
+  and Unicode form (`00-operatoŕ.md` counts, since a volume storing names decomposed keeps
+  `00-operator` + an accent).
+  Operator and reference notes are promoted by hand. This holds for `amend` too, so a note under
+  `02-areas/00-operator/`, which `amend` used to edit, is now edited by hand only.
+- **With no `folder`, `ingest` writes to `04-synthesis`** only where that folder exists and is
+  writable. Elsewhere it refuses, creates nothing, and asks for a folder (`.` is the root).
+- **A project vault that holds a vault it inherits takes no write at all.** If any `inherits` in
+  the scope's chain names a folder at or inside the project vault, whether it exists yet or not,
+  `ingest` and `amend` refuse every write to the project vault, naming the entry. Move the
+  inherited vault out of the project vault's folder and update `inherits`. Such a layout usually
+  fails to compose anyway, because both vaults index the nested notes. The known cost: a project
+  vault that also skips the nested folder composes, and still takes no write.
+- **A project vault without its manifest takes no write.** Without it nothing says where a write
+  may go, and the default would widen a declared list.
+- **A `writable_folders` the engine can't apply writes nothing:** one that isn't a list of
+  strings; an entry that is empty, absolute, holds `..`, `.` (except `"."` alone), a hidden folder,
+  a `\` or white space at either end of a name, or ends with or doubles a `/`; an entry that isn't
+  an existing folder, is reached through a symlink, or is skipped. A folder ending in `.md` is
+  refused too. A declared folder is never
+  created. The refusal names the entries by position. Compose indexes the same notes either way,
+  and fails only when the key sits inside a `[table]`.
 
 Where a note sits sets its **tier**: `00-operator/` is tier 1, `10-reference/` is tier 2, and
 everything else is tier 3.

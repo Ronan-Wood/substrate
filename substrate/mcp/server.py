@@ -358,7 +358,14 @@ TOOLS = [
             "it. Show that plan to the human. Only with their agreement, call again with the same "
             "arguments plus the plan's `confirm_token`.\n\n"
             "Additive only: it will not overwrite an existing note (change one with `amend`), "
-            "and it never writes into the shared core tier. It does not index the note itself: "
+            "and it never writes into the shared core tier. `folder` is a path relative to the "
+            "project vault (`Notes/ideas`; `.` is its root). The vault's `writable_folders` says "
+            "which folders take a note, with every folder below each; a vault that declares none "
+            "takes one in any folder it does not skip, except `_sources/` and `_archive/` at its "
+            "top. A missing folder inside a writable one is "
+            "created. A refusal for a folder outside them names them. A note whose path has a "
+            "name starting `00-operator` or `10-reference` (tier 1 or 2) is never added.\n\n"
+            "It does not index the note itself: "
             "an engine that refreshes indexes it on its coming pass, and otherwise it is "
             "invisible to `search` until the scope is recomposed. The response says which.\n\n"
             "On the shared engine a write runs only for a client the user has granted, and the "
@@ -382,8 +389,11 @@ TOOLS = [
                                            "add a file, read it yourself and pass its text here."},
                 "filename": {"type": "string",
                              "description": "Name in the vault, e.g. 'retrieval-decision.md'."},
-                "folder": {"type": "string", "enum": list(notes.WRITABLE_FOLDERS),
-                           "description": "Project folder (Doc 2 §4). Defaults to 04-synthesis."},
+                "folder": {"type": "string",
+                           "description": "Folder relative to the project vault, `/` between "
+                                          "folders, `.` for its root. Omitted, it is "
+                                          f"{notes.DEFAULT_FOLDER} where that folder exists "
+                                          "and is writable; elsewhere the write is refused."},
                 "confirm_token": {"type": "string",
                                   "description": "From a previous plan. Omit on the first call."},
             },
@@ -405,7 +415,8 @@ TOOLS = [
             "than overwriting the old reasoning.\n\n"
             "Refused: a note that does not exist (use `ingest`), anything outside this scope's "
             "project vault (never the shared core tier), a path through a symlink, a superseded "
-            "note, a `conversation` or `reference-frozen` note, a read-only note, a change to a "
+            "note, a `conversation` or `reference-frozen` note, a tier 1 or 2 note (a name starting "
+            "`00-operator` or `10-reference` in its path), a read-only note, a change to a "
             f"declared `doc_id`, a note over {notes.AMEND_LINE_CAP:,} lines, and a diff too large "
             "to show whole or too costly to work out. The same frontmatter gates as `ingest` "
             "apply, `confidence` included. The index is not updated by the write; the response "
@@ -825,7 +836,7 @@ def _tool_ingest(args: dict, cfg: Config, author: grants.Decision = grants.OWNER
     if not filename:
         raise ToolError("`content` requires `filename` — the note needs a name in the vault.")
 
-    folder = args.get("folder", notes.DEFAULT_FOLDER)
+    folder = args.get("folder")
     token = args.get("confirm_token")
     try:
         if not token:

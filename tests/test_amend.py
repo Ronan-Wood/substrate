@@ -24,6 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from substrate import notes  # noqa: E402
 
+# Doc 2 §4's project skeleton, the folders the demo layout writes notes to.
+DOC2_FOLDERS = ("02-areas", "03-references", "04-synthesis")
+
 FRONT = b"---\nstatus: active\ndoc_type: decision\nconfidence: proposed\ndomains: [retrieval]\n---\n"
 BODY = (b"\n# Retrieval stack decision\n\nThe MCP surface runs the measured stack, so a caller can "
         b"tell a 0.698 answer from a lexical one.\n")
@@ -35,8 +38,10 @@ def _vault() -> Path:
     """A project vault beside a core vault, the shape a composed scope has on disk."""
     root = Path(tempfile.mkdtemp())
     v = root / "demo-vault"
-    for folder in notes.WRITABLE_FOLDERS:
+    for folder in DOC2_FOLDERS:
         (v / folder).mkdir(parents=True)
+    # A registered scope's project vault has a manifest, and the write path refuses one without.
+    (v / ".substrate.toml").write_text('name = "demo"\n')
     core = root / "demo-core-vault" / "00-operator"
     core.mkdir(parents=True)
     (core / "operator.md").write_bytes(CURRENT)
@@ -633,15 +638,17 @@ def test_a_symlink_planted_between_plan_and_commit_is_refused() -> None:
 
 def test_core_vault_is_never_amended() -> None:
     """Doc 2 §2: nothing auto-writes into the tier every scope inherits. Reached by `..`, by an
-    absolute path into the core vault, and by naming a core folder."""
+    absolute path into the core vault, and by naming a core folder a vault that declares the Doc 2
+    skeleton as its `writable_folders` does not list."""
     v, book = _vault(), notes.PlanBook()
+    _declare_skeleton(v)
     core_note = v.parent / "demo-core-vault" / "00-operator" / "operator.md"
     _refuses(lambda: _plan(v, book, path="../demo-core-vault/00-operator/operator.md"))
     _refuses(lambda: _plan(v, book, path="04-synthesis/../../demo-core-vault/00-operator/operator.md"))
     _refuses(lambda: _plan(v, book, path=str(core_note)), containing="outside the project vault")
     _note(v, "00-operator/operator.md")
     _refuses(lambda: _plan(v, book, path="00-operator/operator.md"),
-             containing="not in a writable project folder")
+             containing="operator or reference tier")
     assert core_note.read_bytes() == CURRENT
     assert not book._issued, "no refused plan may mint a token"
 
@@ -750,10 +757,16 @@ def test_the_write_gate_requires_a_confidence_to_amend_an_unjudged_note() -> Non
     assert plan.spine_after["confidence"] == "proposed"
 
 
+def _declare_skeleton(v: Path) -> None:
+    (v / ".substrate.toml").write_text(
+        'name = "demo"\nwritable_folders = ["02-areas", "03-references", "04-synthesis"]\n')
+
+
 def test_paths_outside_the_note_skeleton_are_refused() -> None:
     v, book = _vault(), notes.PlanBook()
-    for rel, why in (("_sources/call.md", "writable project folder"),
-                     ("_archive/old.md", "writable project folder"),
+    _declare_skeleton(v)
+    for rel, why in (("_sources/call.md", "not in a writable folder"),
+                     ("_archive/old.md", "not in a writable folder"),
                      ("02-areas/.hidden/n.md", "hidden"),
                      ("02-areas/99-templates/t.md", "skip list"),
                      ("02-areas/log.md", "skip list"),

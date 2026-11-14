@@ -19,12 +19,50 @@ Every release of the engine, newest first. The format follows
 - After `skip` changes, the next compose or refresh pass takes the notes under a newly skipped
   folder out of the index, without `--clean`, and adds the newly unskipped ones. Compose removes
   such a note's ingest folder as it removes a deleted note's, and says so on a `pruned:` line.
+- **A vault's manifest may declare `writable_folders`,** the folders `ingest` adds a note to and
+  `amend` changes one in, as paths relative to the project vault (`.` is its root), each with
+  every folder below it. A declared folder must exist and not be skipped.
+  [`docs/configuration.md`](docs/configuration.md) has the rules.
 
 ### Changed
+
+- **`ingest` and `amend` write in any folder of a vault that declares no `writable_folders`,**
+  except a folder its `skip` list skips, a hidden one, a `passages/` folder, and `_sources/` and
+  `_archive/` at the top of the vault. They used to write only under `02-areas/`,
+  `03-references/` and `04-synthesis/`, and `ingest` only directly in one of them. So in such a
+  vault `00-index/`, the root, nested folders and any new folder now take a write. `_sources/` and
+  `_archive/` stay unwritable because that list was all that protected them, and in `_sources/`
+  only a class-frozen call was protected otherwise. A vault that lists them in `writable_folders`
+  opens them. A `conversation` or `reference-frozen` note is still never amended, wherever it is.
+  To keep today's folders, declare
+  `writable_folders = ["02-areas", "03-references", "04-synthesis"]`. That restores `amend`
+  exactly. `ingest` then also takes a folder below one of them.
+- Because `ingest` now creates folders a client names, it refuses what that would open:
+  - a folder whose name ends in `.md`, which compose would read as a note and refuse the scope;
+  - a skipped or `passages` folder, or a skipped file name, in another letter case;
+  - a name holding a tab or a character a viewer would hide;
+  - a new folder named in decomposed Unicode;
+  - a name too long for the volume, or a path too long for compose to read.
+- `ingest` and `amend` write nothing in a project vault that holds a vault its scope inherits:
+  one that any `inherits` in the chain names at or inside the project vault's folder, whether it
+  exists yet or not. The refusal names the entry and says to move that vault out. A layout that
+  skips the nested folder composes, and still takes no write.
+- `ingest` and `amend` write nothing in a project vault whose `.substrate.toml` is missing. They
+  used to fall back to the three fixed folders. Now the fallback would be the much wider default,
+  so they refuse instead.
+- The `ingest` tool's `folder` is any folder path, not one of three names, and the tool's
+  description says which folders take a note. A refusal for a folder outside a declared list names
+  the writable ones.
+- `writable_folders` is a reserved manifest key. Written inside a `[table]`, it fails the compose.
+  A `writable_folders` the engine can't apply is refused by `ingest` and `amend`, which then write
+  nothing: one that isn't a list of folder paths, or names a folder that doesn't exist, is reached
+  through a symlink or is skipped. It doesn't affect what compose indexes.
 
 - `skip` is a reserved manifest key. Written inside a `[table]`, it fails the compose, as the
   other top-level keys do, so a reference pin can no longer be named `skip`. A `skip` that is not
   a list of exact names fails the compose too.
+- `ingest` without a `folder` writes to `04-synthesis` only where that folder exists and is
+  writable. Elsewhere it refuses and asks for a folder. It used to create `04-synthesis`.
 - `ingest` and `amend` refuse a name or a folder the vault's own `skip` list names, in place of
   the fixed list. A default name the list leaves out can be written, so under `skip = []` an
   `amend` of `log.md` works. `_meta.md` is still refused in every vault, whatever its list says.
@@ -70,8 +108,21 @@ Every release of the engine, newest first. The format follows
     and `active`, is retrieved by default, and is copied into agent snapshots. Declare
     `class: conversation` on a transcript before it goes into a vault.
 
+### Removed
+
+- **`amend` no longer edits a tier 1 or 2 note.** A client never adds or edits a note whose path
+  gives it the operator or reference tier (a name starting `00-operator` or `10-reference`, in any
+  letter case or Unicode form), in any vault, whatever `writable_folders` says: those notes are promoted by hand.
+  `amend` used to edit one under a nested folder such as `02-areas/00-operator/`. Edit those by
+  hand.
+
 ### Fixed
 
+- `ingest` refuses a folder that is a symlink, wherever it points. It used to follow the link and
+  check only that the result was inside the vault, so a writable folder linked to a skipped or
+  hidden folder of the same vault took a note compose would never index. It now walks the folder
+  one component at a time without following a link, as `amend` does, and writes relative to the
+  folder it reached.
 - `ingest` and `amend` refuse `_META.md` and every other spelling of `_meta.md` that a volume can
   serve as it: any letter case, and on HFS+ the code points it leaves out of a name. On such a
   volume the file is read as its source's `_meta.md` and sets the spine of the passages beside it,

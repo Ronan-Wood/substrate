@@ -22,6 +22,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from substrate import notes  # noqa: E402
 
+# Doc 2 §4's project skeleton, the folders the demo layout writes notes to.
+DOC2_FOLDERS = ("02-areas", "03-references", "04-synthesis")
+
 GOOD = b"""---
 status: active
 doc_type: decision
@@ -49,8 +52,10 @@ DECLARED_UNSTATED = (b"---\nstatus: active\ndoc_type: decision\nconfidence: unst
 
 def _vault() -> Path:
     root = Path(tempfile.mkdtemp()) / "demo-vault"
-    for folder in notes.WRITABLE_FOLDERS:
+    for folder in DOC2_FOLDERS:
         (root / folder).mkdir(parents=True)
+    # A registered scope's project vault has a manifest, and the write path refuses one without.
+    (root / ".substrate.toml").write_text('name = "demo"\n')
     return root
 
 
@@ -253,17 +258,17 @@ def test_no_reachable_path_writes_through_a_symlink() -> None:
 
     This asserts the OUTCOME — no reachable call writes through a symlink — and names the
     mechanism that actually fires for each case. It deliberately does NOT claim to exercise
-    O_NOFOLLOW: `_resolve_target` dereferences before the open, so every symlink reachable from
-    here is refused earlier, and the flag covers only the residual window between resolve and
-    open, which no deterministic test can reach.
+    O_NOFOLLOW: `_resolve_target` inspects the name without following it, so a link there reads as
+    a file that already exists and is refused earlier, and the flag covers only the residual window
+    between that check and the open, which no deterministic test can reach.
     """
     v, book = _vault(), _book()
     outside = Path(tempfile.mkdtemp()) / "outside.md"
     outside.write_bytes(b"# Untouched\n")
 
-    # (a) symlink pointing OUT of the vault: resolves outside, containment refuses.
+    # (a) symlink pointing OUT of the vault: the name is taken, so additive-only refuses.
     (v / "04-synthesis" / "decision.md").symlink_to(outside)
-    _refuses(lambda: _plan(v, book), containing="resolves outside the project vault")
+    _refuses(lambda: _plan(v, book), containing="additive-only")
 
     # (b) planted between plan and commit: commit re-validates, so it refuses on the same check
     # rather than writing against the plan it was holding.
@@ -271,7 +276,7 @@ def test_no_reachable_path_writes_through_a_symlink() -> None:
     (v / "04-synthesis" / "third.md").symlink_to(outside)
     _refuses(lambda: notes.commit(project_vault=v, content=GOOD, filename="third.md",
                                   confirm_token=p.confirm_token, book=book),
-             containing="resolves outside the project vault")
+             containing="additive-only")
 
     # (c) symlink pointing INSIDE the vault at an existing note: additive-only refuses.
     (v / "02-areas" / "real.md").write_bytes(b"# Real\n")
@@ -298,11 +303,19 @@ def test_escaping_the_project_vault_refuses() -> None:
         _refuses(lambda bad=bad: _plan(v, filename=bad))
 
 
-def test_a_folder_outside_the_skeleton_refuses() -> None:
-    """Including the one that matters: nothing auto-writes into the shared core tier."""
+def test_a_folder_outside_the_declared_skeleton_refuses() -> None:
+    """A vault that declares the Doc 2 skeleton as its `writable_folders` refuses every other
+    folder, as the engine did for every vault before a manifest could say so. `..` refuses in any
+    vault: nothing auto-writes into the shared core tier."""
     v = _vault()
-    for bad in ("00-operator", "10-reference", "_archive", ".."):
-        _refuses(lambda bad=bad: _plan(v, folder=bad), containing="writable project folder")
+    (v / ".substrate.toml").write_text(
+        'name = "demo"\nwritable_folders = ["02-areas", "03-references", "04-synthesis"]\n')
+    (v / "_archive").mkdir()
+    _refuses(lambda: _plan(v, folder="_archive"), containing="not in a writable folder")
+    for bad in ("00-operator", "10-reference"):
+        (v / bad).mkdir()
+        _refuses(lambda bad=bad: _plan(v, folder=bad), containing="operator or reference tier")
+    _refuses(lambda: _plan(v, folder=".."), containing="`..`")
 
 
 def test_non_markdown_refuses() -> None:
@@ -322,6 +335,7 @@ def test_ingest_refuses_a_skip_list_filename() -> None:
     with tempfile.TemporaryDirectory() as td:
         v = Path(td) / "proj"
         (v / "02-areas").mkdir(parents=True)
+        (v / ".substrate.toml").write_text('name = "proj"\n')
         for name in sorted(DEFAULT_SKIP.files):
             try:
                 _resolve_target(v, "02-areas", name)
@@ -330,7 +344,7 @@ def test_ingest_refuses_a_skip_list_filename() -> None:
                 continue
             raise AssertionError(f"{name} was accepted into a writable folder")
         # an ordinary filename is unaffected
-        assert _resolve_target(v, "02-areas", "area-digest.md").name == "area-digest.md"
+        assert _resolve_target(v, "02-areas", "area-digest.md").filename == "area-digest.md"
 
 
 if __name__ == "__main__":
