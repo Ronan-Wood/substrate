@@ -15,6 +15,7 @@ a declaration leaves out.
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import sys
 import tempfile
@@ -546,13 +547,39 @@ def test_a_new_folder_named_decomposed_is_refused(root: Path) -> None:
         "02-areas", "03-references", "04-synthesis"]
 
 
+def _folder_reaching(v: Path, limit: int) -> str:
+    """A folder of 200-byte names, enough of them that `<v>/<folder>/new.md` is `limit` bytes or
+    more. Each name is under every volume's NAME_MAX, so only the path's length is at fault."""
+    base = len(os.fsencode(str(v))) + len("/new.md")
+    return "/".join(["d" * 200] * ((limit - base) // 201 + 1))
+
+
 def test_a_path_too_long_for_compose_to_read_is_refused(root: Path) -> None:
     """Written relative to a descriptor, a path past PATH_MAX is created, and compose's walk then
-    never finds the note, without an error."""
+    never finds the note, without an error. The limit is the volume's: 1024 on APFS, 4096 on ext4,
+    so a fixed length tested only one of them."""
     v = _vault(root)
-    said = _refusal(lambda: _write(v, "/".join(["d" * 200] * 6)))
+    before = _files(v)
+    said = _refusal(lambda: _write(v, _folder_reaching(v, os.pathconf(v, "PC_PATH_MAX"))))
     assert "compose cannot read a path" in said, said
-    assert not (v / ("d" * 200)).exists()
+    assert _files(v) == before and not (v / ("d" * 200)).exists()
+
+
+@pytest.mark.parametrize("limit", [1024, 4096])
+def test_a_path_too_long_is_refused_at_the_plan_under_either_limit(
+        root: Path, limit: int, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both platforms' limits on either machine. Refused at the plan, before anything opens the
+    path: past the volume's real limit, an open would fail with ENAMETOOLONG instead."""
+    v = _vault(root)
+    before = _files(v)
+    real = os.pathconf
+    monkeypatch.setattr(notes.os, "pathconf",
+                        lambda p, name: limit if name == "PC_PATH_MAX" else real(p, name))
+    folder = _folder_reaching(v, limit)
+    said = _refusal(lambda: notes.plan(project_vault=v, content=GOOD, filename="new.md",
+                                       folder=folder, book=notes.PlanBook()))
+    assert "compose cannot read a path" in said and f"of {limit} bytes" in said, said
+    assert _files(v) == before and not (v / ("d" * 200)).exists()
 
 
 def test_another_case_of_a_skipped_file_name_is_refused(root: Path) -> None:
