@@ -1,4 +1,5 @@
-# The Lean model of `blobs gc --unreferenced`, against the real planner (experiments/lean-blob-gc).
+# The Lean models of the verified paths, each against the real code: `blobs gc --unreferenced`
+# (experiments/lean-blob-gc) and compose's quarantine (experiments/lean-quarantine).
 #
 # ON PULL REQUESTS THAT TOUCH THE ENGINE OR THE MODEL, and not a required check: a required check
 # behind a path filter never reports on a pull request outside its paths, and a check that never
@@ -15,6 +16,7 @@ on:
   pull_request:
     paths:
       - "experiments/lean-blob-gc/**"
+      - "experiments/lean-quarantine/**"
       - "substrate/**"
       - "pyproject.toml"
       - "uv.lock"
@@ -52,6 +54,10 @@ jobs:
         run: cd experiments/lean-blob-gc/lean && lake build
       - name: every theorem, and only Lean's standard axioms
         run: python3 experiments/lean-blob-gc/lean/check_axioms.py
+      - name: build the quarantine model
+        run: cd experiments/lean-quarantine/lean && lake build
+      - name: every quarantine theorem, and only Lean's standard axioms
+        run: python3 experiments/lean-quarantine/lean/check_axioms.py
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       # The `test` group (hypothesis among it) and pyyaml, which the planner reads frontmatter with,
       # both exactly as the lock holds them, hashes checked.
@@ -80,3 +86,18 @@ jobs:
       # Exits 1 while a spelling's reference is missed by the key scan, 2 if the repro is broken.
       - name: the repro passes
         run: uv run --no-sync python experiments/lean-blob-gc/harness/repro_hidden_reference.py
+      # The real compose against the quarantine model, on generated vaults.
+      - name: the quarantine harness, 2,000 cases
+        run: uv run --no-sync python experiments/lean-quarantine/harness/run.py agree --cases 2000
+      # Each planted regression must be caught, with a disagreement and not a crash.
+      - name: the quarantine harness still notices every planted regression
+        run: |
+          for mutant in keep-stale ceiling-ge no-default faults-ignored allow-empty; do
+            if out=$(uv run --no-sync python experiments/lean-quarantine/harness/run.py agree --mutant "$mutant" --cases 500 2>&1); then
+              echo "$out"
+              echo "the $mutant regression went unnoticed: the harness is not testing compose"
+              exit 1
+            fi
+            echo "$out" | tail -n 5
+            grep -q "minimal disagreement" <<<"$out"
+          done

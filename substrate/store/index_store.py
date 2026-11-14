@@ -518,6 +518,50 @@ class IndexStore:
             self.db.execute("ROLLBACK")
             raise
 
+    def set_quarantined(self, rows: list[tuple[str, str, str, str | None, str, str | None, str]]
+                        ) -> None:
+        """Replace every `quarantine` row with `rows`, each (absolute source path, vault,
+        vault-relative path, fingerprint or None, kind, key or None, reason), stamped with the
+        index's version now.
+        Compose calls it right after reconcile, so the record describes the documents just
+        written whatever an assertion after it decides."""
+        stamp = self.index_version
+        self.db.execute("BEGIN")
+        try:
+            self.db.execute(schema.QUARANTINE)
+            self.db.execute("DELETE FROM quarantine")
+            self.db.executemany(
+                "INSERT INTO quarantine(source_path, vault, path, fingerprint, kind, key, reason, "
+                "index_version) VALUES (?,?,?,?,?,?,?,?)", [(*r, stamp) for r in rows])
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def quarantined(self) -> list[dict] | None:
+        """The notes the last compose quarantined, as `{"vault", "path", "kind", "key",
+        "reason"}` ordered by vault and path, with `source_path` and `fingerprint` for
+        `freshness.drift`. `reason` quotes the note: it is the operator terminal's, never a
+        client's (`introspect._shown_quarantine`).
+
+        None when this index keeps no record that can be trusted: a file last composed by an
+        engine from before the table, which refused rather than quarantined, or rows written
+        against another `index_version`, which an older engine's compose leaves behind when it
+        rewrites the documents. Reported as not kept, never as empty or as still true."""
+        try:
+            rows = self.db.execute("SELECT vault, path, source_path, fingerprint, reason, "
+                                   "index_version, kind, key FROM quarantine "
+                                   "ORDER BY vault, path").fetchall()
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e) and "no such column" not in str(e):
+                raise
+            return None
+        now = self.index_version if rows else None
+        if any(r[5] != now for r in rows):
+            return None
+        return [{"vault": r[0], "path": r[1], "source_path": r[2], "fingerprint": r[3],
+                 "reason": r[4], "kind": r[6], "key": r[7]} for r in rows]
+
     def defaulted_by_doc(self) -> dict[str, list[str]]:
         """Each document's `spine_defaults` rows, in `spine.DEFAULTED_FIELDS` order."""
         try:

@@ -28,12 +28,13 @@ go = "1.21"
 | `identity` | absolute path | a JSON file of people and things that notes mention, resolved on every compose |
 | `skip` | list of names | the file and folder names compose never indexes in this vault. Without it, the default list below applies |
 | `writable_folders` | list of folder paths | where `ingest` adds a note and `amend` changes one. Without it, any folder compose doesn't skip |
+| `quarantine_ceiling` | whole number, or `"none"` | the most notes compose may quarantine and still index the scope ([below](#when-a-note-fails-quarantine)). Read from the project vault only |
 
 In TOML, every key written after a `[table]` header belongs to that table, so keep every top-level
 key above `[reference_pins]`. Any key listed above, found inside a `[table]`, fails the compose
 with a message naming the key and the table. The engine also checks the shape of `name`, `inherits`,
-`reference_domains`, `reference_pins` and `skip`, and refuses a malformed one. The write path
-checks `writable_folders` the same way.
+`reference_domains`, `reference_pins`, `skip` and `quarantine_ceiling`, and refuses a malformed
+one. The write path checks `writable_folders` the same way.
 
 `skip` names what compose leaves out of the index:
 
@@ -122,7 +123,8 @@ A note declares its spine in YAML frontmatter. A passage under `10-reference/` t
 from the source's `_meta.md` instead. A note with no `status` composes as `active`, and a note with
 no `doc_type` composes as `reference`. `substrate status --scope <name>` reports how many notes
 were defaulted on each field, so you can tell when notes are retrieved by default without having
-said so. A declared value outside the vocabulary fails the compose. This note declares both:
+said so. A declared value outside the vocabulary quarantines the note
+([below](#when-a-note-fails-quarantine)). This note declares both:
 
 ```markdown
 ---
@@ -153,7 +155,9 @@ spine, read [`migration-vocabulary.md`](migration-vocabulary.md) first.
 
 A default stands in for a field a note doesn't declare. It doesn't stand in for frontmatter the
 engine couldn't read, or for an engine key spelled another way. These are the cases, and what
-compose does with each. For a passage, the same rules apply to its source's `_meta.md`.
+compose does with each. For a passage, the same rules apply to its source's `_meta.md`. A note
+that fails is quarantined: left out of the index while the rest of the scope composes
+([below](#when-a-note-fails-quarantine)).
 
 | the note | what compose does |
 |---|---|
@@ -189,8 +193,61 @@ are compared exactly as written, so `status: Archived` fails as a value outside 
 A `key:: value` line in the body is body text to the engine, whatever Dataview or Logseq make of
 it, so a note that declares its class only that way is `unclassified`.
 
-Until a later release lets one bad note be left out on its own, a note that fails the compose
-stops the whole scope from composing, as before.
+### When a note fails: quarantine
+
+A note that fails on its own is **quarantined**: compose leaves it out of the index and indexes
+the rest of the scope. It is left out entirely. It is not indexed under a fallback class or spine,
+and an earlier version that was indexed before it broke is removed. Each quarantined note is named
+by its vault and vault-relative path:
+
+- in your terminal, with the reason, which quotes the note's own value: compose's
+  `WARNING (quarantine)` on stderr and its `quarantined:` lines on stdout, and `substrate status`;
+- over MCP, by the **kind** of fault and the engine **key** it concerns, never by the value: the
+  `status` tool's `quarantined` list (`vault`, `path`, `kind`, `key`), and the refresh record. The
+  kinds and keys are closed vocabularies, in [`contract/contract.json`](../contract/contract.json)
+  under `quarantine`, so a call's text never reaches a caller that did not ask for calls. A null
+  list means the index was composed before the engine kept the record, not that nothing was left
+  out;
+- in the refresh record, as the count and the first 50 notes. Every reply's `refresh` block carries
+  the count, `refresh.quarantined`, and its `note` says to read `status`. Both are as of the last
+  refresh pass, as `frozen` is: after a compose run by hand, `status` is the live answer. A scope
+  with quarantined notes is not frozen;
+- in a refresh pass's report, from the records compose writes for it, never from its output.
+
+A note the filesystem refuses to read (a file a sync client has not fetched, a permission
+error) still refuses the scope: the read may work on the next pass, and quarantine would remove the
+note's last good version from the index. A file that never reads can be left out with `skip`.
+A reason is cut to 300 characters.
+
+Fix the note and the next compose indexes it. Until the note, its source's `_meta.md` or the
+engine's note format changes, `status`'s `drift` counts it under `quarantined`, not as a note
+missing from the index.
+
+| what fails | what compose does |
+|---|---|
+| one note: frontmatter it cannot read, a value outside the vocabulary, an engine key spelled another way, `superseded` with no `superseded_by`, a class policy refusal (`missing required field(s) ['title']`), a note that is not UTF-8 or is over the 64 MiB cap, an A18 or A22 per-note assertion | quarantines the note |
+| the scope: a duplicate `doc_id`, two byte-identical notes, a declared vault that is not there, a manifest it cannot read, a skipped file that declares a spine, a `_meta.md` the vault layer cannot read, a note the filesystem refuses to read, a link or another user's folder where a note's ingest folder goes | refuses the whole scope, as before |
+| more notes than the ceiling | refuses the whole scope, saying how many failed and what the ceiling is |
+| every note the scope discovered | refuses the whole scope, whatever the ceiling (`"none"` included), so the earlier index stays |
+
+**The ceiling.** Without `quarantine_ceiling`, it is the larger of 10 notes and 1% of the scope's
+notes, rounded down. The scope's notes are every note compose discovers, in the project vault and
+every vault it inherits, failed or not; skipped files are not counted. So a scope of up to 1,099
+notes may quarantine 10, one of 1,100 to 1,199 may quarantine 11, and so on. One note more refuses
+the scope. Set it in the project vault's manifest, above any `[table]`:
+
+```toml
+quarantine_ceiling = 25        # a count: refuse when more than 25 notes fail
+quarantine_ceiling = 0         # refuse when any note fails, as compose did before quarantine
+quarantine_ceiling = "none"    # never refuse for the count (a scope with no note left still does)
+```
+
+Anything else (a negative number, `true`, `2.5`, any other string) fails the compose.
+
+A compose that refuses before it starts removing ingest folders removes none and reports no note as
+pruned or quarantined. One that refuses later (a folder that cannot be removed, an assertion after
+the index is written) may already have removed some; the next compose reports what it removes. An inherited
+vault's `quarantine_ceiling` is checked the same way and then ignored.
 
 ## The engine's folder: `~/.substrate`
 

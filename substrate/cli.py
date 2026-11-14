@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import io
 import json
 import math
 import os
@@ -31,6 +32,8 @@ from collections import Counter
 from pathlib import Path
 
 from substrate import blobs, classes, identity, private, prune, refresh, render, scopes, writelog
+from substrate import freshness
+from substrate import quarantine as _quarantine
 from substrate.checks import document_checks, partition_check_failures
 from substrate.paths import ModelsFolderError, configure, internal_cache_footprint, models_folder
 
@@ -1205,16 +1208,86 @@ def cmd_register(args: argparse.Namespace) -> int:
     return 0
 
 
+def _vault_root(n, vaults) -> Path:
+    """The root of the vault `n` was discovered in. By name AND containment: two vaults in a chain
+    may share a directory name, and a map keyed by name keeps only one of them."""
+    return next(v.path for v in vaults if v.name == n.vault and n.path.is_relative_to(v.path))
+
+
+def _vault_relative(n, vaults) -> str:
+    """A note's path inside its vault, as `status` and the refresh record name it."""
+    return n.path.relative_to(_vault_root(n, vaults)).as_posix()
+
+
+def _fingerprint(n, vaults) -> str | None:
+    """`freshness.quarantine_fingerprint` of a note compose has just failed, over the note and its
+    source's `_meta.md`. Taken when the note fails, so a fix saved later in the compose is not
+    fingerprinted as the broken version."""
+    from substrate import vault as _vault
+
+    return freshness.quarantine_fingerprint(
+        n.path, _vault.source_meta_path(n.path, _vault_root(n, vaults)))
+
+
 def cmd_compose(args: argparse.Namespace) -> int:
+    """`_compose`, with its report to a refresh pass (`substrate.compose_report`) closed by an `end`
+    record naming the exit code. A compose that raises writes no `end`, and the pass says its
+    report was cut short."""
+    from substrate import compose_report
+
+    report = compose_report.open_report(getattr(args, "report", None))
+    said = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(_Tee(sys.stderr, said)):
+            rc = _compose(args, report)
+        if rc != 0:
+            # What the operator's terminal read, as one record: from the first FATAL line on, or
+            # the last thing said when there was none.
+            text = said.getvalue()
+            at = text.find("FATAL")
+            lines = [ln for ln in text.splitlines() if ln.strip()]
+            report.write(compose_report.REFUSED,
+                         message=(text[at:] if at >= 0 else (lines[-1] if lines else "")).strip())
+        report.write(compose_report.END, exit=rc)
+        return rc
+    finally:
+        report.close()
+
+
+class _Tee(io.TextIOBase):
+    """Writes go to `out` and are kept in `copy`."""
+
+    def __init__(self, out, copy) -> None:
+        self._out, self._copy = out, copy
+
+    def write(self, text: str) -> int:
+        self._copy.write(text)
+        return self._out.write(text)
+
+    def flush(self) -> None:
+        self._out.flush()
+
+
+def _report_pruned(report, s) -> None:
+    from substrate import compose_report
+
+    report.write(compose_report.PRUNED, vault=s.vault, note=s.note.as_posix(),
+                 folder=s.folder.name, why=prune.why(s))
+
+
+def _compose(args: argparse.Namespace, report) -> int:
     """Resolve a project vault's manifest, ingest the composed note set, index it, and PROVE the
     composition — the inheritance mechanism end to end (Doc 2 §1–2, §6).
 
-    The whole scope is refused if ANY note fails to ingest — a partially composed scope is a
-    silently-wrong retrieval set. A note that declares no status composes as `active`, and one that
+    A note that fails on its own is QUARANTINED: left out of the index, and named with its reason
+    in this read-out, in `status` and in the refresh record (`substrate/quarantine.py`). The whole
+    scope is refused for a fault that is not one note's own, when more notes fail than the
+    project manifest's `quarantine_ceiling` allows, and when every note failed, so a broken index
+    never reads as complete. A note that declares no status composes as `active`, and one that
     declares no doc_type as `reference`, so a vault of plain notes composes; each is recorded as
     defaulted (`spine.DEFAULTED_FIELDS`) and `substrate status` counts them, which is what keeps an
     undeclared note from joining the live retrieval set unnoticed. A DECLARED value outside the
-    vocabulary still refuses, and so does a note a default must not stand in for
+    vocabulary still quarantines the note, and so does one a default must not stand in for
     (`markdown.ingest._judge_opening`). Confidence is optional on this path too (absent → `unjudged`),
     because a forced settledness marker is a guessed one and this path must keep accepting a
     migrated corpus that is 530/657 unjudged. The vault WRITE path (`notes.py`) is stricter and
@@ -1222,15 +1295,16 @@ def cmd_compose(args: argparse.Namespace) -> int:
 
     Five assertions run, so a green run is a proof rather than a hope:
 
-      * **A22**, BEFORE indexing — the per-note sweep over every ingested note. Loss/corruption
-        failures refuse the scope; quality failures are reported against the note that produced
-        them. Before this existed, `compose` ran none of the per-document A-series at all.
+      * **A22**, BEFORE indexing — the per-note sweep over every ingested note. A loss or
+        corruption failure quarantines its note; quality failures are reported against the note
+        that produced them. Before this existed, `compose` ran none of the per-document A-series at all.
       * after indexing — **A-compose** (inheritance actually composed, no tier silently dropped),
         **A20** (the status filter partitions exactly), **A21** (every doc_type valid, chunk↔doc
         denormalization intact) and **A23** (the same two properties for confidence).
     """
+    from substrate import compose_report
     from substrate import vault as _vault
-    from substrate.markdown.ingest import CoverageError, ingest_markdown
+    from substrate.markdown.ingest import CoverageError, OutputDirError, ingest_markdown
     from substrate.spine import SpineError
     from substrate.store.index_store import (
         ConfidenceError,
@@ -1339,18 +1413,32 @@ def cmd_compose(args: argparse.Namespace) -> int:
         if len(unsealed) > 10:
             print(f"    … and {len(unsealed) - 10} more", file=sys.stderr)
 
-    # Ingest every note. Collect failures rather than aborting on the first, then refuse the WHOLE
-    # scope if any failed — a composed index missing notes is exactly the silent-loss shape, so it
-    # is never indexed partially. The out-dir name flattens the note's vault-relative path so two
-    # notes (even same filename in different sources) never share an ingest dir.
-    ingested: set[str] = set()
-    ingest_dirs: list[tuple[Path, Path]] = []   # (note path, its ingest dir) for the A22 sweep
-    failures: list[tuple[Path, str]] = []
-    roots = {v.name: v.path for v in scope.vaults}
+    # Ingest every note, and judge each on its own. A note that fails here is QUARANTINED rather
+    # than refusing the scope (`substrate/quarantine.py`): left out of the index entirely, its
+    # ingest folder removed below so no earlier version of it stays indexed, and named with its
+    # reason. The scope is still refused for a fault that is not one note's own, when more notes
+    # fail than the ceiling allows, and when none is left, so a broken index never looks complete. The out-dir
+    # name flattens the note's vault-relative path so two notes (even same filename in different
+    # sources) never share an ingest dir.
+    # Keyed by the note's path: a NoteRef holds a list, so it cannot be a key, and a path names one
+    # note in a scope.
+    notes = {n.path: n for n in scope.notes}
+    # A failed note's outcome is (kind, key, text): its `quarantine.KINDS` kind and engine key,
+    # which a client may see, and the text with the note's own value in it, which only this
+    # terminal and `substrate status` show.
+    outcomes: dict[Path, tuple[str, str | None, str] | None] = {}
+    scope_faults: list[str] = []
+    results: dict[Path, tuple[str, Path]] = {}   # note path -> (doc_id, its ingest dir)
+    fingerprints: dict[Path, str | None] = {}     # each failed note's, taken as it fails
     for n in scope.notes:
         # A per-note out dir: vault + filename stem + a short path hash, so two same-named files
         # (e.g. each source's passages/00-*.md) never collide on one ingest directory.
         out_dir = index_root / private.ingest_dir_name(n.vault, n.path)
+        if n.path in scope.unreadable:
+            kind, text = scope.unreadable[n.path]
+            outcomes[n.path] = (kind, None, f"unreadable: {text}")
+            fingerprints[n.path] = _fingerprint(n, scope.vaults)
+            continue
         try:
             r = ingest_markdown(
                 n.path, out_dir, doc_class=n.doc_class,
@@ -1358,66 +1446,151 @@ def cmd_compose(args: argparse.Namespace) -> int:
                 override_confidence=n.override_confidence,
                 raw=n.raw, raw_sha256=n.raw_sha256, raw_location=n.raw_location,
                 override_version=n.override_version,
-                extra_domains=n.extra_domains, vault=n.vault, vault_root=roots.get(n.vault),
+                extra_domains=n.extra_domains, vault=n.vault,
+                vault_root=_vault_root(n, scope.vaults),
                 tier=n.tier,
             )
-        except (ValueError, classes.ClassPolicyError, SpineError, CoverageError) as e:
-            failures.append((n.path, f"{type(e).__name__}: {e}"))
+        except OutputDirError as e:
+            # The index root's fault, not the note's: a link or another user's folder where this
+            # note's ingest folder goes. Quarantining would hide a planted folder behind one note.
+            scope_faults.append(f"{n.path}: {e}")
             continue
-        ingested.add(r.doc_id)
-        ingest_dirs.append((n.path, out_dir))
-        print(f"  [{n.tier}] {n.vault}/{n.path.name}  ->  {r.doc_id}  "
+        except (ValueError, classes.ClassPolicyError, SpineError, CoverageError) as e:
+            outcomes[n.path] = (*_quarantine.kind_of(e), f"{type(e).__name__}: {e}")
+            fingerprints[n.path] = _fingerprint(n, scope.vaults)
+            continue
+        except OSError as e:
+            # The note could not be read after discovery read it: deleted, or its mode changed,
+            # mid-compose. Not quarantined: a read that fails may be a volume mid-sync, and
+            # quarantine would remove the note's last good version (`Scope.unreadable` says why).
+            # A scope fault, said rather than a traceback. Any other OSError (the ingest folder,
+            # the disk) ends the compose as it did.
+            if e.filename is None or os.fspath(e.filename) != os.fspath(n.path):
+                raise
+            scope_faults.append(f"{n.path}: cannot be read: {e}")
+            continue
+        outcomes[n.path] = None
+        results[n.path] = (r.doc_id, out_dir)
+        print(f"  [{n.tier}] {_quarantine.shown(f'{n.vault}/{n.path.name}')}  ->  {r.doc_id}  "
               f"({r.status}/{r.doc_type}/{r.confidence}{', ' + ','.join(r.domains) if r.domains else ''})")
-
-    if failures:
-        print(f"\nFATAL: {len(failures)} note(s) failed to ingest — refusing to index a partial "
-              "scope:", file=sys.stderr)
-        for path, why in failures:
-            print(f"    {path}: {why}", file=sys.stderr)
-        return 3
 
     # A22 — the per-NOTE assertion sweep. compose proves cross-document properties (A-compose, A20,
     # A21) and nothing else; until this ran, the per-document A-series lived only in `verify`, which
     # the vault path never calls. So a note that `verify` fails could enter a composed index under a
     # wholly green compose — a well-formed artefact whose defect is in what it omits about itself,
     # which is this project's signature failure. Runs before indexing, so a loss-class failure
-    # refuses the scope rather than being discovered after the write.
+    # quarantines its note rather than being discovered after the write.
     #
-    # Two tiers, and the DEFAULT IS REFUSE: only the ids in `checks._QUALITY_CHECKS` report, else
-    # is fatal. Quality failures are named per note rather than swallowed — Doc 2 §8 makes migration
-    # a supervised job over content the engine does not own, and real notes legitimately chunk
-    # imperfectly; refusing those would make faithful migration impossible, while hiding them would
-    # rebuild the gap this check exists to close.
-    fatal, warned = partition_check_failures(ingest_dirs)
+    # Two tiers, and the DEFAULT IS QUARANTINE: only the ids in `checks._QUALITY_CHECKS` report,
+    # anything else quarantines the note. Quality failures are named per note rather than swallowed
+    # — Doc 2 §8 makes migration a supervised job over content the engine does not own, and real
+    # notes legitimately chunk imperfectly; refusing those would make faithful migration
+    # impossible, while hiding them would rebuild the gap this check exists to close.
+    fatal, warned = partition_check_failures([(p, d) for p, (_, d) in results.items()])
+    wrote: set[Path] = set()   # notes whose ingest folder holds this run's artifacts, not older ones
+    for path, name, detail in fatal:
+        if results.pop(path, None) is not None:
+            wrote.add(path)
+            outcomes[path] = ("per_note_assertion", None, f"A22 per-note assertion: {name} — {detail}")
+        else:
+            outcomes[path] = (*outcomes[path][:2],
+                              f"{outcomes[path][2]}; A22 per-note assertion: {name} — {detail}")
+        fingerprints[path] = _fingerprint(notes[path], scope.vaults)
+    warned = [w for w in warned if w[0] in results]
 
-    if fatal:
-        print(f"\nFATAL (A22 per-note assertion): {len(fatal)} failure(s) across "
-              f"{len({p for p, _, _ in fatal})} note(s) — refusing to index content that does not "
-              "pass the per-document gates:", file=sys.stderr)
-        for path, name, detail in fatal:
-            print(f"    {path}: {name} — {detail}", file=sys.stderr)
+    ceiling = _quarantine.ceiling_for(scope.quarantine_ceiling, len(scope.notes))
+    decision = _quarantine.decide(outcomes, scope_faults, ceiling)
+    quarantined = [(notes[p], kind, key, _quarantine.reason(text))
+                   for p, (kind, key, text) in decision.quarantined]
+    # EVERY REFUSAL BEFORE ANYTHING IS REMOVED: the decision's, then `refuse_missing`'s. A compose
+    # that refuses here has removed no ingest folder and written no record to a pass's report.
+    if decision.refusal is not None:
+        if decision.refusal == _quarantine.FAULT:
+            print(f"\nFATAL: {len(scope_faults)} fault(s) that are not one note's own — refusing "
+                  "to index the scope:", file=sys.stderr)
+            for fault in scope_faults:
+                print(f"    {_quarantine.shown(fault)}", file=sys.stderr)
+        elif decision.refusal == _quarantine.NOTHING_LEFT:
+            print(f"\nFATAL: all {len(quarantined)} note(s) failed to ingest, and none was left to "
+                  f"index — refusing to replace the index with an empty one, whatever "
+                  f"`quarantine_ceiling` says:", file=sys.stderr)
+        else:
+            declared = ("declared in" if scope.quarantine_ceiling is not None
+                        else "the larger of 10 notes and 1% of the scope's, rounded down; set it "
+                             "with `quarantine_ceiling` in")
+            print(f"\nFATAL: {len(quarantined)} of {len(scope.notes)} note(s) failed to ingest, "
+                  f"more than the quarantine ceiling of {ceiling} ({declared} "
+                  f"{project / _vault.MANIFEST}) — refusing to index a mostly broken scope:",
+                  file=sys.stderr)
+        for n, _, _, why in quarantined:
+            print(f"    {_quarantine.shown(str(n.path))}: {why}", file=sys.stderr)
         return 3
+    ingested = {results[p][0] for p in decision.indexed}
+    ingest_dirs = [(p, results[p][1]) for p in decision.indexed]
 
     # DELETED NOTES, AND NOTES A VAULT NOW SKIPS. Their ingest folders are the only stale content
     # a plain compose leaves, and `assert_composed` below refuses a scope that still holds one;
-    # `prune` says what it may remove.
+    # `prune` says what it may remove. Asked before anything is removed, quarantined folders
+    # included: a vault that looks unmounted refuses the scope with the tree untouched.
     stale = prune.stale(index_root, scope.vaults, {d.name for _, d in ingest_dirs})
     try:
         emptied = prune.refuse_missing(stale, scope.vaults, Counter(n.vault for n in scope.notes))
-        prune.remove(stale, lambda s: print(f"  {prune.line(s)}", flush=True))
-        for name in emptied:
-            print(f"  {prune.emptied_line(name, stale)}", flush=True)
     except prune.PruneError as e:
         print(f"\nFATAL (prune): {e}", file=sys.stderr)
         return 3
+
+    # A QUARANTINED NOTE IS LEFT OUT ENTIRELY. Its ingest folder may hold an earlier, good version
+    # (or this run's artifacts, when A22 failed it), and reconcile indexes every folder it finds,
+    # so the folder goes before reconcile runs. A folder that holds anything ingest did not write
+    # is left, and `assert_composed` below refuses the scope for it.
+    folders = {index_root / private.ingest_dir_name(n.vault, n.path): n
+               for n, _, _, _ in quarantined}
+    removed: list[prune.Stale] = []
+    try:
+        for folder in prune.remove_quarantined(folders):
+            n = folders[folder]
+            if n.path not in wrote:
+                removed.append(prune.Stale(n.vault, Path(_vault_relative(n, scope.vaults)),
+                                           folder, why=prune.QUARANTINED))
+        prune.remove(stale, removed.append)
     except OSError as e:
-        print(f"\nFATAL (prune): could not remove a deleted or skipped note's ingest folder: {e}",
-              file=sys.stderr)
+        print(f"\nFATAL (prune): could not remove an ingest folder: {e}", file=sys.stderr)
         return 3
+    for s_ in removed:
+        print(f"  {prune.line(s_)}", flush=True)
+    for name in emptied:
+        print(f"  {prune.emptied_line(name, stale)}", flush=True)
+    for n, _, _, why in quarantined:
+        print(f"  {_quarantine.MARK} "
+              f"{_quarantine.shown(f'{n.vault}/{_vault_relative(n, scope.vaults)}')}  ({why})",
+              flush=True)
 
     with IndexStore(db) as store:
         announce_if_rebuilt(store)
         rep = reconcile(store, index_root)
+        # What this index leaves out, kept beside it: `status` names each note, `drift` does not
+        # count it as missing, and the refresh record copies it. Written right after reconcile, so
+        # it describes the documents just written even when an assertion below refuses.
+        # A note whose folder `remove_quarantined` had to leave is indexed by now, in its earlier
+        # version, and `assert_composed` refuses below; it is not recorded as left out.
+        held_now = {str(Path(r[0]).resolve())
+                    for r in store.db.execute("SELECT source_path FROM documents")}
+        store.set_quarantined([
+            (str(n.path), n.vault, _vault_relative(n, scope.vaults), fingerprints.get(n.path),
+             kind, key, why)
+            for n, kind, key, why in quarantined if str(n.path.resolve()) not in held_now])
+        # The pass's report, only now the record is committed: what was removed, and what is left
+        # out, each a record (`compose_report`) with the kind and key and no text from a note.
+        for s_ in removed:
+            _report_pruned(report, s_)
+        for name in emptied:
+            report.write(compose_report.PRUNED_VAULT, vault=name,
+                         removed=sum(1 for s_ in stale if s_.vault == name))
+        for n, kind, key, _ in quarantined:
+            if str(n.path.resolve()) not in held_now:
+                report.write(compose_report.QUARANTINED,
+                             path=f"{n.vault}/{_vault_relative(n, scope.vaults)}", fault=kind,
+                             key=key)
         s = store.stats()
         try:
             comp = _vault.assert_composed(store, ingested_doc_ids=ingested)
@@ -1479,6 +1652,17 @@ def cmd_compose(args: argparse.Namespace) -> int:
         print(f"\nWARNING (scope registry): {e}", file=sys.stderr)
         print(f"  scope: {scope.name!r} NOT registered — query with --db {db}",
               file=sys.stderr)
+    if quarantined:
+        # LOUD, and last: the one part of a successful compose that says the index is not the
+        # whole vault. On stderr, where a terminal shows warnings; the `quarantined:` lines above
+        # are stdout's, for a refresh pass's report.
+        print(f"\nWARNING (quarantine): {len(quarantined)} of {len(scope.notes)} note(s) are "
+              f"QUARANTINED, left out of the index because each failed to compose; the rest is "
+              f"indexed (ceiling {'none' if ceiling is None else ceiling}). Fix each and "
+              f"recompose:", file=sys.stderr)
+        for n, _, _, why in quarantined:
+            print(f"    {_quarantine.shown(f'{n.vault}/{_vault_relative(n, scope.vaults)}')}: {why}",
+                  file=sys.stderr)
     return 0
 
 
@@ -1815,6 +1999,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 2
     with store_cm as store:
         payload = introspect.status_payload(store, entry, stack=st, registry=args.registry)
+        # The reasons, with the note's own value in them: this terminal's, never the payload's.
+        reasons = {(q["vault"], q["path"]): q["reason"] for q in store.quarantined() or []}
 
     if args.json:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -1836,6 +2022,22 @@ def cmd_status(args: argparse.Namespace) -> int:
     else:
         print(f"  defaulted: {dflt['status']} note(s) declare no status (indexed as active) · "
               f"{dflt['doc_type']} declare no doc_type (indexed as reference)")
+    # Every quarantined note on its own line, never a count alone: each is missing from every
+    # answer this scope gives, and the reason is what the operator must fix.
+    held = payload["quarantined"]
+    if held is None:
+        print("  quarantined: NOT RECORDED — this index was composed before the engine kept the "
+              "record; the next `substrate compose` keeps it")
+    elif not held:
+        print("  quarantined: none")
+    else:
+        print(f"  QUARANTINED: {len(held)} note(s) are LEFT OUT of this index, because each "
+              f"failed to compose. Fix each and recompose:")
+        for q in held:
+            why = reasons.get((q["vault"], q["path"])) or (
+                q["kind"] + (f": {q['key']}" if q["key"] else ""))
+            print(f"      {_quarantine.shown(q['vault'] + '/' + q['path'])}: "
+                  f"{_quarantine.shown(why)}")
     v = payload["vectors"]
     if v is None:
         # "Not asked for" and "asked for, could not start" are the SAME None here, and stating the
@@ -1879,6 +2081,8 @@ def cmd_status(args: argparse.Namespace) -> int:
                            "recompose to check them)")
         if d["unreadable"]:
             caveats.append(f"{len(d['unreadable'])} UNREADABLE")
+        if d["quarantined"]:
+            caveats.append(f"{d['quarantined']} quarantined and unchanged since")
         head = "no changes detected" if d["unreadable"] else "current"
         print(f"  freshness: {head}  ·  {d['checked']} note(s) verified"
               + (f", {', '.join(caveats)}" if caveats else ""))
@@ -2709,6 +2913,8 @@ def main(argv: list[str] | None = None) -> int:
     comp.add_argument("--registry", default=None,
                       help=f"scope registry to record into (default ${scopes.ENV_VAR}, else "
                            f"{scopes.DEFAULT_REGISTRY})")
+    # The refresh pass's channel (`substrate.compose_report`): the engine's own, so not listed.
+    comp.add_argument("--report", default=None, help=argparse.SUPPRESS)
     comp.set_defaults(func=cmd_compose)
 
     rgs = sub.add_parser("register",

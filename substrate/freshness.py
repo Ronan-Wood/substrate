@@ -101,8 +101,14 @@ def read_bounded(src: Path, cap: int, *, nofollow: bool = False,
     fd = os.open(src, os.O_RDONLY | os.O_NONBLOCK | (os.O_NOFOLLOW if nofollow else 0),
                  dir_fd=dir_fd)
     try:
-        if not _stat.S_ISREG(os.fstat(fd).st_mode):
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(st.st_mode):
             raise NotRegularFile(f"{src} is not a regular file")
+        # Refused before any byte is read when the file is already over the cap: a sparse file of
+        # any size costs nothing to make, and reading cap+1 bytes of it to find out is not free.
+        # The read below stays bounded for a file that grows after this.
+        if st.st_size > cap:
+            raise FileTooLarge(f"{src} exceeds {cap} bytes")
         chunks, size = [], 0
         while size <= cap:
             block = os.read(fd, 1 << 20)
@@ -117,12 +123,41 @@ def read_bounded(src: Path, cap: int, *, nofollow: bool = False,
         os.close(fd)
 
 
-def drift(store, note_paths: list[Path]) -> dict:
+def quarantine_fingerprint(note: Path, meta: Path | None) -> str | None:
+    """What a quarantined note was judged on, hashed: the note's bytes, its source's `_meta.md`
+    (a passage's class and spine come from there), and the engine's note format
+    (`spine.NOTES_VERSION`, which moves when the vocabulary does). Compose stores it and `drift`
+    compares it, so a note counts as still quarantined only while none of them has changed. None
+    when a file cannot be read or is over the vault's size cap. Every read is bounded by the read
+    itself, so a note quarantined for its size (a sparse file of any length) is never read whole,
+    by compose or by every `status`; a note still over the cap matches its stored None."""
+    from substrate.spine import NOTES_VERSION
+    from substrate.vault import _MAX_BYTES
+
+    h = hashlib.sha256(f"notes-v{NOTES_VERSION}\0".encode())
+    try:
+        for path in (note, meta):
+            data = b"" if path is None else read_bounded(path, _MAX_BYTES)
+            h.update(len(data).to_bytes(8, "big") + data)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def drift(store, note_paths: list[Path], quarantined: list[dict] | None = None,
+          fingerprint=None) -> dict:
     """Compare the notes on disk against what this index holds.
 
     `note_paths` is the composed scope's note set (`vault.resolve_scope(...).notes`), so "added"
     means a note the manifest composes that the index does not have — which is the case a caller
     most needs, since it looks identical to a question the corpus simply cannot answer.
+
+    `quarantined` is the index's quarantine record (`IndexStore.quarantined`), and `fingerprint`
+    maps a note's path to its `quarantine_fingerprint` now. A note the last compose quarantined,
+    whose fingerprint is unchanged, is counted under `quarantined` rather than `added`:
+    recomposing would quarantine it again, so it does not make the scope stale. One whose note,
+    `_meta.md` or the engine's note format changed since is `added`, because the next compose may
+    index it.
 
     Returns counts plus the paths involved, and `stale` — true if ANY of the three differ.
     """
@@ -139,6 +174,11 @@ def drift(store, note_paths: list[Path]) -> dict:
 
     added = sorted(set(on_disk) - set(indexed))
     removed = sorted(set(indexed) - set(on_disk))
+    held = {str(Path(q["source_path"]).resolve()): q.get("fingerprint")
+            for q in quarantined or []}
+    still = [a for a in added
+             if a in held and fingerprint is not None and fingerprint(on_disk[a]) == held[a]]
+    added = [a for a in added if a not in still]
 
     changed: list[str] = []
     unverifiable = 0
@@ -180,4 +220,6 @@ def drift(store, note_paths: list[Path]) -> dict:
         # is the honest boundary of what `stale: false` means. Zero after one recompose.
         "unverifiable": unverifiable,
         "unreadable": unreadable,
+        # Quarantined notes unchanged since the compose that quarantined them (see above).
+        "quarantined": len(still),
     }

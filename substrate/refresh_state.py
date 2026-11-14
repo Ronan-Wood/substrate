@@ -36,7 +36,8 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from substrate.scopes import exclusive, registry_path
+from substrate import quarantine
+from substrate.scopes import exclusive, load, registry_path
 from substrate.render import REF_SEP
 
 STATE_FILENAME = "refresh.json"
@@ -139,6 +140,15 @@ OUTCOMES: dict[str, dict] = {
                  "and every other verdict about it is meaningless."),
     },
 }
+
+# How much of the quarantine list a record keeps. The list is the index's (`IndexStore.quarantined`)
+# and `status` reads it whole; the record is parsed on the query path and capped at
+# MAX_STATE_BYTES across every scope, so it keeps the count and the first notes, each reason cut.
+MAX_QUARANTINED_LISTED = 50
+MAX_PATH_CHARS = 300
+# And at most this many bytes of them per scope, as written: every scope's record shares
+# MAX_STATE_BYTES, and a file over it is unreadable for all of them.
+MAX_LISTED_BYTES = 32 * 1024
 
 _UNKNOWN_NOTE = (
     "no refresh agent has reported on this scope, so nothing here says whether the index still "
@@ -277,21 +287,79 @@ def block_for(row: object) -> dict:
         # usable and are handed over; the verdict is not invented from a word this build cannot
         # interpret — except for a carried freeze, which was established by an outcome this build
         # DID understand and is not in doubt just because the latest word is unfamiliar.
-        return _block(
+        return _with_quarantine(_block(
             known=True, outcome=outcome, attempted=attempted, succeeded=succeeded,
             frozen=True if since else None, frozen_since=since,
             note=(_carried_freeze_note(outcome, since) if since else
                   f"the refresh agent recorded outcome {outcome!r}, which this build has no "
                   f"interpretation for — it is newer than this engine, or hand-edited."),
-        )
+        ), row)
     if since and verdict["frozen"] is not True:
         # Frozen earlier, and the latest pass neither confirmed nor cleared it.
-        return _block(known=True, outcome=outcome, attempted=attempted, succeeded=succeeded,
-                      frozen=True, frozen_since=since, note=_carried_freeze_note(outcome, since))
-    return _block(
+        return _with_quarantine(_block(
+            known=True, outcome=outcome, attempted=attempted, succeeded=succeeded, frozen=True,
+            frozen_since=since, note=_carried_freeze_note(outcome, since)), row)
+    return _with_quarantine(_block(
         known=True, outcome=outcome, attempted=attempted, succeeded=succeeded,
         frozen=verdict["frozen"], frozen_since=since, note=verdict["note"],
-    )
+    ), row)
+
+
+def _count(value: object) -> int | None:
+    """A recorded quarantine count, or None: the row may come from a file someone else wrote."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _quarantine_note(n: int) -> str:
+    return (f"{n} note(s) were QUARANTINED at the last refresh: each failed to compose on its "
+            f"own, so it was left out of the index and the rest was indexed. Answers from that "
+            f"index never include them. `status` names each note and why, as the index holds "
+            f"them now.")
+
+
+def _with_quarantine(block: dict, row: dict) -> dict:
+    """`block` with the record's quarantine count, said in `note` when there is one. A freeze's
+    note keeps first place: the quarantine describes the index answering, which is the older
+    one while a scope is frozen."""
+    n = _count(row.get("quarantined"))
+    block["quarantined"] = n
+    if n:
+        said = _quarantine_note(n)
+        block["note"] = said if not block["note"] else f"{block['note']} {said}"
+    return block
+
+
+def _quarantine_of(scope: str, registry: str | Path | None) -> tuple[int | None, list[dict]]:
+    """The quarantine the scope's index holds now: its count, and the first notes, each as
+    `{"path": "<vault>/<path>", "kind", "key"}`, within MAX_LISTED_BYTES. Read through
+    `IndexStore.quarantined`, the one reader of the record, so its rules (rows an older engine's
+    compose left behind are not kept) hold here too. `(None, [])` when it cannot be read or is not
+    kept. Read-only, and never raises: the outcome is recorded whether or not this can be."""
+    from substrate.store.index_store import IndexStore
+
+    try:
+        entry = load(registry).get(scope)
+        if entry is None or not entry.db.is_file():
+            return None, []
+        with IndexStore(str(entry.db), migrate=False) as store:
+            held = store.quarantined()
+        if held is None:
+            return None, []
+        listed: list[dict] = []
+        size = 0
+        for q in held[:MAX_QUARANTINED_LISTED]:
+            # The kind and key, never the reason: this file is what the engine serves the refresh
+            # block from, and a reason quotes the note.
+            kind, key = quarantine.checked(q.get("kind"), q.get("key"))
+            row = {"path": f"{q['vault']}/{q['path']}"[:MAX_PATH_CHARS], "kind": kind,
+                   "key": key}
+            size += len(json.dumps(row, ensure_ascii=False).encode())
+            if size > MAX_LISTED_BYTES:
+                break
+            listed.append(row)
+        return len(held), listed
+    except Exception:  # noqa: BLE001 — a record must not fail because its extra cannot be read
+        return None, []
 
 
 def _carried_freeze_note(outcome: str | None, since: str | None) -> str:
@@ -320,6 +388,13 @@ def _block(*, known: bool, outcome: str | None = None, attempted: str | None = N
         # scope has been answering from superseded content is the question a reader has the moment
         # `frozen` is true, and prose is what gets paraphrased away by whoever passes this on.
         "frozen_since": frozen_since,
+        # How many notes the scope's index leaves out because each failed to compose on its own
+        # (`substrate/quarantine.py`), AS OF THE LAST REFRESH PASS, as `frozen` is: a compose run
+        # by hand since moves `status`'s list, the live answer, and not this. A count only: this
+        # block rides on every search reply, including one that withholds calls, and a
+        # quarantined note's class may be unknown, so its path is `status`'s to give. Null when
+        # nothing recorded one, or the index's record is not kept, which is not zero.
+        "quarantined": None,
         "note": note,
     }
 
@@ -351,6 +426,9 @@ def record(scope: str, outcome: str, *, registry: str | Path | None = None,
 
     path = state_path(registry)
     stamp = now or datetime.now(UTC).isoformat(timespec="seconds")
+    # The index is what the quarantine describes, whatever this outcome: a pass that refused left
+    # the older index, and its quarantine, answering. Read before the lock is taken.
+    held, listed = _quarantine_of(scope, registry)
 
     # EVERY filesystem operation is inside the conversion, not just the write. `mkdir`, the lock's
     # own `open`, and `mkstemp` each raise bare OSError, and `cmd_refresh_record` catches only
@@ -379,7 +457,8 @@ def record(scope: str, outcome: str, *, registry: str | Path | None = None,
             else:
                 frozen_since = _stamp(prior.get("frozen_since"))
             entries[scope] = {"attempted": stamp, "outcome": outcome, "succeeded": succeeded,
-                              "frozen_since": frozen_since}
+                              "frozen_since": frozen_since, "quarantined": held,
+                              "quarantined_notes": listed}
             body = json.dumps(
                 {"version": VERSION, "scopes": dict(sorted(entries.items()))},
                 indent=2, ensure_ascii=False,

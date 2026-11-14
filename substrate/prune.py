@@ -49,24 +49,38 @@ class PruneError(RuntimeError):
     """A vault whose notes would be pruned is missing, unreadable or empty: nothing was removed."""
 
 
+# Why a folder is removed: its note is deleted, skipped by its vault's list, or quarantined.
+DELETED = "note deleted"
+SKIPPED = "note skipped by its vault's skip list"
+QUARANTINED = "note quarantined"
+
+
 class Stale(NamedTuple):
     vault: str
     note: Path        # the deleted or skipped note, relative to its vault
     folder: Path      # its ingest folder under the index root
     skipped: bool = False   # still on disk, and named by its vault's skip list
+    why: str | None = None  # set for a quarantined note's folder (`QUARANTINED`)
 
 
-def _source(folder: Path) -> Path | None:
-    """The note `folder` was ingested from, when the folder holds only ingest's files (and hidden
-    ones, a `.DS_Store` a Finder window left, as `private` allows) and says."""
+def _ingest_only(folder: Path) -> set[str] | None:
+    """The names in `folder` when it holds only ingest's files (and hidden ones, a `.DS_Store` a
+    Finder window left, as `private` allows), each a file and not a link; else None."""
     try:
         entries = list(os.scandir(folder))
     except OSError:
         return None
-    if ("run.json" not in {e.name for e in entries}
-            or any(not e.is_file(follow_symlinks=False)
-                   or (e.name not in private.INGEST_FILES and not e.name.startswith("."))
-                   for e in entries)):
+    if any(not e.is_file(follow_symlinks=False)
+           or (e.name not in private.INGEST_FILES and not e.name.startswith("."))
+           for e in entries):
+        return None
+    return {e.name for e in entries}
+
+
+def _source(folder: Path) -> Path | None:
+    """The note `folder` was ingested from, when the folder holds only ingest's files and says."""
+    names = _ingest_only(folder)
+    if names is None or "run.json" not in names:
         return None
     try:
         source = json.loads((folder / "run.json").read_text(encoding="utf-8")).get("source")
@@ -171,7 +185,9 @@ def refuse_missing(found: list[Stale], vaults: Iterable, composed: dict[str, int
 
 def emptied_line(vault: str, found: list[Stale]) -> str:
     removed = sum(1 for s in found if s.vault == vault)
-    return f"{PRUNED} vault {vault!r} now composes 0 notes; removed {removed} ingest folder(s)"
+    from substrate.quarantine import shown
+
+    return f"{PRUNED} vault {shown(vault)!r} now composes 0 notes; removed {removed} ingest folder(s)"
 
 
 def remove(found: list[Stale], removed: Callable[[Stale], None]) -> None:
@@ -180,18 +196,55 @@ def remove(found: list[Stale], removed: Callable[[Stale], None]) -> None:
     so a folder swapped for a link after `stale` looked at it is refused rather than followed.
     `run.json` goes last, so a folder a failure leaves half removed can still be attributed."""
     for s in found:
-        fd = os.open(s.folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        try:
-            hidden = [n for n in os.listdir(fd) if n.startswith(".")]
-            for name in (*hidden, *sorted(private.INGEST_FILES - {"run.json"}), "run.json"):
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(name, dir_fd=fd)
-        finally:
-            os.close(fd)
-        os.rmdir(s.folder)
+        _remove_folder(s.folder)
         removed(s)
 
 
+def _remove_folder(folder: Path) -> None:
+    """`folder`'s files one by one, then the folder, and nothing else, through its own descriptor
+    opened without following a link. `run.json` goes last."""
+    fd = os.open(folder, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        hidden = [n for n in os.listdir(fd) if n.startswith(".")]
+        for name in (*hidden, *sorted(private.INGEST_FILES - {"run.json"}), "run.json"):
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=fd)
+    finally:
+        os.close(fd)
+    os.rmdir(folder)
+
+
+def remove_quarantined(folders: Iterable[Path]) -> list[Path]:
+    """Remove the ingest folder of each note compose quarantined, so no earlier version of the
+    note stays indexed. Returns the folders that held an ingested note.
+
+    Not `stale`'s path, and not under `refuse_missing`: compose discovered each of these notes in
+    a vault it can read this run, so none is a sign of a missing vault. Each folder is the one
+    compose names for the note (`private.ingest_dir_name`), and it is removed only when it holds
+    nothing but ingest's files (`_ingest_only`, the rule `stale` reads a folder by), the same way
+    `remove` does. A folder that holds anything else, or a link at its name, is left, and
+    `assert_composed` refuses the scope for it."""
+    held: list[Path] = []
+    for folder in folders:
+        if os.path.islink(folder) or not os.path.isdir(folder):
+            continue
+        names = _ingest_only(folder)
+        if names is None:
+            continue
+        _remove_folder(folder)
+        if "run.json" in names:
+            held.append(folder)
+    return held
+
+
+def why(s: Stale) -> str:
+    return s.why or (SKIPPED if s.skipped else DELETED)
+
+
 def line(s: Stale) -> str:
-    why = "note skipped by its vault's skip list" if s.skipped else "note deleted"
-    return f"{PRUNED} {s.vault}/{s.note.as_posix()}  ({why}; removed {s.folder.name})"
+    """The line compose prints for a removed folder, names escaped (`quarantine.shown`): a note's
+    name is its author's, and a line break in it must not start a line of its own."""
+    from substrate.quarantine import shown
+
+    return (f"{PRUNED} {shown(f'{s.vault}/{s.note.as_posix()}')}  ({why(s)}; removed "
+            f"{shown(s.folder.name)})")

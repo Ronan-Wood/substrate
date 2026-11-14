@@ -26,10 +26,11 @@ import re
 import unicodedata
 
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from substrate import quarantine
 from substrate.extract.base import doc_id_for  # stdlib-only; no Docling/torch pulled in
 from substrate.markdown.reader import (
     _DOC_ID, _DOMAIN, FrontmatterError, _parse_frontmatter, _parse_list, normalized_text,
@@ -166,6 +167,12 @@ class Scope:
     vaults: tuple[VaultRef, ...]
     notes: tuple[NoteRef, ...]
     name: str = ""
+    # The notes discovered whose bytes cannot be read as a note (over the size cap, not UTF-8),
+    # each with its `quarantine.KINDS` kind and why. They are in `notes` too, and compose
+    # quarantines them.
+    unreadable: Mapping[Path, tuple[str, str]] = field(default_factory=dict)
+    # The project manifest's `quarantine_ceiling`, as declared (`_declared_ceiling`).
+    quarantine_ceiling: int | str | None = None
 
     @property
     def vault_names(self) -> frozenset[str]:
@@ -180,7 +187,7 @@ _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 # reference names, so no table has a fixed schema to hold unknown keys against.
 TOP_LEVEL_KEYS: frozenset[str] = frozenset(
     {"name", "inherits", "reference_domains", "reference_pins", "identity", "skip",
-     "writable_folders"})
+     "writable_folders", quarantine.CEILING_KEY})
 
 
 def misplaced_keys(manifest: dict) -> list[tuple[str, str]]:
@@ -268,7 +275,25 @@ def _read_manifest(vault_dir: Path) -> dict:
     if bad_domains:
         raise VaultError(f"{path}: malformed domain tag(s) {bad_domains}.")
     _declared_skip(manifest, path)
+    _declared_ceiling(manifest, path)
     return manifest
+
+
+def _declared_ceiling(manifest: dict, path: Path) -> int | str | None:
+    """The manifest's `quarantine_ceiling`: None when it declares none, else a count of notes, 0 or
+    more, or `quarantine.NO_CEILING`. Anything else refuses, because a ceiling misread as the
+    default lets a mostly broken scope index, or freezes one its owner meant to let through. Every
+    vault's is checked; only the project vault's applies (`Scope.quarantine_ceiling`)."""
+    if quarantine.CEILING_KEY not in manifest:
+        return None
+    value = manifest[quarantine.CEILING_KEY]
+    if value == quarantine.NO_CEILING or (
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0):
+        return value
+    raise VaultError(
+        f"{path}: '{quarantine.CEILING_KEY}' must be a whole number of notes, 0 or more, or "
+        f"\"{quarantine.NO_CEILING}\" for no ceiling; it is {type(value).__name__} "
+        f"{value!r}. 0 refuses the scope when any note fails.")
 
 
 def _declared_skip(manifest: dict, path: Path) -> SkipList:
@@ -755,7 +780,9 @@ def resolve_scope(project_vault: Path) -> Scope:
     Refuses (VaultError) rather than mislead: a missing manifest, a malformed one, an inherited
     vault that does not exist, a scope that composes zero notes, or a doc_id that two notes in the
     composed scope both claim (reconcile keys the index on doc_id — a collision would silently make
-    one note overwrite the other).
+    one note overwrite the other). A note over the size cap or not in UTF-8 is not refused here: it
+    is listed in `Scope.unreadable`, and compose quarantines it. One the filesystem cannot read
+    still refuses.
     """
     project_vault = project_vault.expanduser().resolve()
     ordered = list(resolve_vaults(project_vault))
@@ -796,10 +823,29 @@ def resolve_scope(project_vault: Path) -> Scope:
     # similarity score is a worse failure than the one it prevents. Measured before shipping this:
     # 693 notes across all seven live vaults, zero exact-duplicate groups — so this refuses nothing
     # that exists.
+    #
+    # A NOTE WHOSE BYTES ARE NOT A NOTE is left out of both checks and listed in `unreadable`,
+    # where compose quarantines it. It cannot overwrite another note at index time, because it is
+    # never indexed.
     ids: dict[str, Path] = {}
     bodies: dict[str, Path] = {}
+    unreadable: dict[Path, tuple[str, str]] = {}
     for n in notes:
-        raw = _read_capped(n.path)
+        try:
+            raw = _read_capped(n.path)
+        except VaultError as e:
+            # Only a note whose BYTES are at fault is the note's own failure: over the size cap, or
+            # not UTF-8. A read the filesystem refused (EIO, EACCES, a file a sync client has not
+            # fetched) may be gone on the next pass, and quarantining it would remove the note's
+            # last good version from the index, so it still refuses the scope, as `prune` refuses
+            # to count an unreadable note as deleted. Said by the engine, not by the OS.
+            cause = e.__cause__
+            if isinstance(cause, OSError):
+                raise
+            unreadable[n.path] = (
+                ("not_utf8", "not UTF-8") if isinstance(cause, UnicodeDecodeError)
+                else ("over_size_cap", f"larger than the {_MAX_BYTES // (1024 * 1024)} MiB cap"))
+            continue
         front, _ = _parse_frontmatter(raw)  # size-checked before doc_id_for reads it
         fid = front.get("doc_id", "")
         eff = fid if _DOC_ID.fullmatch(fid) else doc_id_for(n.path)
@@ -824,9 +870,11 @@ def resolve_scope(project_vault: Path) -> Scope:
     # The project's own manifest is re-read for its declared name. `visit` parsed it already but
     # kept only `inherits`; the file is size-capped and tiny, and reading it here keeps the name
     # sourced from the manifest rather than inferred from the directory (they legitimately differ).
+    manifest = _read_manifest(project_vault)
     return Scope(
         project=project_ref, vaults=tuple(ordered), notes=tuple(notes),
-        name=_read_manifest(project_vault)["name"],
+        name=manifest["name"], unreadable=unreadable,
+        quarantine_ceiling=_declared_ceiling(manifest, project_vault / MANIFEST),
     )
 
 
@@ -835,8 +883,8 @@ def assert_composed(store, *, ingested_doc_ids: set[str]) -> dict:
 
     Runs after indexing. The core guarantee is that the indexed doc set is EXACTLY what this compose
     ingested — no more, no less — which closes the "green gates, silent loss" shape from both sides.
-    `ingested_doc_ids` is the ground truth (every note this run ingested, one id each; compose aborts
-    if any note fails, so it equals the discovered set), so the scope is not needed a second time:
+    `ingested_doc_ids` is the ground truth (every note this run indexes, one id each: the discovered
+    set less the notes compose quarantined), so the scope is not needed a second time:
 
       1. every ingested note is indexed. A note discovered, ingested, then absent from the index
          means reconcile dropped it. When a whole vault's notes go missing this way, the message

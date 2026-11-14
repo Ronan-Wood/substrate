@@ -112,7 +112,9 @@ Four things cause wrong conclusions if you do not know them:
    saying it was never recorded. Superseded notes are unreachable by design and surface only as the
    `supersedes` link on whatever replaced them.
 3. AN EMPTY RESULT IS NOT AN EMPTY CORPUS. `status` reports `drift`: a note under `added` is one the
-   scope composes that the index does not hold yet. Read it before answering "you have nothing on".
+   scope composes that the index does not hold yet. It also lists `quarantined` notes, which the
+   index leaves out because each failed to compose; `refresh.quarantined` counts them on every
+   reply. Read both before answering "you have nothing on".
 4. `refresh.frozen` IS TRI-STATE. `true` means a rebuild REFUSED and you are reading superseded
    content; `false` means index and vault agreed; `null` means nothing checked — absent evidence,
    not a clean bill.
@@ -550,7 +552,15 @@ TOOLS = [
             "`defaulted` counts the notes that declare no `status` (indexed as `active`) and the "
             "notes that declare no `doc_type` (indexed as `reference`). They are inside the "
             "counts by status and doc_type, where nothing tells them from notes that declared "
-            "it. Null means this index keeps no count yet, not zero."
+            "it. Null means this index keeps no count yet, not zero.\n\n"
+            "`quarantined` lists every note the index LEAVES OUT, by `vault` and vault-relative "
+            "`path`, with the `kind` of fault and the engine `key` it concerns (the contract's "
+            "`quarantine` vocabularies; never a value from the note): the last compose indexed "
+            "the rest of the scope without it. No answer from this scope includes those notes. "
+            "Null means this index keeps no such record, not that none were "
+            "left out; an agent snapshot never carries one, so it is always null there. "
+            "`refresh.quarantined` is the same count as of the last refresh pass; this list is "
+            "the live answer."
         ),
         "inputSchema": {
             "type": "object",

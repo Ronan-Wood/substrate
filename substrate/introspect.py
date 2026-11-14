@@ -22,6 +22,7 @@ simply an edit made since the last tick.
 from __future__ import annotations
 
 from substrate import freshness, private, refresh_state, scopes
+from substrate import quarantine as _quarantine
 from substrate import vault as _vault
 
 
@@ -67,6 +68,23 @@ def vector_status(store, stack) -> dict | None:
     return {"model": key, "stored": n, "chunks": total, "complete": complete, "note": note}
 
 
+def _fingerprints(scope):
+    """A note's `freshness.quarantine_fingerprint`, over the same inputs compose judged it on: the
+    note and its source's `_meta.md`, found inside the note's own vault."""
+    roots = {v.name: v.path for v in scope.vaults}
+    vault_of = {n.path: n.vault for n in scope.notes}
+    return lambda path: freshness.quarantine_fingerprint(
+        path, _vault.source_meta_path(path, roots.get(vault_of.get(path, ""), path.parent)))
+
+
+def _shown_quarantine(q: dict) -> dict:
+    """One quarantined note as a client sees it: the vault, the path inside it, and the kind of
+    fault and the engine key, held to the contract's vocabularies. Never the reason, which quotes
+    the note: a call's frontmatter value would reach a caller that did not ask for calls."""
+    kind, key = _quarantine.checked(q.get("kind"), q.get("key"))
+    return {"vault": q["vault"], "path": q["path"], "kind": kind, "key": key}
+
+
 def status_payload(store, entry, *, stack, registry: str | None = None,
                    refresh: dict | None = None, drift: bool = True) -> dict:
     """Everything `status` reports for one composed scope.
@@ -78,6 +96,8 @@ def status_payload(store, entry, *, stack, registry: str | None = None,
     payloads would put that comparison back where it started.
     """
     s = store.stats()
+    held = store.quarantined()
+    quarantined = None if held is None else [_shown_quarantine(q) for q in held]
     out = {
         "scope": entry.name,
         "db": str(entry.db),
@@ -101,6 +121,12 @@ def status_payload(store, entry, *, stack, registry: str | None = None,
         # declared it. Null when this index keeps no record, which is not zero
         # (`IndexStore.defaulted_counts`).
         "defaulted": store.defaulted_counts(),
+        # THE NOTES THIS INDEX LEAVES OUT, each with why: the last compose quarantined them,
+        # because each failed on its own, and indexed the rest. Null when this index keeps no
+        # record (an engine from before quarantine, which refused instead), which is not empty.
+        # In agent mode always null: a quarantined note's class may be unknown, so its path is
+        # not the agent's to read (`agent._fill`).
+        "quarantined": quarantined,
         # WHO THIS CORPUS IS ABOUT, ordered by how many notes name each. Empty when the scope's
         # vault declares no identity roster, which is most of them — an absent list here means
         # "nobody was resolved", never "nobody was mentioned".
@@ -123,8 +149,9 @@ def status_payload(store, entry, *, stack, registry: str | None = None,
                                  "and cannot read the vault it was built from."}
         return out
     try:
-        notes = [n.path for n in _vault.resolve_scope(entry.vault).notes]
-        out["drift"] = freshness.drift(store, notes)
+        scope = _vault.resolve_scope(entry.vault)
+        out["drift"] = freshness.drift(store, [n.path for n in scope.notes], held,
+                                       _fingerprints(scope))
     except _vault.VaultError as e:
         # A scope that cannot be RESOLVED cannot be drift-checked — the vault is gone, a manifest
         # is malformed, or a skip-list file declares a spine (`_refuse_skipped_note_with_a_spine`).

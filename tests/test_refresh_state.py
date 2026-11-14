@@ -255,7 +255,7 @@ def test_every_state_emits_the_same_key_set(tmp_path) -> None:
     reg = _registry(tmp_path)
     keys = set(refresh_state.report("never-recorded", reg))
     assert keys == {"known", "outcome", "attempted", "succeeded", "frozen", "frozen_since",
-                    "note"}
+                    "quarantined", "note"}
     for outcome in refresh_state.OUTCOMES:
         refresh_state.record("s", outcome, registry=reg)
         assert set(refresh_state.report("s", reg)) == keys, outcome

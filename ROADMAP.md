@@ -45,7 +45,7 @@ case leaks. No latency figure here is a quiet-machine measurement yet. The defau
 flowchart TD
     subgraph pip["1. Compose a stranger's vault"]
         PB1["#21 missing spine → defaults"]
-        PB2["#22 quarantine or freeze?"]
+        PB2["#22 quarantine one bad note"]
         PB3["#23 writable_folders"]
         PB4["#24 skip list"]
     end
@@ -89,7 +89,7 @@ These come first: until an ordinary vault composes, a pip package has nothing to
 | id | item | status |
 |---|---|---|
 | [#21](https://github.com/Ronan-Wood/substrate/issues/21) | A note with no `status` or `doc_type` composes with the defaults (`active`, `reference`) instead of refusing the whole scope, and `substrate status` reports how many notes were defaulted. Corrupt input (unparseable frontmatter, duplicate `doc_id`, an unreadable note, a missing declared vault) still refuses. | planned |
-| [#22](https://github.com/Ronan-Wood/substrate/issues/22) | Whether one malformed note quarantines itself (the rest of the scope is indexed and the note is reported loudly) or freezes the scope as today. The lean is quarantine, with a hard fail above some fraction of the scope. | `needs-decision` |
+| [#22](https://github.com/Ronan-Wood/substrate/issues/22) | Decided: quarantine. A note that fails on its own is left out, the rest of the scope is indexed, and `status` and the refresh record name the note and the reason. Above a ceiling (`quarantine_ceiling`, by default the larger of 10 notes and 1% of the scope) the whole scope refuses again. A duplicate `doc_id`, a missing declared vault and a broken manifest still refuse the whole scope. | planned |
 | [#23](https://github.com/Ronan-Wood/substrate/issues/23) | The manifest declares `writable_folders` for `ingest`. The default becomes any folder in the project vault that compose doesn't skip, instead of three fixed folder names. Path containment checks stay as they are. | planned |
 | [#24](https://github.com/Ronan-Wood/substrate/issues/24) | The manifest declares a `skip` list. Today's hard-coded skips (`_meta.md`, `log.md`, `MEMORY.md`, `99-templates/` and the rest) become defaults a vault can change. | planned |
 

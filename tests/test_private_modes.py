@@ -145,6 +145,10 @@ def test_a_refused_compose_still_seals_the_index() -> None:
     _loosen(*_index(db, ir))
     (root / "demo-vault" / "bad-status.md").write_text(
         "---\nstatus: someday\n---\n\n# Bad status\n\nA status outside the vocabulary.\n")
+    # One bad note is quarantined rather than refusing the scope (#22), unless the manifest allows
+    # none: then it refuses, after the ingest tree has been rewritten.
+    manifest = root / "demo-vault" / ".substrate.toml"
+    manifest.write_text("quarantine_ceiling = 0\n" + manifest.read_text())
     assert compose() == 3, "the fixture must make compose refuse"
     loose = _loose(*_index(db, ir))
     assert not loose, f"a refused compose left the index readable: {loose[:5]}"

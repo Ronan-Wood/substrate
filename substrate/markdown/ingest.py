@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from substrate import classes, spine
+from substrate.quarantine import tag
 from substrate.chunk.chunker import chunk
 from substrate.extract.base import doc_id_for, doc_id_from  # stdlib-only; no Docling/torch pulled in
 from substrate.markdown.emit import emit, frontmatter
@@ -165,25 +166,25 @@ def _judge_opening(doc: Document, src: Path, opening: reader.OpeningBlock,
         try:
             blocks.append((meta_path, reader.opening_block(_vault._read_capped(meta_path)), None))
         except _vault.VaultError as e:
-            raise ValueError(str(e)) from e
+            raise tag(ValueError(str(e)), "source_meta_unreadable") from e
 
     for path, block, _ in blocks:
         for key, forms in block.keys:
             exact = next((_ENGINE_FORMS[f] for f in forms if f in _ENGINE_FORMS), None)
             if exact is None or key == exact:
                 continue
-            raise spine.SpineError(
+            raise tag(spine.SpineError(
                 f"{doc.doc_id}: {path.name} writes `{reader._shown(key)}`, which the engine "
                 f"does not read as `{exact}`: it reads only `{exact}`, spelled exactly so. "
                 f"Write `{exact}:` if this is the note's {exact}. If it is a property of the "
                 "vault's own, it cannot share that name with an engine key; refusing rather "
                 "than indexing the note as if it had declared none."
-            )
+            ), "engine_key_spelled_another_way", exact)
     if defaulted:
         for path, block, reason in blocks:
             reason = block.why or reason
             if block.opens and not block.whole:
-                raise spine.SpineError(
+                raise tag(spine.SpineError(
                     f"{doc.doc_id}: declares no {' and no '.join(defaulted)}, and {path.name} "
                     "opens with a `---` line the engine does not read as frontmatter"
                     + (f" ({reason})" if reason else "") + ". "
@@ -191,7 +192,7 @@ def _judge_opening(doc: Document, src: Path, opening: reader.OpeningBlock,
                     "`key: value` lines, and a line of `---` alone. Refusing to index the note "
                     "on defaults over a block that may say otherwise. If the `---` is a "
                     "horizontal rule, start the file with something else."
-                )
+                ), "opening_block_unread")
 
 
 def ingest_markdown(
@@ -410,7 +411,8 @@ def ingest_markdown(
         # what the operator cannot see is that the value came from a `_meta.md` one directory up.
         for field, meta_path in inherited.items():
             if meta_path is not None and f"{field} " in str(e):
-                raise spine.SpineError(f"{e} (inherited from {meta_path})") from e
+                raise tag(spine.SpineError(f"{e} (inherited from {meta_path})"),
+                          *getattr(e, "quarantine_kind", ("other", None))) from e
         raise
 
     # repair=False: markdown carries no glyph artifacts, so PDF-tier hyphen/ligature repair could
@@ -446,10 +448,10 @@ def ingest_markdown(
     src_cov, src_missing = content_coverage(body_md, captured)
     drops = uncovered_content_blocks(doc.blocks, captured)
     if src_cov < MD_COVERAGE_GATE or drops:
-        raise CoverageError(
+        raise tag(CoverageError(
             f"A18 markdown coverage: aggregate {src_cov} (gate {MD_COVERAGE_GATE}); "
             f"{len(drops)} content block(s) dropped {drops[:8]}; missing tokens {src_missing}"
-        )
+        ), "coverage_loss")
 
     # Opened and judged BEFORE `before_write`, which stores the original: a folder refused here
     # leaves no blob behind. Held across the four writes, so each lands in this one folder.

@@ -1,0 +1,16 @@
+import Quarantine
+open Quarantine
+#print axioms a_failed_note_is_never_indexed
+#print axioms every_passing_note_is_indexed
+#print axioms quarantined_is_what_failed
+#print axioms the_notes_are_partitioned
+#print axioms refuses_exactly_when
+#print axioms a_scope_fault_refuses
+#print axioms a_ceiling_of_zero_refuses_any_failure
+#print axioms no_ceiling_never_refuses_for_the_count
+#print axioms the_default_ceiling
+#print axioms a_quarantine_exists
+#print axioms the_default_refuses_eleven
+#print axioms nothing_left_refuses
+#print axioms an_index_is_never_empty
+#print axioms all_failing_refuses_with_no_ceiling

@@ -44,7 +44,9 @@ ENVELOPE_KEYS = {
 # What the unattended refresh agent last managed on this scope. `index_version` says what the
 # index was BUILT from and stops there, so a scope whose recompose refused kept answering from
 # the superseded index in an envelope byte-identical to a healthy run.
-REFRESH_KEYS = {"known", "outcome", "attempted", "succeeded", "frozen", "frozen_since", "note"}
+# `quarantined` is a count, never a clock: how many notes the index leaves out (#22).
+REFRESH_KEYS = {"known", "outcome", "attempted", "succeeded", "frozen", "frozen_since",
+                "quarantined", "note"}
 MODE_KEYS = {"embedder", "embedder_state", "hyde", "reranker", "expected_mrr", "unmeasured_reason",
              "cohort", "degraded", "fallbacks", "unavailable", "health"}
 # Whether the arms could START — a different axis from what they did, and the one the prose in

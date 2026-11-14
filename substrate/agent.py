@@ -604,6 +604,15 @@ def _read_notes(rows: list[tuple],
     return out, frozenset(excluded)
 
 
+def _agent_row(scope: str, registry: str | Path | None) -> dict | None:
+    """The scope's refresh record as the agent may read it: without its quarantine, for the reason
+    `_fill` drops the table. The agent's `refresh` block then reports `quarantined` as null."""
+    row = refresh_state.stored_row(scope, registry)
+    if row is None:
+        return None
+    return {k: v for k, v in row.items() if k not in ("quarantined", "quarantined_notes")}
+
+
 def _carried(rows: list[tuple], left_out: frozenset[str]) -> list[tuple]:
     """The document rows a snapshot may carry: every row but the calls it leaves out. The one
     definition `_publish` reads notes for and `_fingerprint` hashes."""
@@ -687,6 +696,11 @@ def _fill(tmp: Path, excluded: frozenset[str], notes: list[_NoteCopy], meta: dic
         # Deleted pages are zeroed, and the whole file is VACUUMed below, so an excluded note's
         # text does not survive in free pages of a file handed to another user.
         db.execute("PRAGMA secure_delete=ON")
+        # The notes the live index quarantined. Each row names a note by path, with a reason that
+        # may quote its frontmatter, and a note that failed may be a call whose class was never
+        # read. So none reaches the agent, whatever the entry lets in, and its `status` reports
+        # the record as not kept (null), never as empty.
+        db.execute("DROP TABLE IF EXISTS quarantine")
         for doc_id in sorted(excluded):
             store.remove(doc_id)
         # A vector no passage holds is no part of a document here, and its `chunk_id` names the
@@ -935,7 +949,7 @@ def _publish(scope: str, directory: Path, *, registry: str | Path | None,
         "excluded_documents": len(excluded),
         # The record as stored, judged on the agent side by `refresh_state.block_for` — so a
         # freeze the operator's engine recorded reaches the agent as the same freeze.
-        "refresh": refresh_state.stored_row(scope, registry),
+        "refresh": _agent_row(scope, registry),
     }
     _write_atomic(manifest_path, (json.dumps(manifest, indent=2) + "\n").encode())
     return Published(scope, db_path, manifest_path, rewrite, len(excluded))
@@ -966,7 +980,7 @@ def annotate(scope: str, directory: str | Path, *, registry: str | Path | None =
                 _remember(scope, directory, registry)
             except AgentError as e:
                 unrecorded = e
-        prior["refresh"] = refresh_state.stored_row(scope, registry)
+        prior["refresh"] = _agent_row(scope, registry)
         _write_atomic(manifest_path, (json.dumps(prior, indent=2) + "\n").encode())
         if unrecorded is not None:
             raise AgentError(f"snapshot manifest marked, but its folder is not recorded for "

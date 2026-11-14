@@ -1,0 +1,9 @@
+name = "quarantine"
+defaultTargets = ["quarantine"]
+
+[[lean_lib]]
+name = "Quarantine"
+
+[[lean_exe]]
+name = "quarantine"
+root = "Main"

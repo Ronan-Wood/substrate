@@ -132,6 +132,11 @@ SCHEMA_VERSION = 11
 #     one. A row goes with its document there too, because the cascade is in the file, so that
 #     engine's `index --rebuild` drops the rows of the notes it re-indexes. The next compose by
 #     this engine puts them back (`reconcile`).
+#     2026-11-14, still v11: `quarantine`, one row per note the last compose left out because it
+#     failed on its own (`substrate/quarantine.py`). NO BUMP, for the same reason: `IF NOT EXISTS`
+#     adds it to a v11 file at the next compose. A file without it reports the list as not kept
+#     (`IndexStore.quarantined`), never as empty. An engine that predates it quarantines nothing:
+#     its compose refuses the scope instead.
 
 # The triggers that keep `vector_generation.n` moving. A reader trusts `n` only while all of them
 # exist: an engine that predates them can rebuild `chunk_vectors` without them and then write
@@ -146,6 +151,24 @@ SPINE_DEFAULTS = """CREATE TABLE IF NOT EXISTS spine_defaults(
     doc_id TEXT NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
     field  TEXT NOT NULL,
     PRIMARY KEY (doc_id, field)
+);"""
+
+# The notes the last compose quarantined (schema history above). Keyed on `source_path`, the one
+# name no two notes share (two vaults may share a directory name). `path` is vault-relative, for
+# `status`. `kind` and `key` are what a client may see (`quarantine.KINDS`, `quarantine.KEYS`);
+# `reason` quotes the note and is the operator's terminal's only. `fingerprint` is over what compose judged the note on (`freshness.quarantine_fingerprint`),
+# null when it could not read them, and `index_version` is the index's when the row was written: a
+# compose by another engine (one from before this table) rewrites the documents and not these rows,
+# and `IndexStore.quarantined` then reports the record as not kept rather than as true.
+QUARANTINE = """CREATE TABLE IF NOT EXISTS quarantine(
+    source_path   TEXT PRIMARY KEY,
+    vault         TEXT NOT NULL,
+    path          TEXT NOT NULL,
+    fingerprint   TEXT,
+    kind          TEXT NOT NULL,
+    key           TEXT,
+    reason        TEXT NOT NULL,
+    index_version TEXT NOT NULL
 );"""
 
 DDL = """CREATE TABLE IF NOT EXISTS documents(
@@ -220,6 +243,7 @@ CREATE TABLE IF NOT EXISTS document_entities(
 CREATE INDEX IF NOT EXISTS idx_document_entities_entity ON document_entities(entity_id);
 
 """ + SPINE_DEFAULTS + """
+""" + QUARANTINE + """
 
 CREATE INDEX IF NOT EXISTS idx_documents_class    ON documents(document_class);
 CREATE INDEX IF NOT EXISTS idx_documents_status   ON documents(status);
@@ -339,6 +363,7 @@ DROP TRIGGER IF EXISTS chunks_ai;
 DROP TRIGGER IF EXISTS chunks_ad;
 DROP TABLE IF EXISTS document_entities;
 DROP TABLE IF EXISTS spine_defaults;
+DROP TABLE IF EXISTS quarantine;
 DROP TABLE IF EXISTS entities;
 DROP TABLE IF EXISTS chunks_fts;
 DROP TABLE IF EXISTS chunk_vectors;

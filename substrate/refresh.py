@@ -16,7 +16,9 @@ THE OUTCOMES ARE THE APP'S, PORTED ONE BY ONE (`SubstrateRefresh.runPass`):
     load-bearing rule: without it a scope keeps serving its last healthy verdict;
   * a compose that worked and an embed that did not records `embed_failed`. That is current
     content with no vectors, which is not a fully healthy pass;
-  * both working records `refreshed`;
+  * both working records `refreshed`. A compose that quarantined notes (`substrate/quarantine.py`)
+    worked: it indexed the rest of the scope, so the scope is not frozen, and the record carries
+    the quarantine it reads from the index;
   * a compose that DECLINED, because another holds the vaults lock, records nothing. It did not
     run, and recording would overwrite a live verdict with the news that a duplicate stood down;
   * a registered scope whose row names no index root is frozen too (`compose_failed`), rather than
@@ -35,13 +37,14 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-from substrate import prune, refresh_state, scopes
+from substrate import compose_report, quarantine, refresh_state, scopes
 
 # The exit status of a compose or embed that did not run because another held the lock: BSD's
 # EX_TEMPFAIL, "try again later". Distinct from every failure status, which the caller records.
@@ -220,6 +223,17 @@ def _tail(text: str) -> str:
     return "\n".join(lines[-_TAIL_LINES:])
 
 
+# The prefix every line of a child's stderr carries in the engine's log. A pass's report is built
+# only from compose's records and the pass's own fixed text; a child's stderr quotes names a vault's
+# author chose, so it is logged, never reported, and each of its lines reads as quoted.
+STDERR_PREFIX = "stderr |"
+
+
+def _quote(say: Say, child: str, stderr: str | None) -> None:
+    for line in _tail(stderr or "").splitlines():
+        say(f"  {child} {STDERR_PREFIX} {quarantine.shown(line)}")
+
+
 def _interpreter_flags() -> list[str]:
     """This interpreter's flags (`-B -E -s` in the bundle), so a child runs the way its parent did
     and no `PYTHON*` variable the bundle shuts out reaches it. Not `-I` or `-P`: either keeps the
@@ -286,8 +300,22 @@ def run_pass(registry: str | Path | None = None, only: list[str] | None = None, 
             # NO PATHS: compose reads where the registry has the vault when it runs, under the
             # vaults lock. Handed this pass's snapshot instead, a pass that started before another
             # compose moved a scope (the app's first-run rebuild) recomposed it where it had been.
-            compose = runner([*cli, "compose", str(entry.vault), "--registry", str(reg),
-                              "--no-wait"], env)
+            argv = [*cli, "compose", str(entry.vault), "--registry", str(reg), "--no-wait"]
+            try:
+                fd, report = tempfile.mkstemp(prefix="substrate-compose-", suffix=".jsonl")
+                os.close(fd)
+            except OSError as e:
+                # Without a file to report into, compose still runs and the pass still records:
+                # what it pruned and quarantined is then said to be unknown.
+                compose = runner(argv, env)
+                said, unreported = [], f"the compose report could not be made ({type(e).__name__})"
+            else:
+                try:
+                    compose = runner([*argv, "--report", report], env)
+                    said, unreported = compose_report.read(Path(report), compose.returncode)
+                finally:
+                    with contextlib.suppress(OSError):
+                        os.unlink(report)
             if compose.returncode == EX_DECLINED:
                 results.append(ScopeResult(name, None, "a compose was in flight"))
                 say(f"substrate refresh: {name}: skipped, a compose was in flight")
@@ -295,20 +323,32 @@ def run_pass(registry: str | Path | None = None, only: list[str] | None = None, 
             if _interrupted(compose, stopping):
                 results.append(ScopeResult(name, None, "interrupted"))
                 break
-            # What compose pruned is said in the pass's report whatever the pass then records.
-            pruned = "\n".join(ln.strip() for ln in (compose.stdout or "").splitlines()
-                                if ln.strip().startswith(prune.PRUNED))
+            # What compose pruned and quarantined is said in the pass's report whatever the pass
+            # then records, from compose's report (`compose_report`), never from its stdout, where
+            # a note's name could start a line of its own. A report that cannot be read says so,
+            # loudly: it is not "nothing was pruned". The outcome still follows compose's exit,
+            # because the index is what it left, and the record reads the quarantine from it.
+            said = "\n".join(said)
+            if unreported:
+                said = _joined(said, f"WARNING (compose report): {unreported}, so what this pass "
+                                     f"pruned and quarantined is not known")
             if compose.returncode != 0:
-                result = ScopeResult(name, "compose_failed", _joined(pruned, _tail(compose.stderr)))
+                # Why it refused is the report's `refused` record. Compose's stderr, which quotes
+                # names a vault's author chose, goes to the engine's log only, every line quoted.
+                _quote(say, "compose", compose.stderr)
+                result = ScopeResult(name, "compose_failed", said)
             else:
                 embed = runner([*cli, "embed", f"--scope={name}", "--registry", str(reg),
                                 "--wait", str(EMBED_WAIT)], env)
                 if _interrupted(embed, stopping):
                     results.append(ScopeResult(name, None, "interrupted"))
                     break
-                result = (ScopeResult(name, "refreshed", pruned) if embed.returncode == 0
-                          else ScopeResult(name, "embed_failed",
-                                           _joined(pruned, _tail(embed.stderr))))
+                if embed.returncode != 0:
+                    _quote(say, "embed", embed.stderr)
+                result = (ScopeResult(name, "refreshed", said) if embed.returncode == 0
+                          else ScopeResult(name, "embed_failed", _joined(
+                              said, f"embed exited {embed.returncode}; its stderr is in the "
+                                    f"engine's log")))
         results.append(_record(result, reg, say))
     return results
 

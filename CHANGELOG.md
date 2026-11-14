@@ -23,6 +23,24 @@ Every release of the engine, newest first. The format follows
   `amend` changes one in, as paths relative to the project vault (`.` is its root), each with
   every folder below it. A declared folder must exist and not be skipped.
   [`docs/configuration.md`](docs/configuration.md) has the rules.
+- **A note that fails on its own is quarantined, and the rest of the scope is indexed.** Before,
+  one such note made compose exit 3 having indexed nothing, and a refresh pass froze the scope
+  until the note was fixed. Now the note is left out entirely: never indexed under a fallback
+  class or spine, and an earlier version of it is removed from the index. Compose names each one
+  with its reason, as a `WARNING (quarantine)` on stderr and a `quarantined:` line on stdout; a
+  refresh pass's report names it by kind and key.
+  `substrate status` names each with its reason, which quotes the note. Over MCP the `status` tool
+  lists them under `quarantined` by `vault`, `path`, `kind` and `key`, never a value from the
+  note; the kinds and keys are closed vocabularies in the contract's `quarantine` section.
+  `drift.quarantined` counts the ones unchanged since. The refresh record keeps the
+  count and the first 50 notes, and every reply's `refresh` block carries the count as
+  `refresh.quarantined`. A scope with quarantined notes is not frozen. Agent snapshots carry none
+  of it, because a quarantined note may be a call whose class was never read.
+- **`quarantine_ceiling`, a manifest key,** sets how many notes may be quarantined before compose
+  refuses the whole scope again. Without it the ceiling is the larger of 10 notes and 1% of the
+  scope's notes, rounded down. `0` refuses on any failed note, as compose did before; `"none"`
+  never refuses for the count. Only the project vault's applies. A compose whose every note
+  failed refuses whatever the ceiling says, so the earlier index stays.
 
 ### Changed
 
@@ -57,6 +75,13 @@ Every release of the engine, newest first. The format follows
   A `writable_folders` the engine can't apply is refused by `ingest` and `amend`, which then write
   nothing: one that isn't a list of folder paths, or names a folder that doesn't exist, is reached
   through a symlink or is skipped. It doesn't affect what compose indexes.
+- A per-note failure no longer fails the compose. What still refuses the whole scope: a duplicate
+  `doc_id`, two byte-identical notes, a missing declared vault, a manifest the engine can't read, a
+  skipped file that declares a spine, a `_meta.md` the vault layer can't read, an ingest folder it
+  can't write safely, a note the filesystem refuses to read, more failures than the ceiling, and
+  a compose whose every note failed.
+  A note that is not UTF-8 or is over the size cap is quarantined, where the vault layer used to
+  refuse the scope for it.
 
 - `skip` is a reserved manifest key. Written inside a `[table]`, it fails the compose, as the
   other top-level keys do, so a reference pin can no longer be named `skip`. A `skip` that is not
@@ -74,13 +99,14 @@ Every release of the engine, newest first. The format follows
   `substrate status --scope <name>` and the `status` tool report how many notes were defaulted on
   each field, as `defaulted` (`{"status": n, "doc_type": n}`). It is `null` for an index
   composed before this release, until its next compose. An empty value (`status:`) is read as no
-  value, as it always was. A declared value outside the vocabulary still fails the compose, as does
-  `superseded` with no `superseded_by`. The `ingest` and `amend` tools still require both fields.
+  value, as it always was. A declared value outside the vocabulary still fails the note, as does
+  `superseded` with no `superseded_by`, and the note is quarantined (above). The `ingest` and
+  `amend` tools still require both fields.
   The index schema stays at 11 and no index is rebuilt: the record is a table the next compose
   adds.
   - A default does not stand in for frontmatter the engine could not read. A note with no
     `status` or no `doc_type` that starts with a `---` line the engine does not read as
-    frontmatter still fails the compose. That covers a byte-order mark or an invisible character
+    frontmatter still fails, and is quarantined. That covers a byte-order mark or an invisible character
     before it, fences that smart punctuation turned into `—-` or `—`, a block that never closes,
     a line that is not a plain key (a flow mapping, a YAML tag or anchor), a key the engine reads
     written twice, and a horizontal rule as the first line. An empty `---`/`---` block is empty
@@ -94,10 +120,10 @@ Every release of the engine, newest first. The format follows
     `superseded_by` under exactly those names. A note that writes one of them another way
     (`Status:`, `doc-type:`, `docType:`, `"class":`, `superseded-by:`, or with an invisible
     character) fails
-    the compose, naming the note, the key as written and the spelling to use, whatever else it
+    and is quarantined, naming the note, the key as written and the spelling to use, whatever else it
     declares. `Status: archived` is never indexed as live, and `Class: conversation` never as an
     ordinary note. A vault that keeps a `Status` or `Class` property of its own has those notes
-    refused; issue #53 decides how such a vault is served. Keys of their own such as Pandoc's
+    quarantined; issue #53 decides how such a vault is served. Keys of their own such as Pandoc's
     `documentclass`, Marp's `_class` and `doctype` are not taken for spellings, and compose.
     Values are unchanged: they are compared exactly as written.
   - A YAML tag or alias on a key the engine reads, in a block read as YAML, is now refused by
@@ -123,6 +149,15 @@ Every release of the engine, newest first. The format follows
   hidden folder of the same vault took a note compose would never index. It now walks the folder
   one component at a time without following a link, as `amend` does, and writes relative to the
   folder it reached.
+- A refresh pass no longer reads compose's stdout for its report. It kept every line that started
+  `pruned:`, and compose printed note names raw, so a note whose file name held a line break
+  followed by `pruned: …` added a removal that never happened to the pass's report. Compose now
+  writes its report to the pass as one JSON record per line, and the pass renders the lines with
+  names escaped. A refused compose's report says why, and compose's stderr goes only to the
+  engine's log, each line under a fixed `compose stderr |` prefix. A report that is missing, cut
+  short or not records is said in the pass's report rather than read as nothing pruned. Compose's
+  own output escapes names too. A compose that refuses before it starts removing ingest folders
+  removes none and reports nothing pruned or quarantined.
 - `ingest` and `amend` refuse `_META.md` and every other spelling of `_meta.md` that a volume can
   serve as it: any letter case, and on HFS+ the code points it leaves out of a name. On such a
   volume the file is read as its source's `_meta.md` and sets the spine of the passages beside it,

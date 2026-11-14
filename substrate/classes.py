@@ -10,6 +10,8 @@ The vocabulary carries an ABSENCE value as well as three real classes; see UNCLA
 
 from __future__ import annotations
 
+from substrate.quarantine import tag
+
 import re
 from dataclasses import dataclass, field
 
@@ -258,17 +260,17 @@ def apply(doc: Document) -> dict:
     if not doc.document_class:
         doc.document_class = UNCLASSIFIED_CLASS
     elif doc.document_class == UNCLASSIFIED_CLASS:
-        raise ClassPolicyError(
+        raise tag(ClassPolicyError(
             f"document_class {UNCLASSIFIED_CLASS!r} is the ABSENCE marker and cannot be declared — "
             "declaring it would assert that nobody classified this note, which the act of writing "
             f"it contradicts. Omit `class:` (an undeclared note is {UNCLASSIFIED_CLASS} everywhere "
             f"downstream), or declare one of {sorted(DECLARABLE_CLASSES)}."
-        )
+        ), "absence_marker_declared", "class")
     policy = POLICIES.get(doc.document_class)
     if policy is None:
-        raise ClassPolicyError(
+        raise tag(ClassPolicyError(
             f"unknown document_class {doc.document_class!r}; known: {sorted(DECLARABLE_CLASSES)}"
-        )
+        ), "outside_vocabulary", "class")
 
     doc.title = doc.title or extract_title(doc)
 
@@ -286,11 +288,11 @@ def apply(doc: Document) -> dict:
         if not getattr(doc, f, None) and not getattr(doc, f.replace("source_", "source_"), None)
     ]
     if missing:
-        raise ClassPolicyError(
+        raise tag(ClassPolicyError(
             f"{doc.document_class}: missing required field(s) {missing}. "
             "Refusing to ingest — a passage that cannot state its own version or identity "
             "reads authoritative while being unverifiable."
-        )
+        ), "missing_required_field", missing[0])
 
     return {
         "document_class": policy.name,

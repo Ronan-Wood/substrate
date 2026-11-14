@@ -208,7 +208,8 @@ def demo(tmp_path, monkeypatch, _umask):
                 "--index-root", str(work / "demo-index"), "--db", str(work / "demo.db"),
                 "--registry", str(registry)], dict(os.environ))
     assert rc.returncode == 0, rc.stderr
-    [result] = refresh.run_pass(registry, runner=child, log=lambda _line: None)
+    logged: list[str] = []
+    [result] = refresh.run_pass(registry, runner=child, log=logged.append)
     # A crash in any child — compose or embed — is an exit status of 1 to the pass, and embed's
     # would record `embed_failed` exactly as an unreachable daemon does. So crashes are counted
     # apart, and the refusal itself is read below: an unreachable daemon is the only way here.
@@ -216,9 +217,12 @@ def demo(tmp_path, monkeypatch, _umask):
     # The one outcome a host with no model daemon earns. Anything else is a capture of the wrong
     # state, and stops here.
     assert result.recorded and result.outcome == "embed_failed", result
-    # And it was the daemon: embed's own refusal names the default address it could not reach.
+    # And it was the daemon: embed's own refusal names the default address it could not reach. A
+    # child's stderr is the engine log's, never the pass's report (`refresh.STDERR_PREFIX`).
     assert result.detail is not None, result
-    assert f"not available at {embed_engine.DEFAULT_HOST}" in result.detail, result.detail
+    said = "\n".join(logged)
+    assert f"embed {refresh.STDERR_PREFIX} " in said, said
+    assert f"not available at {embed_engine.DEFAULT_HOST}" in said, said
 
     retrieval = stack.build(cache_path=tmp_path / "vector-cache.db")
     assert len(retrieval.unavailable) == 3, retrieval.unavailable

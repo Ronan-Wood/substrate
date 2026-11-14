@@ -133,6 +133,43 @@
       "unchanged"
     ]
   },
+  "quarantine": {
+    "kinds": [
+      "absence_marker_declared",
+      "coverage_loss",
+      "engine_key_spelled_another_way",
+      "frontmatter_unreadable",
+      "missing_required_field",
+      "not_utf8",
+      "opening_block_unread",
+      "other",
+      "outside_vocabulary",
+      "over_size_cap",
+      "per_note_assertion",
+      "source_meta_unreadable",
+      "superseded_without_link"
+    ],
+    "keys": [
+      "class",
+      "confidence",
+      "doc_id",
+      "doc_type",
+      "document_class",
+      "domains",
+      "page_label_offset",
+      "raw",
+      "raw_location",
+      "raw_sha256",
+      "source_pages",
+      "source_sha256",
+      "status",
+      "superseded_by",
+      "supersedes",
+      "title",
+      "version",
+      "version_date"
+    ]
+  },
   "yaml": {
     "printable": [
       [
@@ -238,6 +275,7 @@
       "changed",
       "checkable",
       "checked",
+      "quarantined",
       "removed",
       "stale",
       "unreadable",
@@ -302,6 +340,7 @@
       "known",
       "note",
       "outcome",
+      "quarantined",
       "succeeded"
     ],
     "refresh_request": [
@@ -384,6 +423,7 @@
       "index_version",
       "outlines",
       "passages",
+      "quarantined",
       "refresh",
       "retrieval_arms",
       "schema_version",

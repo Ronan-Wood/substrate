@@ -7,9 +7,10 @@ inputs and fails on any difference. [`CONTRIBUTING.md`](CONTRIBUTING.md#verified
 | path | code | what the model proves | model and harness | CI |
 |---|---|---|---|---|
 | `substrate blobs gc --unreferenced`, the planner | `gc_plan` in [`substrate/blob_lifecycle.py`](substrate/blob_lifecycle.py) | A plan never removes a blob that a note in any vault it must read names, and it refuses rather than plan when a note is unreadable, a reference is malformed or an inherited vault is missing. | [`experiments/lean-blob-gc/`](experiments/lean-blob-gc/README.md) | `lean`, on PRs that touch `substrate/` or the model |
+| `substrate compose`, which notes it quarantines | `decide` and `ceiling_for` in [`substrate/quarantine.py`](substrate/quarantine.py), and the compose that applies them | A note that failed is never indexed, every note that passed is unless the scope is refused, and the scope is refused exactly when it has a fault that is not one note's own, more notes failed than the ceiling allows, or none was left to index. The harness runs the real compose, so a quarantined note's earlier version staying indexed, or a refusal that removes an ingest folder or reports a note, is a disagreement. | [`experiments/lean-quarantine/`](experiments/lean-quarantine/README.md) | `lean`, on PRs that touch `substrate/` or the model |
 
-The model covers planning only. `gc_apply`, which re-plans and removes under a lock, is checked by
-inspection rather than proved, and concurrency isn't modelled. The model's README lists every place
+The blob-gc model covers planning only. `gc_apply`, which re-plans and removes under a lock, is checked by
+inspection rather than proved, and concurrency isn't modelled. Each model's README lists every place
 it is simpler than the code.
 
 ## Planned

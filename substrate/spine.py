@@ -18,6 +18,8 @@ DECLARED value outside the vocabulary is refused on every path.
 
 from __future__ import annotations
 
+from substrate.quarantine import tag
+
 from substrate.models import Document
 
 # THE NOTE FORMAT, VERSIONED: what a note's writer must produce for this engine to index it (these
@@ -162,22 +164,22 @@ def validate_status(doc: Document, *, require_present: bool) -> str:
     status = doc.status
     if status is None:
         if require_present:
-            raise SpineError(
+            raise tag(SpineError(
                 f"{doc.doc_id}: no status. Doc-2 §6 requires every note to declare one of "
                 f"{sorted(STATUSES)} — refusing to default it into the live retrieval set."
-            )
+            ), "missing_required_field", "status")
         return "active"
     if status not in STATUSES:
-        raise SpineError(
+        raise tag(SpineError(
             f"{doc.doc_id}: status {status!r} is not one of {sorted(STATUSES)}. An unknown status "
             "is silently excluded by the default filter — refusing rather than dropping it unseen."
-        )
+        ), "outside_vocabulary", "status")
     if status == "superseded" and not doc.superseded_by:
-        raise SpineError(
+        raise tag(SpineError(
             f"{doc.doc_id}: status 'superseded' but no 'superseded_by'. A superseded note is "
             "excluded from retrieval; without the link to what replaced it, its decision history "
             "is unreachable — the supersession link is what makes exclusion safe."
-        )
+        ), "superseded_without_link", "superseded_by")
     return status
 
 
@@ -199,17 +201,17 @@ def validate_doc_type(doc: Document, *, require_present: bool) -> str:
     dt = doc.doc_type
     if dt is None:
         if require_present:
-            raise SpineError(
+            raise tag(SpineError(
                 f"{doc.doc_id}: no doc_type. Doc-2 §6a requires every note to declare one of "
                 f"{sorted(DOC_TYPES)} — the job it does. Refusing to default it and hide a note "
                 "that may blend two jobs."
-            )
+            ), "missing_required_field", "doc_type")
         return DEFAULT_DOC_TYPE
     if dt not in DOC_TYPES:
-        raise SpineError(
+        raise tag(SpineError(
             f"{doc.doc_id}: doc_type {dt!r} is not one of {sorted(DOC_TYPES)}. An unknown doc_type "
             "is a retrieval axis value nothing can act on — refusing rather than carrying it."
-        )
+        ), "outside_vocabulary", "doc_type")
     return dt
 
 
@@ -236,24 +238,24 @@ def validate_confidence(doc: Document, *, require_present: bool = False) -> str:
     c = doc.confidence
     if c is None or c == "":
         if require_present:
-            raise SpineError(
+            raise tag(SpineError(
                 f"{doc.doc_id}: no confidence. A note written into a vault must declare one of "
                 f"{sorted(DECLARABLE_CONFIDENCES)} — including {UNSTATED_CONFIDENCE!r}, which is "
                 "the honest value for a note that makes no settledness claim. Absence is reserved "
                 f"for {UNJUDGED_CONFIDENCE!r}, the state of a note nobody has judged yet."
-            )
+            ), "missing_required_field", "confidence")
         return UNJUDGED_CONFIDENCE
     if c == UNJUDGED_CONFIDENCE:
-        raise SpineError(
+        raise tag(SpineError(
             f"{doc.doc_id}: confidence {UNJUDGED_CONFIDENCE!r} is the ABSENCE marker and cannot be "
             f"declared — declaring it would assert that nobody judged this note, which the act of "
             f"writing it contradicts. Omit the key, or write {UNSTATED_CONFIDENCE!r} if the note "
             "makes no settledness claim."
-        )
+        ), "absence_marker_declared", "confidence")
     if c not in DECLARABLE_CONFIDENCES:
-        raise SpineError(
+        raise tag(SpineError(
             f"{doc.doc_id}: confidence {c!r} is not one of {sorted(DECLARABLE_CONFIDENCES)}. "
             "Confidence answers how SETTLED a claim is — a certainty "
             "word like 'high' belongs in the note body, not on this axis."
-        )
+        ), "outside_vocabulary", "confidence")
     return c

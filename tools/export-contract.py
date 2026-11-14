@@ -109,7 +109,7 @@ EXTENDS: dict[str, tuple[tuple[str, str], ...]] = {
 MODULES = ("agent.py", "markdown/yaml_scalar.py", "wire.py", "local_socket.py", "refresh.py",
            "spine.py", "classes.py", "stack.py",
            "retrieve/retriever.py", "refresh_state.py", "render.py", "introspect.py",
-           "freshness.py", "mcp/server.py", "grants.py", "writelog.py")
+           "freshness.py", "mcp/server.py", "grants.py", "writelog.py", "quarantine.py")
 
 
 class ExportError(Exception):
@@ -773,6 +773,10 @@ def _export(root: Path) -> dict:
             "unmeasured_reasons": retriever.keys("UNMEASURED_REASONS"),
         },
         "refresh": {"outcomes": m["refresh_state.py"].keys("OUTCOMES")},
+        # What a quarantined note is named by over MCP (`substrate.quarantine`): the kind of fault,
+        # and the engine key it concerns. A reason, which quotes the note, never leaves the engine.
+        "quarantine": {"kinds": m["quarantine.py"].members("KINDS"),
+                       "keys": m["quarantine.py"].members("KEYS")},
         # What a one-line quoted frontmatter scalar may hold; every other character becomes a space.
         # A writer that keeps a different set writes notes this engine reads differently.
         "yaml": {"printable": _printable(m["markdown/yaml_scalar.py"])},

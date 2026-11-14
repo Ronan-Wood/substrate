@@ -150,14 +150,11 @@ def test_the_mcp_status_tool_reports_the_count(world):
     assert json.loads(body["content"][0]["text"])["defaulted"] == {"status": 1, "doc_type": 1}
 
 
-def test_a_note_with_an_unknown_status_still_refuses_compose(world):
+def test_a_note_with_an_unknown_status_is_still_refused(world):
+    """Refused, which since #22 quarantines the note rather than refusing the scope."""
     world.strip(TUNING, "status")
     world.declare(TUNING, "status: someday")
-    rc, _, err = world.compose()
-    assert rc == 3, err
-    assert "retrieval-tuning.md" in err and "status 'someday' is not one of" in err
-    assert "refusing to index a partial scope" in err
-    assert not world.db.exists(), "a refused compose wrote an index"
+    _refused(world, "retrieval-tuning.md", says=("status 'someday' is not one of",))
 
 
 # ---------------------------------------------------------------- the count is kept
@@ -281,9 +278,7 @@ def test_a_quoted_blank_or_a_yaml_null_is_a_declared_value_and_still_refuses(wor
     """The reader keeps these as the text written, so each is a value outside the vocabulary."""
     world.strip(TUNING, "status")
     world.declare(TUNING, line)
-    rc, _, err = world.compose()
-    assert rc == 3, err
-    assert f"status {shown} is not one of" in err
+    _refused(world, "retrieval-tuning.md", says=(f"status {shown} is not one of",))
 
 
 # ---------------------------------------------------------------- what still refuses
@@ -315,15 +310,31 @@ def _missing_vault(world: World) -> None:
     shutil.rmtree(world.root / "demo-core-vault")
 
 
-STILL_REFUSED = [
-    ("an unknown doc_type", _unknown_doc_type, 3, "doc_type 'tutorial' is not one of"),
-    ("superseded with no superseded_by", _superseded_with_no_link, 3,
+# One note's own fault: since #22 the note is quarantined and the scope composes.
+STILL_REFUSED_NOTES = [
+    ("an unknown doc_type", _unknown_doc_type, "manifest-inheritance.md",
+     "doc_type 'tutorial' is not one of"),
+    ("superseded with no superseded_by", _superseded_with_no_link, "manifest-inheritance.md",
      "status 'superseded' but no 'superseded_by'"),
-    ("frontmatter that is not YAML and names a key the engine reads", _not_yaml, 3, "is not YAML"),
-    ("a note that is not UTF-8", _not_utf8, 2, "latin1.md: 'utf-8' codec can't decode"),
+    ("frontmatter that is not YAML and names a key the engine reads", _not_yaml,
+     "manifest-inheritance.md", "is not YAML"),
+    ("a note that is not UTF-8", _not_utf8, "latin1.md", "unreadable: not UTF-8"),
+]
+# Not one note's own: still the whole scope.
+STILL_REFUSED = [
     ("a doc_id two notes claim", _duplicate_doc_id, 2, "retrieval-tuning"),
     ("a declared vault that is not there", _missing_vault, 2, "demo-core-vault"),
 ]
+
+
+@pytest.mark.parametrize("what, break_it, name, says", STILL_REFUSED_NOTES,
+                         ids=[c[0] for c in STILL_REFUSED_NOTES])
+def test_compose_still_refuses_the_note(world, what, break_it, name, says):
+    """Beside a note that declares no status, which now composes: the leniency for an absent field
+    hides none of these."""
+    world.strip(TUNING, "status", "doc_type")
+    break_it(world)
+    _refused(world, name, says=(says,))
 
 
 @pytest.mark.parametrize("what, break_it, code, says", STILL_REFUSED, ids=[c[0] for c in STILL_REFUSED])
@@ -356,6 +367,7 @@ CALL = "_sources/engine-boundary-call.md"
 ARCHIVED = "_archive/phase0-spike-notes.md"
 SUPERSEDED = "04-synthesis/engine-boundary-old.md"
 META = Path("demo-core-vault/10-reference/frozen/software-dev/ddia-2e/_meta.md")
+_PASSAGES = tuple(p.name for p in (_VAULTS / META.parent / "passages").glob("*.md"))
 PASSAGE = Path("demo-core-vault/10-reference/frozen/software-dev/ddia-2e/passages/00-partitioning.md")
 NOT_FRONTMATTER = "opens with a `---` line the engine does not read as frontmatter"
 
@@ -377,13 +389,26 @@ def _respell(old: str, new: str):
     return change
 
 
-def _refused(world: World, *names: str, says: tuple[str, ...]) -> str:
+def _refused(world: World, *names: str, says: tuple[str, ...],
+             notes: tuple[str, ...] | None = None) -> str:
+    """The note is refused: since #22 that QUARANTINES it, leaving it out of the index and naming
+    it with the reason, while the rest of the scope composes. Before #22 it refused the scope.
+    `notes` are the file names quarantined, when they are not `names` (a `_meta.md`'s passages)."""
     rc, _, err = world.compose()
-    assert rc == 3, err
+    assert rc == 0, err
+    _left_out(world, err, notes or names)
     assert all(n in err for n in names) and any(s in err for s in says), err
-    assert "refusing to index a partial scope" in err
-    assert not world.db.exists(), "a refused compose wrote an index"
     return err
+
+
+def _left_out(world: World, err: str, names: tuple[str, ...]) -> None:
+    """Each of `names` is quarantined, named in compose's warning, and absent from the index."""
+    assert "WARNING (quarantine)" in err, err
+    held = {Path(q["path"]).name for q in world.status()["quarantined"]}
+    assert set(names) <= held, (names, held)
+    with IndexStore(str(world.db), migrate=False) as store:
+        indexed = {Path(r[0]).name for r in store.db.execute("SELECT source_path FROM documents")}
+    assert not set(names) & indexed, "a refused note was indexed"
 
 
 UNREAD_BLOCKS = [
@@ -430,9 +455,13 @@ def test_a_meta_md_whose_opening_block_was_not_read_refuses_its_passages(world, 
     meta = world.root / META
     meta.write_text(damage(meta.read_text("utf-8")), "utf-8")
     rc, _, err = world.compose()
-    assert rc in (2, 3), err
+    assert rc in (0, 2), err
     assert "_meta.md" in err, err
-    assert not world.db.exists(), "a refused compose wrote an index"
+    if rc == 2:
+        # The vault layer's refusal, which is still the whole scope's (issue #22's write-up).
+        assert not world.db.exists(), "a refused compose wrote an index"
+    else:
+        _left_out(world, err, _PASSAGES)
 
 
 # Every spelling a review found, and the mistakes people and editors make: case, `-` for `_`,
@@ -518,7 +547,7 @@ def test_an_engine_key_spelled_another_way_in_a_meta_md_refuses_its_passages(wor
     """Fails before: the passage composed with no class."""
     meta = world.root / META
     meta.write_text(_respell("class:", "Class:")(meta.read_text("utf-8")), "utf-8")
-    _refused(world, "_meta.md", says=(_not_read_as("class"),))
+    _refused(world, "_meta.md", says=(_not_read_as("class"),), notes=_PASSAGES)
 
 
 def test_a_passage_s_own_spelling_refuses_when_its_source_gives_the_value(world):

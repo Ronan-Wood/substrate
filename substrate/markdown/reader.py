@@ -30,6 +30,8 @@ hide). Heading/path STRUCTURE integrity is A17's job, not A18's.
 
 from __future__ import annotations
 
+from substrate.quarantine import tag
+
 import hashlib
 import re
 from collections import Counter
@@ -225,7 +227,8 @@ def raw_frontmatter(text: str) -> tuple[str, list[tuple[str, str]]] | None:
     frontmatter` compares them with YAML."""
     scan = _raw_scan(text)
     if scan.problems:
-        raise FrontmatterError(scan.problems[0][1])
+        raise tag(FrontmatterError(scan.problems[0][1]), "frontmatter_unreadable",
+                  scan.problems[0][0])
     return None if scan.pairs is None else (scan.block, scan.pairs)
 
 
@@ -459,7 +462,7 @@ def _frontmatter_scan(text: str, strict: bool = False, keys: frozenset[str] = RE
     if strict:
         for key, why in scan.problems:
             if key in keys:
-                raise FrontmatterError(why)
+                raise tag(FrontmatterError(why), "frontmatter_unreadable", key)
     if scan.pairs is None:
         return None, 0, scan
     return [(k, yaml_scalar.decode(v)) for k, v in scan.pairs], scan.end, scan
@@ -843,7 +846,8 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
     """
     data = path.read_bytes()
     if len(data) > _MAX_MD_BYTES:
-        raise ValueError(f"{path} is {len(data)} bytes (> {_MAX_MD_BYTES} cap)")
+        raise tag(ValueError(f"{path} is {len(data)} bytes (> {_MAX_MD_BYTES} cap)"),
+                  "over_size_cap")
     # Line endings are normalised (`normalized_text`) so the LF-anchored frontmatter regex (and
     # everything after) works on CRLF / CR files; otherwise a Windows-authored note's frontmatter
     # is silently unrecognised and its doc_id/version/sha never recovered. Not content — coverage
@@ -851,7 +855,7 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
     try:
         raw = normalized_text(data)
     except UnicodeDecodeError as e:
-        raise ValueError(f"{path} is not valid UTF-8: {e}") from e
+        raise tag(ValueError(f"{path} is not valid UTF-8: {e}"), "not_utf8") from e
     sha = hashlib.sha256(data).hexdigest()
 
     # `unread`: why a leading `---` block was read as body text, for ingest to name if the note is
