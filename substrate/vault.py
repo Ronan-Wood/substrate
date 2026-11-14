@@ -23,8 +23,10 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 
 import tomllib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -42,23 +44,66 @@ MANIFEST = ".substrate.toml"
 # reader is already hardened this way; this extends the same guard to the reads it did not cover.
 _MAX_BYTES = 64 * 1024 * 1024
 
-# Files/dirs that are scaffolding, not retrievable notes. `_meta.md` is a source's metadata (read
-# for domains/class by `_source_meta`, never indexed); `structure.md` is an orientation outline Doc
-# 2 explicitly calls "not itself a retrieval target"; MEMORY.md and log.md are navigation/history;
-# WRITING.md is the authoring standard, a multi-job document by nature, so it is excluded rather
-# than chunked into single-job passages; templates are templates. Nothing in this package reads
-# `structure.md` or `WRITING.md` — they are excluded, full stop, and a reader who needs the standard
-# opens it directly.
+@dataclass(frozen=True)
+class SkipList:
+    """What compose never indexes in ONE vault: `files` by file name, in any folder, and `folders`
+    by folder name, at any depth and with everything under them.
+
+    An entry ending in `.md` is a file name and any other entry is a folder name. Compose only ever
+    reads `.md` files, so that is the whole difference between the two, and it is why one list can
+    carry both and still match each the way the two fixed sets it replaces did: a folder that
+    happens to be named `log.md` skips nothing.
+
+    Both sides are compared in one Unicode form (NFC). An accented name typed into the manifest is
+    NFC, and a name on disk may be stored decomposed, so the two spellings of one name look the
+    same everywhere and compared as bytes would never match. Case is compared exactly.
+    """
+
+    files: frozenset[str]
+    folders: frozenset[str]
+
+    @classmethod
+    def of(cls, names: Iterable[str]) -> SkipList:
+        names = frozenset(_nfc(n) for n in names)
+        files = frozenset(n for n in names if n.endswith(".md"))
+        return cls(files=files, folders=names - files)
+
+    def skips_file(self, name: str) -> bool:
+        """Whether a file of this name is skipped wherever it is."""
+        return _nfc(name) in self.files
+
+    def skips_folder(self, rel_parts: tuple[str, ...]) -> bool:
+        """Whether a skipped folder is among these vault-RELATIVE path parts. Relative, never
+        absolute: a vault that happens to live under an ancestor named e.g. `99-templates` would
+        otherwise skip every note."""
+        return any(_nfc(part) in self.folders for part in rel_parts)
+
+    def skips(self, rel_parts: tuple[str, ...]) -> bool:
+        """Whether the note at this vault-relative path is skipped, by a folder or by its name."""
+        return self.skips_folder(rel_parts) or (bool(rel_parts) and self.skips_file(rel_parts[-1]))
+
+
+def _nfc(name: str) -> str:
+    return unicodedata.normalize("NFC", name)
+
+
+# The skip list of a vault whose manifest declares none (`skip_list`): one layout's scaffolding,
+# not retrievable notes. `_meta.md` is a source's metadata (read for domains/class by
+# `_source_meta`, never indexed); `structure.md` is an orientation outline Doc 2 explicitly calls
+# "not itself a retrieval target"; MEMORY.md and log.md are navigation/history; WRITING.md is the
+# authoring standard, a multi-job document by nature, so it is excluded rather than chunked into
+# single-job passages; templates are templates. Nothing in this package reads `structure.md` or
+# `WRITING.md` — they are excluded, full stop, and a reader who needs the standard opens it
+# directly. In another layout `log.md` is an ordinary note, which is why a manifest may declare its
+# own list.
 #
 # Excluding them is not a silent drop for two reasons: the count check in assert_composed is over
-# the notes actually selected here, and `_refuse_skipped_note_with_a_spine` refuses any of these
-# that DECLARES itself a note. That second guard exists because the first argument — "they are not
-# notes" — stopped being self-evident once §6a named `digest`, a doc_type that describes exactly
-# what a MEMORY.md contains.
-SKIP_NAMES: frozenset[str] = frozenset(
-    {"_meta.md", "structure.md", "MEMORY.md", "log.md", "WRITING.md"}
-)
-SKIP_DIRS: frozenset[str] = frozenset({"99-templates"})
+# the notes actually selected here, and `_refuse_skipped_note_with_a_spine` refuses any skipped
+# file that DECLARES itself a note. That second guard exists because the first argument — "they
+# are not notes" — stopped being self-evident once §6a named `digest`, a doc_type that describes
+# exactly what a MEMORY.md contains.
+DEFAULT_SKIP = SkipList.of(
+    ("_meta.md", "structure.md", "MEMORY.md", "log.md", "WRITING.md", "99-templates"))
 
 
 class VaultError(RuntimeError):
@@ -84,6 +129,10 @@ def _read_capped(path: Path) -> str:
 class VaultRef:
     name: str          # the vault DIRECTORY name — the composition-provenance key
     path: Path
+    # What this vault's OWN manifest skips (`skip_list`). `resolve_vaults` reads it once, so the
+    # discovery and the prune of one compose cannot work from two readings of it. No default: a
+    # VaultRef built without one would carry a list its vault never declared.
+    skip: SkipList
 
 
 @dataclass(frozen=True)
@@ -130,7 +179,7 @@ _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 # test keeps the two in step. `reference_pins` is the only table, and its keys are the operator's
 # reference names, so no table has a fixed schema to hold unknown keys against.
 TOP_LEVEL_KEYS: frozenset[str] = frozenset(
-    {"name", "inherits", "reference_domains", "reference_pins", "identity"})
+    {"name", "inherits", "reference_domains", "reference_pins", "identity", "skip"})
 
 
 def misplaced_keys(manifest: dict) -> list[tuple[str, str]]:
@@ -217,7 +266,81 @@ def _read_manifest(vault_dir: Path) -> dict:
     bad_domains = [d for d in domains if not _DOMAIN.fullmatch(d)]
     if bad_domains:
         raise VaultError(f"{path}: malformed domain tag(s) {bad_domains}.")
+    _declared_skip(manifest, path)
     return manifest
+
+
+def _declared_skip(manifest: dict, path: Path) -> SkipList:
+    """The skip list the parsed manifest at `path` puts in effect: its `skip`, else DEFAULT_SKIP.
+    An empty list is a declaration, and skips nothing.
+
+    A `skip` the engine cannot apply refuses, because ignoring it indexes files the vault's owner
+    wrote down as skipped. That covers a value that is not a list of strings, and an entry that is
+    not one exact name (`_not_a_name`).
+
+    The refusal names the faulty entries by position rather than quoting them, because this text
+    reaches every client of `status`. That does not make the list private: a write refused for a
+    skipped name, and a refresh report's `pruned:` lines, still say what it skips.
+    """
+    if "skip" not in manifest:
+        return DEFAULT_SKIP
+    skip = manifest["skip"]
+    if not isinstance(skip, list):
+        raise VaultError(f"{path}: 'skip' must be a top-level list of strings, each one file or "
+                         f"folder name; it is a {type(skip).__name__}.")
+    not_strings = [i for i, x in enumerate(skip, 1) if not isinstance(x, str)]
+    if not_strings:
+        raise VaultError(f"{path}: 'skip' must be a list of strings, each one file or folder name; "
+                         f"entries {not_strings} (counting from 1) are not strings.")
+    unmatchable = [i for i, x in enumerate(skip, 1) if _not_a_name(x)]
+    if unmatchable:
+        raise VaultError(
+            f"{path}: 'skip' entries {unmatchable} (counting from 1) would match nothing. Each "
+            f"entry is one file name or one folder name, compared exactly with the names in every "
+            f"folder of the vault. It is not a path and not a pattern, so it is never empty, `.` "
+            f"or `..`, has no white space at either end, and holds no `/`, `\\`, `*`, `?` or NUL: "
+            f"write \"99-templates\", not \"99-templates/\" or \"*-templates\"."
+        )
+    return SkipList.of(skip)
+
+
+def _not_a_name(entry: str) -> bool:
+    """Whether a `skip` entry is something other than one exact file or folder name.
+
+    Entries are compared with single path components, so an empty one, `.`, `..` or one holding a
+    path separator or a NUL can equal none. Space at either end, `*` and `?` can be in a name on
+    this machine, and are refused all the same: an entry written that way is far likelier a typing
+    slip or a `.gitignore` pattern than a real name, and read as a name it skips nothing while its
+    owner believes it does.
+    """
+    return (not entry or entry in (".", "..") or entry != entry.strip()
+            or any(c in entry for c in "/\\*?\0"))
+
+
+def skip_list(vault_dir: Path) -> SkipList:
+    """The skip list in effect for ONE vault: the `skip` its own manifest declares, else
+    DEFAULT_SKIP. A vault with no manifest (a root vault need not carry one) has the default.
+
+    Each vault's list governs its own files and nobody else's. A project vault declaring
+    `skip = []` therefore indexes its own `log.md` and leaves the housekeeping files of the vaults
+    it inherits skipped.
+
+    ONLY `skip` IS READ, as `chain_best_effort` reads only `inherits`. The write path asks this
+    about a vault it is not composing, and a manifest that fails validation for an unrelated key
+    still says what it skips. A manifest that cannot be read or parsed, or a `skip` that is
+    misplaced or malformed, makes the list unknowable, and that raises VaultError.
+    """
+    path = vault_dir / MANIFEST
+    if not path.is_file():
+        return DEFAULT_SKIP
+    try:
+        manifest = tomllib.loads(_read_capped(path))
+    except (tomllib.TOMLDecodeError, RecursionError, ValueError) as e:
+        raise VaultError(f"cannot parse {path}, so what the vault skips is unknown: {e}") from e
+    swallowed = [(k, t) for k, t in misplaced_keys(manifest) if k == "skip"]
+    if swallowed:
+        raise VaultError(misplaced_refusal(path, swallowed))
+    return _declared_skip(manifest, path)
 
 
 def _resolve_inherit(entry: str, project_dir: Path) -> Path:
@@ -250,6 +373,26 @@ def _tier_for(rel_parts: tuple[str, ...]) -> int:
     return 3
 
 
+# A reference source's metadata file, which `_source_meta` reads whether or not a skip list names
+# it. So it is the one skipped file name NOT guarded by `_refuse_skipped_note_with_a_spine`: spine
+# keys there are its job rather than a misplaced note. Every other file a skip list names is one
+# nothing reads, which a writer could plausibly believe is an indexable note. For the same reason
+# the write path never writes one, whatever the list says (`notes._source_meta_refusal`).
+SOURCE_META = "_meta.md"
+
+
+def is_source_meta(name: str) -> bool:
+    """Whether a file of this name may be read as a source's `_meta.md`. Compared folded, because
+    a volume that ignores case serves `_META.md` to `_source_meta`'s open of `_meta.md`, and
+    without the code points HFS+ ignores in a name, which it serves the same way. Folded on every
+    platform, so the write path's refusal is one rule wherever the vault lives."""
+    return _nfc(name).translate(_HFS_IGNORED).casefold() == SOURCE_META.casefold()
+
+
+# The code points HFS+ leaves out when it compares two names, as git lists them for `.git`.
+_HFS_IGNORED = dict.fromkeys(
+    [*range(0x200C, 0x2010), *range(0x202A, 0x202F), *range(0x206A, 0x2070), 0xFEFF])
+
 # The `_meta.md` fields `_source_meta` reads, which its passages inherit.
 _META_KEYS: frozenset[str] = frozenset({"class", "document_class", "status", "doc_type",
                                         "confidence", "raw", "raw_sha256", "raw_location",
@@ -265,8 +408,8 @@ def _source_meta(note_path: Path, vault_root: Path) -> dict:
     absolute path instead meant the first ancestor named `passages` won, so a vault that merely
     happened to live under such a directory inherited an `_meta.md` from OUTSIDE the composed scope
     — a file the manifest never authorised, silently supplying a note's class and (since these
-    fields joined it) its stated settledness. `_discover_notes` already guards SKIP_DIRS this exact
-    way, for this exact reason. `rindex` rather than `index` so a nested `passages/…/passages/`
+    fields joined it) its stated settledness. `_discover_notes` already guards skipped folders this
+    exact way, for this exact reason. `rindex` rather than `index` so a nested `passages/…/passages/`
     resolves to the NEAREST enclosing source, not the outermost.
     """
     try:
@@ -276,7 +419,7 @@ def _source_meta(note_path: Path, vault_root: Path) -> dict:
     if "passages" not in rel_parts:
         return {}
     src_dir = vault_root.joinpath(*rel_parts[: len(rel_parts) - 1 - rel_parts[::-1].index("passages")])
-    meta_file = src_dir / "_meta.md"
+    meta_file = src_dir / SOURCE_META
     # Belt-and-braces: the slice above cannot escape, but an `_meta.md` outside the vault must never
     # govern a note inside it, so assert the resolved path rather than trusting the arithmetic.
     if not meta_file.is_file() or vault_root not in meta_file.parents:
@@ -304,13 +447,6 @@ def _source_meta(note_path: Path, vault_root: Path) -> dict:
     }
 
 
-# SKIP_NAMES entries that nothing reads and that a writer could plausibly believe are indexable
-# notes. `_meta.md` is the one exclusion NOT guarded: `_source_meta` genuinely reads it, so spine
-# keys there are its job rather than a misplaced note.
-_NAVIGATION_NAMES: frozenset[str] = frozenset(
-    {"MEMORY.md", "log.md", "structure.md", "WRITING.md"}
-)
-
 # The keys whose presence means "this file declared itself a retrievable note". `title` and `class`
 # are deliberately absent — a navigation file may legitimately carry either without claiming to be
 # indexed, so refusing on them would be a false positive.
@@ -320,11 +456,12 @@ _SPINE_KEYS: frozenset[str] = frozenset({"doc_type", "status", "confidence", "do
 def _refuse_skipped_note_with_a_spine(path: Path) -> None:
     """Refuse a skipped file that declares a spine, rather than dropping it silently.
 
-    Doc 2 §4 names `00-index/MEMORY.md` as the project content map, and §6a's `digest` is exactly
-    that shape — so the obvious move is to put `doc_type: digest` on MEMORY.md, and before this
-    check that produced a fully green compose with the note absent from the index. SKIP_NAMES'
-    own comment argues the exclusion is not a silent drop because these files "are not notes";
-    that reasoning held only while no doc_type could describe them, and `digest` ended it.
+    `path` is a file its vault's skip list names, the default list or a declared one. Doc 2 §4
+    names `00-index/MEMORY.md` as the project content map, and §6a's `digest` is exactly that
+    shape — so the obvious move is to put `doc_type: digest` on MEMORY.md, and before this check
+    that produced a fully green compose with the note absent from the index. DEFAULT_SKIP's own
+    comment argues the exclusion is not a silent drop because these files "are not notes"; that
+    reasoning held only while no doc_type could describe them, and `digest` ended it.
 
     Uses `_parse_frontmatter` rather than a local parser. A second implementation of "is this
     frontmatter" disagreed with the reader in BOTH directions: it refused a block the reader
@@ -337,7 +474,7 @@ def _refuse_skipped_note_with_a_spine(path: Path) -> None:
     were never opened before this check existed — so a broken symlink or a non-UTF-8 `log.md` must
     not become the reason a whole scope fails to compose.
     """
-    if path.name not in _NAVIGATION_NAMES:
+    if path.name == SOURCE_META:
         return
     try:
         text = _read_capped(path)
@@ -349,22 +486,24 @@ def _refuse_skipped_note_with_a_spine(path: Path) -> None:
     if not declared:
         return
     raise VaultError(
-        f"{path} declares spine fields ({', '.join(declared)}) but its filename is in the engine's "
-        f"skip list, so it is never indexed. Doc 2 §6a: a `digest` is an ordinary indexed note — "
-        f"give it a normal filename under 02-areas/ or 04-synthesis/. Refusing rather than "
-        f"dropping a file that declared itself retrievable."
+        f"{path} declares spine fields ({', '.join(declared)}) but its filename is in its vault's "
+        f"skip list, so it is never indexed. Refusing rather than dropping a file that declared "
+        f"itself retrievable. If {path.name} is a note, take the name out of the list: `skip` in "
+        f"the vault's {MANIFEST}, which skips {sorted(DEFAULT_SKIP.files | DEFAULT_SKIP.folders)} "
+        f"when it declares none. If it is not a note, remove those fields from it, or move it "
+        f"under a skipped folder. (Doc 2 §6a: a `digest` is an ordinary indexed note. Give it a "
+        f"normal filename under 02-areas/ or 04-synthesis/, not MEMORY.md.)"
     )
 
 
 def _discover_notes(vault: VaultRef) -> list[NoteRef]:
     notes: list[NoteRef] = []
+    skip = vault.skip
     for path in sorted(vault.path.rglob("*.md")):
-        # Match skip-dirs against the vault-RELATIVE path, not the absolute one — otherwise a vault
-        # that happens to live under an ancestor named e.g. `99-templates` would skip every note.
         rel_parts = path.relative_to(vault.path).parts
-        if any(part in SKIP_DIRS for part in rel_parts):
+        if skip.skips_folder(rel_parts):
             continue
-        if path.name in SKIP_NAMES:
+        if skip.skips_file(path.name):
             _refuse_skipped_note_with_a_spine(path)
             continue
         meta = _source_meta(path, vault.path)
@@ -408,12 +547,14 @@ def resolve_vaults(project_vault: Path) -> tuple[VaultRef, ...]:
         if vault_dir in seen_paths:
             return
         manifest_path = vault_dir / MANIFEST
+        skip = DEFAULT_SKIP
         if manifest_path.is_file():
             manifest = _read_manifest(vault_dir)
+            skip = _declared_skip(manifest, manifest_path)
             for entry in manifest.get("inherits", []):
                 visit(_resolve_inherit(entry, vault_dir), (*chain, vault_dir))
         seen_paths.add(vault_dir)
-        ordered.append(VaultRef(name=vault_dir.name, path=vault_dir))
+        ordered.append(VaultRef(name=vault_dir.name, path=vault_dir, skip=skip))
 
     visit(project_vault, ())
     return tuple(ordered)
@@ -562,7 +703,7 @@ def assert_composed(store, *, ingested_doc_ids: set[str]) -> dict:
          names the vault — the CORE tier vanishing is the chapter-title bug reincarnate (plausible
          project-only results, core silently gone).
       2. no indexed doc that this compose did NOT ingest. A stale ingest dir left by a previous run
-         (one compose could not attribute to a deleted note, and so did not prune) would keep
+         (one compose could not attribute to a deleted or skipped note, and so did not prune) would keep
          answering queries; out-of-scope content in the index root would answer from sources the
          manifest never authorised. Both are `indexed − ingested`.
 
@@ -590,15 +731,15 @@ def assert_composed(store, *, ingested_doc_ids: set[str]) -> dict:
         )
 
     # (2) indexed ⊆ ingested. An indexed doc this compose did not produce = a stale/polluted index
-    # root still answering queries. A deleted note's folder is pruned before this (`prune`), so what
-    # is left is content compose could not attribute to one.
+    # root still answering queries. The folder of a deleted note, or of one its vault now skips, is
+    # pruned before this (`prune`), so what is left is content compose could not attribute to one.
     stale = indexed_ids - ingested_doc_ids
     if stale:
         raise VaultError(
             f"{len(stale)} indexed doc(s) this compose did not ingest: "
             f"{sorted((d, doc_vault[d]) for d in stale)[:5]}. The index root holds stale or "
-            "out-of-scope content that compose could not attribute to a deleted note (it prunes "
-            "only those) — re-run with --clean."
+            "out-of-scope content that compose could not attribute to a deleted or skipped note "
+            "(it prunes only those) — re-run with --clean."
         )
 
     # Counted by the store, not here: this hand-rolled its own GROUP BY with a third missing-value

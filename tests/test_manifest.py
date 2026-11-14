@@ -226,7 +226,7 @@ def test_relative_path_inherit_resolves_against_project_parent() -> None:
 
 
 def test_vault_under_skip_named_ancestor_still_discovers_notes() -> None:
-    # SKIP_DIRS must match the vault-RELATIVE path: a vault that happens to live under an ancestor
+    # Skipped folders must match the vault-RELATIVE path: a vault that happens to live under an ancestor
     # named `99-templates` must still discover its own notes, not skip every one.
     root = _fresh_root() / "99-templates"
     p = root / "demo-vault"

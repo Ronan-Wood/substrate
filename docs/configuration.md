@@ -26,11 +26,43 @@ go = "1.21"
 | `reference_domains` | list of tags | the project's domains, carried as a tag. It never filters results |
 | `reference_pins` | table, name to version | which version of a versioned reference counts as current for this project |
 | `identity` | absolute path | a JSON file of people and things that notes mention, resolved on every compose |
+| `skip` | list of names | the file and folder names compose never indexes in this vault. Without it, the default list below applies |
 
 In TOML, every key written after a `[table]` header belongs to that table, so keep every top-level
 key above `[reference_pins]`. Any key listed above, found inside a `[table]`, fails the compose
 with a message naming the key and the table. The engine also checks the shape of `name`, `inherits`,
-`reference_domains` and `reference_pins`, and refuses a malformed one.
+`reference_domains`, `reference_pins` and `skip`, and refuses a malformed one.
+
+`skip` names what compose leaves out of the index:
+
+- **An entry is one name.** An entry ending in `.md` is a file name, and skips every note with
+  that name, in any folder. Any other entry is a folder name, and skips everything under every
+  folder with that name. Names are matched exactly, inside the vault only: case matters, and an
+  entry is not a path or a pattern. Two spellings of one accented name in different Unicode forms
+  match.
+- **With no `skip`, the default applies:** `["_meta.md", "structure.md", "MEMORY.md", "log.md",
+  "WRITING.md", "99-templates"]`. A declared list replaces the default, so repeat the default names
+  you still want skipped. `skip = []` indexes every `.md` file.
+- **Each vault's list governs its own files.** A vault you inherit keeps its own `skip`, or the
+  default when it has no manifest, whatever the project vault declares.
+- **A skipped file that declares a spine fails the compose.** A file with `status`, `doc_type`,
+  `confidence` or `domains` says it is a note, so the engine won't drop it without a word. So a
+  file name in `skip` leaves out only files with none of those fields. To leave out a note that
+  has them, put it under a skipped folder. Two things are never checked: a note under a skipped
+  folder, and `_meta.md`, which is read for the passages beside it whether or not it is skipped.
+- **A `skip` the engine can't apply fails the compose:** one that isn't a list of strings, or an
+  entry that is empty, is `.` or `..`, starts or ends with white space, or holds `/`, `\`, `*`
+  or `?`.
+  The message names the faulty entries by position, not by value. A misspelt key, such as
+  `skips`, is not caught: the engine ignores keys it doesn't know.
+- **A refresh picks a change up.** After `skip` changes, the next compose or refresh pass takes
+  the notes under a newly skipped folder out of the index and adds the newly unskipped ones.
+- **`ingest` and `amend` never write a skipped note.** They refuse a name or a folder the vault's
+  list skips. A default name the list leaves out is an ordinary note to them: under `skip = []`,
+  `amend` edits `log.md`. The one exception is `_meta.md`, which they refuse in every vault and
+  in any letter case, whatever its list says, because it sets the spine of the passages beside
+  it. While the project
+  vault's manifest doesn't parse, or its `skip` fails as above, they write nothing.
 
 Where a note sits sets its **tier**: `00-operator/` is tier 1, `10-reference/` is tier 2, and
 everything else is tier 3.

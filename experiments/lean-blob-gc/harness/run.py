@@ -267,7 +267,7 @@ def report(model, py, fields, unsafe, w) -> str:
 def _lenient_chain():
     from substrate import vault as V
     life._vault.resolve_vaults = lambda p: tuple(
-        V.VaultRef(name=x.name, path=x) for x in V.chain_best_effort(p))
+        V.VaultRef(name=x.name, path=x, skip=V.DEFAULT_SKIP) for x in V.chain_best_effort(p))
 
 
 def _no_absent_guard():

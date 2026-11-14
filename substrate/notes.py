@@ -51,7 +51,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from substrate.vault import SKIP_DIRS, SKIP_NAMES
+from substrate.vault import MANIFEST, SOURCE_META, SkipList, VaultError, is_source_meta, skip_list
 from substrate import writelog
 from substrate.writelog import WriteLogError
 
@@ -140,6 +140,37 @@ class PlanBook:
         return issued is not None and secrets.compare_digest(issued[0], binding)
 
 
+def _skip_list(project_vault: Path) -> SkipList:
+    """What compose skips in the project vault: its manifest's `skip`, else the default. Asked of
+    the manifest on every plan and commit, so a write is held to the list compose will read.
+
+    The manifest's fault is not passed on: the caller here may be a granted client, and the fault
+    is the owner's to read, in `substrate compose`."""
+    try:
+        return skip_list(project_vault)
+    except VaultError as e:
+        raise NoteError(
+            f"cannot tell what {project_vault / MANIFEST} skips: the file, or the `skip` in it, "
+            f"does not read (`substrate compose` says why). A note is written only where compose "
+            f"would index it, so nothing is written until it does."
+        ) from e
+
+
+# `_meta.md` IS NEVER WRITTEN THIS WAY, WHATEVER THE VAULT'S `skip` SAYS. Every other refusal of a
+# skipped name is about indexing: a note written where compose skips it is never indexed. This one
+# is not. `_meta.md` supplies the class and spine of every passage beside it, so writing one
+# re-spines notes the plan's diff never shows. Refused only while the list named it, it was
+# writable in any vault whose list left it out. Refused in any letter case (`is_source_meta`): on a
+# volume that ignores case, `_META.md` is the file `_source_meta` reads.
+def _source_meta_refusal(what: str) -> NoteError:
+    return NoteError(
+        f"{what} is named as a source's {SOURCE_META} (in any letter case), which is never "
+        f"written this way, whatever the vault's `skip` list says: it supplies the class and spine "
+        f"of every passage beside it, so writing it changes notes the plan's diff does not show. "
+        f"Edit it by hand."
+    )
+
+
 def _resolve_target(project_vault: Path, folder: str, filename: str) -> Path:
     if not filename.endswith(".md"):
         raise NoteError(f"{filename!r} is not markdown. Only .md notes are added this way; a PDF "
@@ -152,17 +183,27 @@ def _resolve_target(project_vault: Path, folder: str, filename: str) -> Path:
         )
     if Path(filename).name != filename:
         raise NoteError(f"{filename!r} must be a bare filename, not a path.")
+
+    project_vault = project_vault.expanduser().resolve()
     # A skip-list filename in a writable folder is a note that would be written, reported as
     # indexed, and then refused by every subsequent compose — and this path is additive-only, so
     # the MCP surface offers no way to undo it. Refuse at plan time, before anything is on disk.
-    if filename in SKIP_NAMES:
+    # The list is the vault's own: its manifest may declare one, and then a writable folder can be
+    # in it too, where a note would be written and never indexed without a word.
+    skip = _skip_list(project_vault)
+    if skip.skips_file(filename):
         raise NoteError(
-            f"{filename!r} is in the engine's skip list, so a note under that name is never "
+            f"{filename!r} is in this vault's skip list, so a note under that name is never "
             f"indexed no matter which folder it is in. Give it an ordinary filename "
             f"(e.g. `{folder}/<area>-digest.md` for a Doc 2 §6a digest)."
         )
-
-    project_vault = project_vault.expanduser().resolve()
+    if skip.skips_folder((folder,)):
+        raise NoteError(
+            f"{folder!r} is in this vault's skip list (`skip` in its {MANIFEST}), so a note "
+            f"written there is never indexed. Choose another folder."
+        )
+    if is_source_meta(filename):
+        raise _source_meta_refusal(repr(filename))
     target = (project_vault / folder / filename).resolve()
     # Belt-and-braces after the component checks above: assert the RESOLVED path is inside the
     # project vault rather than trusting that the checks covered every way out.
@@ -384,9 +425,10 @@ _sha = writelog.sha256
 def _resolve_existing(project_vault: Path, path: str) -> tuple[Path, tuple[str, ...], Path, str]:
     """Check `path` LEXICALLY and return (vault root, components, target, vault-relative posix).
 
-    Touches nothing on disk below the root: `_open_note_dir` walks it, and every write is made
-    relative to the folder descriptor that walk ends on. The root itself may sit behind a link
-    (`~/OneDrive` is one) because the operator chose it.
+    Touches nothing on disk below the root but the vault's manifest, read for its `skip`:
+    `_open_note_dir` walks the path, and every write is made relative to the folder descriptor that
+    walk ends on. The root itself may sit behind a link (`~/OneDrive` is one) because the operator
+    chose it.
     """
     from pathlib import PurePosixPath
 
@@ -423,8 +465,10 @@ def _resolve_existing(project_vault: Path, path: str) -> tuple[Path, tuple[str, 
         )
     if any(p.startswith(".") for p in parts):
         raise NoteError(f"{path!r} names a hidden file or folder, which is never a note.")
-    if any(p in SKIP_DIRS for p in parts) or parts[-1] in SKIP_NAMES:
-        raise NoteError(f"{path!r} is in the engine's skip list, so it is never indexed as a note.")
+    if _skip_list(root).skips(parts):
+        raise NoteError(f"{path!r} is in this vault's skip list, so it is never indexed as a note.")
+    if is_source_meta(parts[-1]):
+        raise _source_meta_refusal(repr(path))
     if "passages" in parts:
         raise NoteError(
             f"{path!r} is a reference passage. Its class and spine come from its source's "
