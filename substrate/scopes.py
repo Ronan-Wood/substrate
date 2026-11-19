@@ -549,7 +549,9 @@ def registered_vaults(
     A chain that no longer resolves still names every vault of it that can be found.
 
     `unknown` is (scope name, reason) for each scope whose inherited vaults cannot be known at all:
-    its manifest is missing (the vault moved, or its volume is offline) or does not parse. Its own
+    its manifest is missing (the vault moved, or its volume is offline) or does not parse, or a
+    manifest in its chain carries an unknown key where it declares no `inherits`
+    (`vault.chain_best_effort`). Its own
     vault is still named in `vaults`. What to do about the rest is the caller's decision — the
     registry cannot say where those vaults are.
     """

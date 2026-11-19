@@ -19,6 +19,7 @@ wearing a new hat. `assert_composed` is the post-index proof that it did not hap
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import os
@@ -182,12 +183,80 @@ class Scope:
 # A TOML key that needs no quotes.
 _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 
-# Every key the manifest format defines at top level. `identity.IDENTITY_KEY` is one of them, and a
-# test keeps the two in step. `reference_pins` is the only table, and its keys are the operator's
-# reference names, so no table has a fixed schema to hold unknown keys against.
+# Every key the manifest format defines at top level, and the one set both checks below read: a key
+# outside it, `UNREAD_KEYS` and tables aside, is refused at top level (`unknown_keys`), a key in it
+# is refused inside a table
+# (`misplaced_keys`). `identity.IDENTITY_KEY` is one of them, and a test keeps the two in step.
+# `reference_pins` is the only table, and its keys are the operator's reference names, so no table
+# has a fixed schema to hold unknown keys against.
 TOP_LEVEL_KEYS: frozenset[str] = frozenset(
     {"name", "inherits", "reference_domains", "reference_pins", "identity", "skip",
      "writable_folders", quarantine.CEILING_KEY})
+
+# Top-level keys the engine accepts and never reads, so they are not unknown. `guard_state` was
+# retired in 0.2.1 with the promise that a manifest still declaring it composes. Scripta writes the
+# other two into every vault it makes, and reads them back as top-level lines, so they cannot move
+# into a table. Not in TOP_LEVEL_KEYS: nothing here reads them, so no table reserves them.
+UNREAD_KEYS: frozenset[str] = frozenset(
+    {"guard_state", "scripta_workspace", "scripta_workspace_vault"})
+
+
+def unknown_keys(manifest: dict) -> list[str]:
+    """Each top-level key of a parsed manifest that the format does not define, in file order,
+    unless its value is a table.
+
+    Read as given, a misspelt key is a key nobody reads, and the default stands in for what its
+    owner wrote: `skips` leaves the default skip list in effect. Compared exactly, as every key is
+    read: `Skip`, and a spelling in another Unicode form, are unknown. A table is left open, at any
+    name, because the format defines none with a fixed schema; that is a TOML table as `tomllib`
+    returns one, so `[x]`, `x = {}` and a dotted `x.y = 1` are tables, and an array of tables
+    (`[[x]]`) is an array, refused like any other value."""
+    return [k for k, v in manifest.items()
+            if k not in TOP_LEVEL_KEYS and k not in UNREAD_KEYS and not isinstance(v, dict)]
+
+
+def _nearest_key(key: str) -> str | None:
+    """The known key `key` is likely a slip for, or None. Compared after NFKC and case folding, so
+    `SKIP`, and `skip` in full-width letters, point at `skip`. Below difflib's 0.8 ratio (`skips` to
+    `skip` is 0.89, `identities` to `identity` 0.78) there is no suggestion rather than a guess. A
+    key too long to reach that ratio is not compared: normalising and matching a manifest-sized key
+    would cost gigabytes on every `status`."""
+    if len(key) > 2 * max(map(len, TOP_LEVEL_KEYS)):
+        return None
+    folded = unicodedata.normalize("NFKC", key).casefold()
+    near = difflib.get_close_matches(folded, sorted(TOP_LEVEL_KEYS), n=1, cutoff=0.8)
+    return near[0] if near else None
+
+
+# How much of the unknown keys a refusal shows. It reaches every client of `status` and every
+# refresh log line, and a manifest under the size cap can hold a key of millions of characters.
+_SHOWN_KEYS = 10
+_SHOWN_CHARS = 40
+
+
+def _shown(key: str) -> str:
+    """`key` as `repr` prints it, at most _SHOWN_CHARS printed characters between its quotes. Cut
+    before `repr` too, which writes a character that does not print as up to ten."""
+    shown = repr(key[:_SHOWN_CHARS])
+    if len(key) <= _SHOWN_CHARS and len(shown) <= _SHOWN_CHARS + 2:
+        return shown
+    return f"{shown[:_SHOWN_CHARS + 1]}{shown[0]}... ({len(key)} characters)"
+
+
+def unknown_refusal(path: Path, unknown: list[str]) -> str:
+    shown = unknown[:_SHOWN_KEYS]
+    more = f" and {len(unknown) - len(shown)} more" if len(unknown) > len(shown) else ""
+    near = [(k, n) for k in shown if (n := _nearest_key(k))]
+    if len(unknown) == 1:
+        guess = f" (did you mean {near[0][1]!r}?)" if near else ""
+    else:
+        guess = (f" (did you mean {', '.join(f'{n!r} for {_shown(k)}' for k, n in near)}?)"
+                 if near else "")
+    return (f"{path}: {', '.join(map(_shown, shown))}{more} "
+            f"{'is not a key' if len(unknown) == 1 else 'are not keys'} the manifest "
+            f"defines{guess}, and the engine refuses a key rather than ignore it. The top-level "
+            f"keys are {', '.join(sorted(TOP_LEVEL_KEYS))}, spelled exactly. A [table] of any "
+            f"other name is not checked.")
 
 
 def misplaced_keys(manifest: dict) -> list[tuple[str, str]]:
@@ -236,6 +305,9 @@ def _read_manifest(vault_dir: Path) -> dict:
     misplaced = misplaced_keys(manifest)
     if misplaced:
         raise VaultError(misplaced_refusal(path, misplaced))
+    unknown = unknown_keys(manifest)
+    if unknown:
+        raise VaultError(unknown_refusal(path, unknown))
     name = manifest.get("name")
     if not isinstance(name, str) or not name:
         raise VaultError(f"{path}: manifest has no string 'name'.")
@@ -353,8 +425,9 @@ def skip_list(vault_dir: Path) -> SkipList:
 
     ONLY `skip` IS READ, as `chain_best_effort` reads only `inherits`. The write path asks this
     about a vault it is not composing, and a manifest that fails validation for an unrelated key
-    still says what it skips. A manifest that cannot be read or parsed, or a `skip` that is
-    misplaced or malformed, makes the list unknowable, and that raises VaultError.
+    still says what it skips. A manifest that cannot be read or parsed, a `skip` that is misplaced
+    or malformed, or an unknown key in a manifest declaring no `skip` (`_unknown_may_be`) makes the
+    list unknowable, and that raises VaultError.
     """
     read = _own_key(vault_dir, "skip", "what the vault skips")
     if read is None:
@@ -403,8 +476,9 @@ def folder_parts(entry: str) -> tuple[str, ...]:
 def _own_key(vault_dir: Path, key: str, what: str) -> tuple[Path, dict] | None:
     """(manifest path, parsed manifest) for a reader of ONE key, or None when the vault has no
     manifest. Refuses, as VaultError, a manifest that cannot be read or parsed (`what` says what
-    that leaves unknown) and a `key` swallowed into a table. The other keys are not validated: a
-    fault elsewhere in the manifest does not change what this key says."""
+    that leaves unknown), a `key` swallowed into a table, and an unknown key while `key` is absent
+    (`_unknown_may_be`). The other keys are not validated: a fault elsewhere in the manifest does
+    not change what this key says."""
     path = vault_dir / MANIFEST
     if not path.is_file():
         return None
@@ -415,7 +489,18 @@ def _own_key(vault_dir: Path, key: str, what: str) -> tuple[Path, dict] | None:
     swallowed = [(k, t) for k, t in misplaced_keys(manifest) if k == key]
     if swallowed:
         raise VaultError(misplaced_refusal(path, swallowed))
+    _unknown_may_be(manifest, path, key, f"{what} is unknown")
     return path, manifest
+
+
+def _unknown_may_be(manifest: dict, path: Path, key: str, unknowable: str) -> None:
+    """Refuse, for a reader of ONE key, an unknown key in a manifest that does not declare `key`:
+    the unknown one may be `key` misspelt, and reading `key` as absent puts the default in place of
+    what was written. With `key` declared, no unknown key changes what it says, and compose is
+    what refuses the manifest."""
+    if key not in manifest and (unknown := unknown_keys(manifest)):
+        raise VaultError(f"{unknown_refusal(path, unknown)} An unknown key may be {key!r} "
+                         f"spelled another way, so while it is there {unknowable}.")
 
 
 def writable_folders(vault_dir: Path, skip: SkipList) -> tuple[tuple[str, ...], ...] | None:
@@ -733,8 +818,9 @@ def chain_best_effort(project_vault: Path) -> tuple[Path, ...]:
     to do with inheritance (a bad domain tag, a missing `name`), and reading it through
     `_read_manifest` dropped every vault it inherits from protection. An entry that is not a string
     or does not resolve is skipped, and a cycle ends the walk. A project vault with no manifest, a
-    manifest that cannot be read or parsed, or an `inherits` that is not a list makes the chain
-    unknowable, and that raises VaultError: a guard must not pass on what it cannot see.
+    manifest that cannot be read or parsed, an `inherits` that is not a list, or an unknown key in
+    a manifest declaring no `inherits` (`_unknown_may_be`) makes the chain unknowable, and that
+    raises VaultError: a guard must not pass on what it cannot see.
     """
     chain: list[Path] = []
     pending = [project_vault]
@@ -760,6 +846,7 @@ def chain_best_effort(project_vault: Path) -> tuple[Path, ...]:
         if swallowed:
             raise VaultError(f"{misplaced_refusal(manifest, swallowed)} So the vaults it inherits "
                              f"are unknown.")
+        _unknown_may_be(data, manifest, "inherits", "the vaults it inherits are unknown")
         inherits = data.get("inherits", [])
         if not isinstance(inherits, list):
             raise VaultError(f"{manifest}: 'inherits' is not a list, so the vaults it inherits "

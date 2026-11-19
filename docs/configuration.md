@@ -36,6 +36,26 @@ with a message naming the key and the table. The engine also checks the shape of
 `reference_domains`, `reference_pins`, `skip` and `quarantine_ceiling`, and refuses a malformed
 one. The write path checks `writable_folders` the same way.
 
+**A key not in the table above fails the compose.** The message names the key and the file, and
+the known key it looks like, if one is close: `skips` gets `skip`. This holds for the manifest of
+every vault in the scope's chain, inherited ones included. Keys are compared exactly, so `Skip`,
+`SKIP` and a spelling in another Unicode form are unknown keys. Three keys are accepted and never
+read: `guard_state`, retired in 0.2.1, and `scripta_workspace` and `scripta_workspace_vault`, which
+Scripta writes.
+
+- **A table of any name isn't checked.** `[app]`, `app = {}` and `app.theme = "dark"` all
+  compose, so keep another tool's settings under a table of its own. A key from the table above
+  still fails inside one, as misplaced, so a tool's own `name` needs another. An array of tables,
+  `[[app]]`, is an array, and fails like any other value. Because a table isn't checked, a
+  misspelt table header such as `[reference_pin]`, or a misspelt key written below a header, is
+  not caught.
+- **`ingest` and `amend` write nothing while the unknown key could be a key they read:**
+  `inherits`, `skip` or `writable_folders` in the project vault's manifest, and `inherits` in an
+  inherited vault's, wherever that key isn't declared. Where it could be `inherits`, in any
+  manifest of the chain, the project's included, the scope's vaults can't be known. Until the key
+  is fixed, a compose creates a new index root only directly in `~/.substrate/index`. A compose
+  into an existing ingest tree still runs.
+
 `skip` names what compose leaves out of the index:
 
 - **An entry is one name.** An entry ending in `.md` is a file name, and skips every note with
@@ -56,8 +76,7 @@ one. The write path checks `writable_folders` the same way.
 - **A `skip` the engine can't apply fails the compose:** one that isn't a list of strings, or an
   entry that is empty, is `.` or `..`, starts or ends with white space, or holds `/`, `\`, `*`
   or `?`.
-  The message names the faulty entries by position, not by value. A misspelt key, such as
-  `skips`, is not caught: the engine ignores keys it doesn't know.
+  The message names the faulty entries by position, not by value.
 - **A refresh picks a change up.** After `skip` changes, the next compose or refresh pass takes
   the notes under a newly skipped folder out of the index and adds the newly unskipped ones.
 - **`ingest` and `amend` never write a skipped note.** They refuse a name or a folder the vault's
@@ -226,7 +245,7 @@ missing from the index.
 | what fails | what compose does |
 |---|---|
 | one note: frontmatter it cannot read, a value outside the vocabulary, an engine key spelled another way, `superseded` with no `superseded_by`, a class policy refusal (`missing required field(s) ['title']`), a note that is not UTF-8 or is over the 64 MiB cap, an A18 or A22 per-note assertion | quarantines the note |
-| the scope: a duplicate `doc_id`, two byte-identical notes, a declared vault that is not there, a manifest it cannot read, a skipped file that declares a spine, a `_meta.md` the vault layer cannot read, a note the filesystem refuses to read, a link or another user's folder where a note's ingest folder goes | refuses the whole scope, as before |
+| the scope: a duplicate `doc_id`, two byte-identical notes, a declared vault that is not there, a manifest it cannot read or a key it doesn't define (whatever `quarantine_ceiling` says), a skipped file that declares a spine, a `_meta.md` the vault layer cannot read, a note the filesystem refuses to read, a link or another user's folder where a note's ingest folder goes | refuses the whole scope, as before |
 | more notes than the ceiling | refuses the whole scope, saying how many failed and what the ceiling is |
 | every note the scope discovered | refuses the whole scope, whatever the ceiling (`"none"` included), so the earlier index stays |
 

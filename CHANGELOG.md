@@ -44,6 +44,17 @@ Every release of the engine, newest first. The format follows
 
 ### Changed
 
+- **A key `.substrate.toml` doesn't define fails the compose.** A manifest used to compose with
+  an unknown key ignored, so a misspelt `skips` or `writeable_folders` left the default in place
+  of what was written. This breaks a manifest that carries an extra key, a typo or one another
+  tool keeps there: it fails until the key is fixed or moved. `guard_state`, and Scripta's
+  `scripta_workspace` and `scripta_workspace_vault`, are still accepted and never read. The
+  message names the key and the file, and the known key it looks like. Keys are compared exactly,
+  so `Skip` is unknown. A table of any name is not checked, so another tool's settings can go
+  under a `[table]` of its own. `ingest` and `amend` write nothing while the unknown key could be
+  one they read. Where it could be `inherits`, the scope's vaults are unknown, and until it is
+  fixed a compose creates a new index root only directly in `~/.substrate/index`.
+  [`docs/configuration.md`](docs/configuration.md) lists the keys.
 - **`ingest` and `amend` write in any folder of a vault that declares no `writable_folders`,**
   except a folder its `skip` list skips, a hidden one, a `passages/` folder, and `_sources/` and
   `_archive/` at the top of the vault. They used to write only under `02-areas/`,
@@ -76,8 +87,8 @@ Every release of the engine, newest first. The format follows
   nothing: one that isn't a list of folder paths, or names a folder that doesn't exist, is reached
   through a symlink or is skipped. It doesn't affect what compose indexes.
 - A per-note failure no longer fails the compose. What still refuses the whole scope: a duplicate
-  `doc_id`, two byte-identical notes, a missing declared vault, a manifest the engine can't read, a
-  skipped file that declares a spine, a `_meta.md` the vault layer can't read, an ingest folder it
+  `doc_id`, two byte-identical notes, a missing declared vault, a manifest the engine can't read
+  or a key it doesn't define, a skipped file that declares a spine, a `_meta.md` the vault layer can't read, an ingest folder it
   can't write safely, a note the filesystem refuses to read, more failures than the ceiling, and
   a compose whose every note failed.
   A note that is not UTF-8 or is over the size cap is quarantined, where the vault layer used to

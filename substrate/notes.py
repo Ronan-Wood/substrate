@@ -233,7 +233,7 @@ def _writable(root: Path, skip: SkipList) -> Writable:
     """The project vault's writable folders: its manifest's `writable_folders`, else the default.
     Read on every plan and commit, as the skip list is. A declaration the engine cannot apply
     writes nothing, and its fault is passed on: the list is not confidential, and the refusal
-    names entries by position only.
+    names entries by position and an unknown manifest key by name, never a value.
 
     A declared folder must exist as the write path reaches it (`_walk_folder`: no link followed,
     each name spelled as it is on disk), and is never created: the owner wrote it down as there."""
@@ -454,8 +454,8 @@ def _refuse_nested_inherited(root: Path) -> None:
         home = os.stat(root)
     except (VaultError, OSError) as e:
         # The fault is the owner's to read, in `substrate compose`, as `_skip_list` says.
-        raise NoteError(f"cannot tell which vaults this scope inherits: its {MANIFEST} does not "
-                        f"read (`substrate compose` says why), so nothing is written.") from e
+        raise NoteError(f"cannot tell which vaults this scope inherits: a {MANIFEST} in its chain "
+                        f"does not read (`substrate compose` says why), so nothing is written.") from e
     home_id = (home.st_dev, home.st_ino)
     for manifest, entry, path in named:
         try:
