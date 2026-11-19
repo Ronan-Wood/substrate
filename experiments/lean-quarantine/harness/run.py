@@ -83,7 +83,7 @@ KINDS = {
     "not_yaml": lambda i: f"---\nstatus: active\nWe agreed {i}.\n---\n\n# Note {i}\n\nBody.\n",
     "near_miss": lambda i: f"---\nStatus: archived\n---\n\n# Note {i}\n\nBody zq{i}x.\n",
     "orphan": lambda i: f"---\nstatus: superseded\n---\n\n# Note {i}\n\nBody zq{i}x.\n",
-    "untitled_call": lambda i: f"---\nclass: conversation\n---\n\nSaid zq{i}x.\n",
+    "unversioned": lambda i: f"---\nclass: reference-versioned\n---\n\n# Note {i}\n\nBody zq{i}x.\n",
     "class": lambda i: f"---\nclass: memo\n---\n\n# Note {i}\n\nBody zq{i}x.\n",
 }
 NOT_UTF8 = "not_utf8"

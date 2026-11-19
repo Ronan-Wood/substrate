@@ -153,14 +153,14 @@ class SourceOrigin:
     provenance field in run.json and the emitted frontmatter would name a file nobody can
     produce again. So identity travels with the real artifact and this carries it.
 
-    Every override field is optional and applied ONLY when set — the plain-text arm reads the
-    real file directly, so it needs the title and the format token and nothing else.
+    Every override field is optional and applied ONLY when set — the markdown and plain-text arms
+    read the real file directly, so they need the format token and nothing else.
 
-    `title` is a LAST-RESORT title, used only when the document has no heading and declared none.
-    The class gate requires one (a passage that cannot identify itself is refused), and a
-    converted document legitimately may have no heading at all — a one-slide deck, a bare
-    spreadsheet. The filename is what the operator called the document; it is identity, not an
-    invention, and `run.json` records which of the three sources supplied it.
+    `title` is the real file's name as a LAST-RESORT title (`classes.title_from_filename`), used
+    only when the document has no heading and declared none, for the converted arm, whose `src` is
+    a temporary. Every other path, a vault note's included, takes the name of the file it reads.
+    The filename is what the operator called the document; it is identity, not an invention, and
+    `run.json` records which of the three sources supplied it.
     """
 
     source_format: str                  # run.json["source_format"] — the ORIGINAL format token

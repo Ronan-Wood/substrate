@@ -156,6 +156,10 @@ domains: [storage]
 # Why the cache is content-addressed
 ```
 
+- `title` is optional. Without it, a note's title is its first level-1 heading, else its first
+  heading, else its file name without `.md`, so renaming such a note renames it in results. A
+  title that is not a heading is not searchable text. An empty note composes, holding no passage,
+  but two empty notes are byte-identical and refuse the scope.
 - `doc_id` is derived from the file name when it is absent. Declare one to keep a note's identity
   stable across renames.
 - `confidence` is optional. Without it, a note is stored as `unjudged`.
@@ -244,7 +248,7 @@ missing from the index.
 
 | what fails | what compose does |
 |---|---|
-| one note: frontmatter it cannot read, a value outside the vocabulary, an engine key spelled another way, `superseded` with no `superseded_by`, a class policy refusal (`missing required field(s) ['title']`), a note that is not UTF-8 or is over the 64 MiB cap, an A18 or A22 per-note assertion | quarantines the note |
+| one note: frontmatter it cannot read, a value outside the vocabulary, an engine key spelled another way, `superseded` with no `superseded_by`, a class policy refusal (`missing required field(s) ['version']`), a note that is not UTF-8 or is over the 64 MiB cap, an A18 or A22 per-note assertion | quarantines the note |
 | the scope: a duplicate `doc_id`, two byte-identical notes, a declared vault that is not there, a manifest it cannot read or a key it doesn't define (whatever `quarantine_ceiling` says), a skipped file that declares a spine, a `_meta.md` the vault layer cannot read, a note the filesystem refuses to read, a link or another user's folder where a note's ingest folder goes | refuses the whole scope, as before |
 | more notes than the ceiling | refuses the whole scope, saying how many failed and what the ceiling is |
 | every note the scope discovered | refuses the whole scope, whatever the ceiling (`"none"` included), so the earlier index stays |

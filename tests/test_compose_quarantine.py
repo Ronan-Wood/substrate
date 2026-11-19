@@ -172,8 +172,9 @@ def _superseded_no_link(w: World) -> str:
 
 
 def _class_policy(w: World) -> str:
-    w.write("_sources/untitled-call.md", "---\nclass: conversation\n---\n\nNo heading, said.\n")
-    return "demo-vault/_sources/untitled-call.md"
+    w.write("02-areas/unversioned-spec.md",
+            "---\nclass: reference-versioned\n---\n\n# Spec\n\nNo version is stated here.\n")
+    return "demo-vault/02-areas/unversioned-spec.md"
 
 
 def _unknown_class(w: World) -> str:
@@ -198,8 +199,8 @@ KINDS = [
      "engine_key_spelled_another_way", "status"),
     ("superseded with no superseded_by", _superseded_no_link, "no 'superseded_by'",
      "superseded_without_link", "superseded_by"),
-    ("a class policy refusal", _class_policy, "missing required field(s) ['title']",
-     "missing_required_field", "title"),
+    ("a class policy refusal", _class_policy, "missing required field(s) ['version']",
+     "missing_required_field", "version"),
     ("a class outside the vocabulary", _unknown_class, "unknown document_class 'memo'",
      "outside_vocabulary", "class"),
     ("a note that is not UTF-8", _not_utf8, "unreadable: not UTF-8", "not_utf8", None),

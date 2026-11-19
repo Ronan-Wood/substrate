@@ -187,6 +187,8 @@ def document_record(row: dict, *, scope: str | None) -> dict:
     whole directory layout in bulk — an amplification `search` did not offer, over a port any local
     process can reach, and undocumented in the tool contract besides. A caller that has actually
     selected a note gets the path from `expand`, which is one note at a time and asked for by name.
+    A note with no title and no heading is titled by its file name without `.md` (issue #55), so
+    that much of a name does reach this list: the name, never the folders above it.
 
     It is NULL for a note with no passages, and that is the honest answer rather than a defect to
     paper over: an empty note is in the corpus (it appears in this list, which is the point) and

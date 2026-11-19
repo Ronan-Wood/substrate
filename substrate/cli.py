@@ -256,10 +256,8 @@ def _ingest_markdown_file(args: argparse.Namespace, src: Path, spec) -> int:
     that is the path the gates run on. The three axes an ingested source needs
     are supplied afterwards by the `_meta.md` beside it — the channel the Library already uses.
 
-    Plain text rides the SAME reader, with one difference carried in the `SourceOrigin`: a `.txt`
-    may have no heading at all, so the filename supplies a last-resort title. A `.md` gets no such
-    fallback — a vault note that cannot name itself is refused today and that gate is not this
-    change's to move.
+    Plain text rides the SAME reader. A file with no declared title and no heading takes its file
+    name as its title, as a vault note and a converted file do.
     """
     from substrate.markdown.ingest import (CoverageError, OutputDirError, UnretrievableError,
                                            ingest_markdown)
@@ -280,13 +278,9 @@ def _ingest_markdown_file(args: argparse.Namespace, src: Path, spec) -> int:
     # Library's "read it as markdown anyway" control uses. That also left `--md` outside the
     # zero-chunk `UnretrievableError` gate, which is armed by the same flag.
     #
-    # `title` stays TEXT-ONLY. A `.txt` may legitimately have no heading, so the filename is a
-    # last-resort title; a `.md` that cannot name itself is refused today and that gate is not this
-    # change's to move.
-    origin = SourceOrigin(
-        source_format=spec.token,
-        title=src.stem if spec.arm == "text" else None,
-    )
+    # No `title`: `src` is the real file, so with no title and no heading `ingest_markdown` takes its
+    # file name, for a `.md` as for a `.txt`, as the same file composed in a vault does.
+    origin = SourceOrigin(source_format=spec.token)
 
     try:
         # Standalone ingest carries no composition provenance — vault/tier are set only by the
@@ -372,7 +366,7 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
         extractor=conv.extractor,
         extractor_arm=conv.arm,
         pages=conv.pages,
-        title=src.stem,
+        title=classes.title_from_filename(src.name),
         stats=conv.stats,
     )
 

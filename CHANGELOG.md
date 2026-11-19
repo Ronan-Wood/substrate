@@ -55,6 +55,24 @@ Every release of the engine, newest first. The format follows
   one they read. Where it could be `inherits`, the scope's vaults are unknown, and until it is
   fixed a compose creates a new index root only directly in `~/.substrate/index`.
   [`docs/configuration.md`](docs/configuration.md) lists the keys.
+- **A note with no `title:` and no heading takes its file name as its title.** It used to fail
+  the class gate (`missing required field(s) ['title']`), so since the quarantine change a vault of
+  daily notes, quick captures, lists and clippings lost each one, and refused the whole scope past
+  the ceiling. The order is a declared `title:`, then the first level-1 heading, then the first
+  heading of any level, then the file name, and `run.json` records `title_source: filename`. A
+  note with a `title:` or a heading keeps the title it has; a `reference-versioned` note still
+  needs its version. The name loses its `.md`, is put in NFC, and has each run of control
+  characters and line breaks made one space and surrounding whitespace removed; a name with
+  nothing visible left gives no title, and the note is quarantined as before. `ingest` and `amend`
+  judge a note under the file name it is written to, so removing a note's only heading with
+  `amend` makes its file name its title. `ingest-md --md` takes the file name too, as a `.txt` and
+  a converted file already did. The title is not indexed text, as a declared `title:` is not.
+  Such a note that declares no class is `unclassified` like any other: retrieved by default and
+  published in agent snapshots, so a transcript with no frontmatter and no heading, quarantined
+  until now, is no longer withheld. Declare `class: conversation` on a transcript.
+- An empty note, or one holding only frontmatter, composes as a document with no passage, as a
+  heading-only note already did: `documents` lists it by its file name, and `search` never
+  returns it. Two such notes with the same bytes still refuse the scope as byte-identical.
 - **`ingest` and `amend` write in any folder of a vault that declares no `writable_folders`,**
   except a folder its `skip` list skips, a hidden one, a `passages/` folder, and `_sources/` and
   `_archive/` at the top of the vault. They used to write only under `02-areas/`,

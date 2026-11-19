@@ -13,7 +13,9 @@ from __future__ import annotations
 from substrate.quarantine import tag
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
+from pathlib import PurePath
 
 from substrate.models import Block, Document, Kind
 
@@ -218,6 +220,28 @@ def extract_title(doc: Document) -> str | None:
         if b.level == 1:
             return b.text.strip()
     return heads[0].text.strip() if heads else None
+
+
+# A run of control characters or line separators. A file name may hold any of them except `/` and
+# NUL, and a title is printed and read as one line.
+_UNPRINTABLE_RUN = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]+")
+
+
+def title_from_filename(name: str) -> str | None:
+    """The title a file's name gives it, or None when nothing visible is left: the name without a
+    trailing `.md` (any other file, without its last suffix), in NFC, each run of control
+    characters and line separators made one space, and surrounding whitespace removed. NFC because
+    the same name is stored NFD by some volumes and tools and NFC by others, and a query is typed
+    NFC. Nothing visible means every character left is one `reader.invisible` names (white space,
+    a format character such as a zero-width space or a bidi override, a combining mark, a filler),
+    the predicate the reader judges a key or a fence by. Everything else is the name as its owner
+    wrote it: case, inner spaces, dots, and inside a visible name a character that joins an emoji
+    or marks a script's direction."""
+    from substrate.markdown.reader import invisible
+
+    stem = name[:-3] if name.endswith(".md") else PurePath(name).stem
+    title = _UNPRINTABLE_RUN.sub(" ", unicodedata.normalize("NFC", stem)).strip()
+    return title if any(not invisible(c) for c in title) else None
 
 
 def extract_version(blocks: list[Block]) -> tuple[str | None, str | None, str | None]:

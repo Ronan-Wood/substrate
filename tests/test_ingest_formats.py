@@ -726,18 +726,16 @@ def test_title_falls_back_to_the_filename_only_when_there_is_no_heading() -> Non
     assert json.loads((out2 / "run.json").read_text())["extract"]["title_source"] == "filename"
 
 
-def test_a_markdown_note_gets_no_filename_fallback() -> None:
-    """A vault note that cannot name itself is refused today; that gate is not this change's to
-    move. The fallback rides on the origin, which only the converted and text arms set."""
+def test_a_markdown_note_falls_back_to_its_filename_too() -> None:
+    """Issue #55: a vault note with no title and no heading takes its file name, the name its
+    owner gave it, as a converted document does. It used to be refused. With no origin (the
+    vault path), the name is the file's own."""
     root = _tmp()
     src = root / "untitled-note.md"
     src.write_text("Just a paragraph, no heading and no frontmatter title.\n", "utf-8")
-    try:
-        ingest_markdown(src, root / "o")
-    except classes.ClassPolicyError as e:
-        assert "title" in str(e)
-    else:
-        raise AssertionError("a titleless markdown note was accepted")
+    r = ingest_markdown(src, root / "o")
+    assert r.title == "untitled-note"
+    assert json.loads((root / "o" / "run.json").read_text())["extract"]["title_source"] == "filename"
 
 
 # ---------------------------------------------------------------- docling round-trip (opt-in)

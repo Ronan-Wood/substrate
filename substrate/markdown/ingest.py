@@ -54,9 +54,11 @@ class UnretrievableError(RuntimeError):
     loss gate could see it. What is wrong is retrievability: the document reads as ingested and
     can never be returned.
 
-    ONLY RAISED WHEN AN `origin` IS SET, i.e. on the converted and text arms. The vault path is
-    deliberately untouched: a heading-only note is legal markdown, this would refuse it, and the
-    refusal would land inside a launchd `compose` that runs unattended every fifteen minutes.
+    ONLY RAISED WHEN AN `origin` IS SET, i.e. on every handed-in file (converted, text and
+    `--md`). The vault path is
+    deliberately untouched: a heading-only note is legal markdown, and so is an empty one, which
+    takes its file name as its title (issue #55) and composes holding nothing. This would refuse
+    them, and the refusal would land inside the unattended refresh pass of `substrate serve`.
     Widening a gate onto the existing corpus is a separate decision with its own blast radius.
     """
 
@@ -375,14 +377,19 @@ def ingest_markdown(
     doc.vault = vault
     doc.tier = tier
 
-    # Last-resort title for a converted document with no heading and no declared title — a
-    # one-slide deck, a bare spreadsheet. `classes.apply` would otherwise refuse it for a missing
-    # required field, which is the right answer for a vault note (a note that cannot name itself
-    # is unfindable) and the wrong one for a file the operator named themselves. Ordered so the
-    # document's own heading always wins, and `title_source` records which of the three it was.
+    # Last-resort title: the file's name, for a document with no declared title and no heading — a
+    # daily note, a quick capture, a list, a clipping, a one-slide deck. In Obsidian the file name
+    # IS the note's title, a name its owner chose, which is why a converted file's is trusted too.
+    # It is the name of the file read: compose reads a note in place, `ingest` and `amend` stage it
+    # under the name it will have, and a `.md` or `.txt` handed in is read where it is. A converted
+    # file's comes on its origin, since `src` is then a temporary. Ordered so a declared title and
+    # then the document's own heading always win, and `title_source` records which of the three it
+    # was. A name with nothing visible in it gives none, and the class gate refuses the note.
     title_source = "declared" if doc.title else ("heading" if classes.extract_title(doc) else None)
-    if origin is not None and not doc.title:
-        doc.title = classes.extract_title(doc) or origin.title
+    if not doc.title:
+        named = ((origin.title if origin is not None else None)
+                 or classes.title_from_filename(src.name))
+        doc.title = classes.extract_title(doc) or named
         title_source = title_source or ("filename" if doc.title else None)
 
     meta = classes.apply(doc)
