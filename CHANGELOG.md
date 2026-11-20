@@ -41,9 +41,26 @@ Every release of the engine, newest first. The format follows
   scope's notes, rounded down. `0` refuses on any failed note, as compose did before; `"none"`
   never refuses for the count. Only the project vault's applies. A compose whose every note
   failed refuses whatever the ceiling says, so the earlier index stays.
+- **`substrate init <vault>` writes a minimal `.substrate.toml`** into an existing folder of
+  notes: `name`, from the folder name lowercased with accents dropped and each run of other
+  characters made one `-`, or `--name`. It writes that one file and nothing else, never replaces
+  or follows an existing one, creates no folder, and refuses a folder inside or around another
+  vault and a name another vault is registered under. It prints the next commands; compose
+  registers the scope. [`docs/configuration.md`](docs/configuration.md) has the three commands.
+- **`substrate --version`** prints the engine's version on one line; `substrate version` keeps
+  its JSON. **`substrate help [command]`** prints what `--help` prints.
+- **`search` is the CLI's name for `query`,** as it is the MCP tool's. `query` is the same
+  command, with the same flags, output and exit codes.
 
 ### Changed
 
+- **`substrate --help` says what the engine does and the three commands a new vault needs,** and
+  every command it lists has a description. `ingest-md`, `verify`, `rechunk`, `index`, `eval`,
+  `review` and `refresh-record` are left out of the listing; each still runs, and
+  `substrate help <command>` shows it. An unknown command exits 2 with the command it is
+  probably a slip for, as an unknown manifest key does, instead of the list of every command.
+- **Compose and register, refusing a vault with no manifest, name `substrate init <vault>`.**
+  They still refuse it rather than guess a scope.
 - **A key `.substrate.toml` doesn't define fails the compose.** A manifest used to compose with
   an unknown key ignored, so a misspelt `skips` or `writeable_folders` left the default in place
   of what was written. This breaks a manifest that carries an extra key, a typo or one another

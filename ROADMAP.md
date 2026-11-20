@@ -196,7 +196,7 @@ Kept from the previous roadmap; each gets an issue when its turn comes.
 | area | items |
 |---|---|
 | Linux and Docker | OCR on Linux through Tesseract (with [#25](https://github.com/Ronan-Wood/substrate/issues/25)'s bake-off); portable model defaults (no `-mlx` tags); the blob store's privacy checks on Linux (ACLs, sync folders by name, `ctime`); `serve` over TCP with a bearer token; a multi-arch container image; a release workflow with attestations and an SBOM; automated engine bumps in Scripta |
-| Getting started | `substrate new` to create a vault; a proper `help` command; `substrate doctor`; `substrate mcp setup <client>`; first-run walkthroughs, measured |
+| Getting started | `substrate new` to create a vault; `substrate doctor`; `substrate mcp setup <client>`; first-run walkthroughs, measured |
 | Verified paths | Lean models of the compose prune, scope composition, supersession and the frontmatter YAML emitter; incremental compose proved equal to full compose (unlocks [#45](https://github.com/Ronan-Wood/substrate/issues/45)'s larger speedup) |
 | Performance | a per-stage latency budget; model-side passes; hot paths in Rust or C only where [#38](https://github.com/Ronan-Wood/substrate/issues/38) shows a gain; start-up and footprint |
 | Retrieval | a Lean and Hypothesis proof of the lexprec rule once [#28](https://github.com/Ronan-Wood/substrate/issues/28) ships; one quiet-machine latency sitting for [#28](https://github.com/Ronan-Wood/substrate/issues/28), [#42](https://github.com/Ronan-Wood/substrate/issues/42)'s phase 3, [#43](https://github.com/Ronan-Wood/substrate/issues/43) and [#44](https://github.com/Ronan-Wood/substrate/issues/44) |

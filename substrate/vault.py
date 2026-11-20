@@ -215,16 +215,18 @@ def unknown_keys(manifest: dict) -> list[str]:
             if k not in TOP_LEVEL_KEYS and k not in UNREAD_KEYS and not isinstance(v, dict)]
 
 
-def _nearest_key(key: str) -> str | None:
-    """The known key `key` is likely a slip for, or None. Compared after NFKC and case folding, so
-    `SKIP`, and `skip` in full-width letters, point at `skip`. Below difflib's 0.8 ratio (`skips` to
-    `skip` is 0.89, `identities` to `identity` 0.78) there is no suggestion rather than a guess. A
-    key too long to reach that ratio is not compared: normalising and matching a manifest-sized key
-    would cost gigabytes on every `status`."""
-    if len(key) > 2 * max(map(len, TOP_LEVEL_KEYS)):
+def _nearest_key(key: str, known: Iterable[str] | None = None) -> str | None:
+    """The key in `known` (default TOP_LEVEL_KEYS) that `key` is likely a slip for, or None.
+    Compared after NFKC and case folding, so `SKIP`, and `skip` in full-width letters, point at
+    `skip`. Below difflib's 0.8 ratio (`skips` to `skip` is 0.89, `identities` to `identity` 0.78)
+    there is no suggestion rather than a guess. A key too long to reach that ratio is not compared:
+    normalising and matching a manifest-sized key would cost gigabytes on every `status`. The CLI
+    matches an unknown command the same way."""
+    known = sorted(TOP_LEVEL_KEYS if known is None else known)
+    if len(key) > 2 * max(map(len, known)):
         return None
     folded = unicodedata.normalize("NFKC", key).casefold()
-    near = difflib.get_close_matches(folded, sorted(TOP_LEVEL_KEYS), n=1, cutoff=0.8)
+    near = difflib.get_close_matches(folded, known, n=1, cutoff=0.8)
     return near[0] if near else None
 
 

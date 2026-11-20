@@ -5,6 +5,29 @@ substrate reads two kinds of configuration. A vault describes itself in its own
 manifests and the `*.toml` files under `~/.substrate`, except `scopes.toml`, which the engine writes.
 The engine refuses a file it can't read rather than guessing what it meant.
 
+## Getting started with your own vault
+
+Three commands, in order, on a folder of Markdown notes:
+
+```sh
+substrate init "Field Notes"      # writes "Field Notes/.substrate.toml": name = "field-notes"
+substrate compose "Field Notes"   # indexes the notes and registers scope "field-notes"
+substrate search --scope field-notes "what did I decide about the garden"
+```
+
+- **`init` writes one file, the manifest, holding only `name`.** It writes no index and no
+  registry row; compose registers the scope. It refuses, having written nothing, when a
+  `.substrate.toml` is already there (a file, a folder, or a symlink, even a broken one), when
+  the folder isn't an existing folder, or when a folder above or below it has a manifest (two
+  vaults nested that way index the same notes) or an index of the engine's.
+- **The name comes from the folder name:** lowercased, accents dropped, and each run of
+  characters other than ASCII letters, digits and `_` made one `-`. Pass `--name` to choose one,
+  as you must when the folder name leaves nothing (`笔记`) or another vault has that name.
+- **A folder with no notes yet gets its manifest,** and `init` says compose will refuse it until
+  a note is there.
+
+`search` is the MCP tool's name too; `substrate query` is the same command.
+
 ## The vault manifest: `.substrate.toml`
 
 This file sits at the root of a project vault, and `compose` reads it. Here is the demo vault's,

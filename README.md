@@ -132,9 +132,10 @@ queries show inheritance, supersession and the withheld classes.
 
 ### Beyond the demo
 
-- **Your own vault:** add a `.substrate.toml` beside your notes (see
-  [`docs/configuration.md`](docs/configuration.md)) and run `compose` on it. Without `--db` and
-  `--index-root`, the index goes to `~/.substrate/index/<scope>.db`.
+- **Your own vault:** `substrate init <folder>` writes its `.substrate.toml`, then
+  `substrate compose <folder>` indexes it and `substrate search --scope <name> "…"` searches it
+  ([`docs/configuration.md`](docs/configuration.md#getting-started-with-your-own-vault)). Without
+  `--db` and `--index-root`, the index goes to `~/.substrate/index/<scope>.db`.
 - **Vector search:** run [Ollama](https://ollama.com) on its default port, pull
   `qwen3-embedding:0.6b`, and run `uv run python -m substrate.cli embed --scope <name>`.
 - **The default socket:** without `--socket`, `serve` uses `~/.substrate/run/substrate.sock`, and

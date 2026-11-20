@@ -1149,6 +1149,28 @@ def _index_location(args: argparse.Namespace, scope, project: Path) -> tuple[Pat
         return None
 
 
+def _init_hint(project: Path, registry: str | None) -> None:
+    """After a manifest refusal: the `init` command that would write the vault its manifest, when
+    one would (`manifest_init.plan` accepts the folder). A vault the registry holds is given the
+    name it is registered under, so its manifest keeps its scope."""
+    from substrate import manifest_init
+
+    try:
+        plan = manifest_init.plan(project, None, scopes.load(registry))
+    except (manifest_init.InitError, scopes.ScopeError, OSError):
+        return  # no hint; the refusal above stands
+    named = f" --name {_shell(plan.name)}" if plan.source != "from the folder name" else ""
+    print(f"  `substrate init {_shell(str(project))}{named}` writes one.", file=sys.stderr)
+
+
+def _shell(text: str) -> str:
+    """`text` as one shell word, to paste. A text with a character that does not print is shown
+    escaped instead, so it cannot act on the terminal; that one cannot be pasted as it is."""
+    import shlex
+
+    return shlex.quote(text) if text.isprintable() else repr(text)
+
+
 def cmd_register(args: argparse.Namespace) -> int:
     """Record a project vault's scope in the registry WITHOUT composing it: it is pending, and the
     engine's next refresh pass composes it (`scopes.register`). For a client that writes notes for
@@ -1166,6 +1188,7 @@ def cmd_register(args: argparse.Namespace) -> int:
         scope = _vault.resolve_scope(project)
     except _vault.VaultError as e:
         print(f"FATAL (manifest): {e}", file=sys.stderr)
+        _init_hint(project, args.registry)
         return 2
     try:
         prior = scopes.load(args.registry).get(scope.name)
@@ -1316,6 +1339,7 @@ def _compose(args: argparse.Namespace, report) -> int:
         scope = _vault.resolve_scope(project)
     except _vault.VaultError as e:
         print(f"FATAL (manifest): {e}", file=sys.stderr)
+        _init_hint(project, args.registry)
         return 2
     # ONE SPELLING OF THE DATABASE for every use below. zsh passes `--db=~/x.db` through literally;
     # the guards and the registry expanded it and SQLite did not, so the compose ended in a
@@ -2815,8 +2839,23 @@ def cmd_embed(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="substrate")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap = argparse.ArgumentParser(
+        prog="substrate", description=_DESCRIPTION,
+        epilog="`substrate help <command>` shows one command's options.",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action=_Version, help="print the engine's version and exit")
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="<command>", title="commands")
+
+    ini = sub.add_parser("init", help="write a minimal .substrate.toml into a folder of notes, so "
+                                      "compose can index it")
+    ini.add_argument("vault", help="an existing folder of notes; init creates no folder")
+    ini.add_argument("--name", default=None,
+                     help="the scope name (default: the folder name, lowercased, with its accents "
+                          "dropped and each run of other characters made one `-`)")
+    ini.add_argument("--registry", default=None,
+                     help=f"the scope registry a name is checked against, not written (default "
+                          f"${scopes.ENV_VAR}, else {scopes.DEFAULT_REGISTRY})")
+    ini.set_defaults(func=cmd_init)
 
     ing = sub.add_parser("ingest", help="ingest one source document; run `substrate formats` for "
                                         "what is accepted")
@@ -2926,7 +2965,9 @@ def main(argv: list[str] | None = None) -> int:
                           f"{scopes.DEFAULT_REGISTRY})")
     rgs.set_defaults(func=cmd_register)
 
-    qry = sub.add_parser("query")
+    qry = sub.add_parser("search", aliases=["query"],
+                         help="search a composed scope, as the MCP `search` tool does; `query` is "
+                              "the same command")
     qry.add_argument("--scope", default=None,
                      help="query a composed scope by its manifest name, resolved through the "
                           "registry `compose` writes (alternative to --db)")
@@ -3054,7 +3095,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ps = sub.add_parser("publish-snapshot",
                         help="write a scope's read-only agent snapshot (substrate.agent); "
-                             "refresh-record does this on every pass for scopes in "
+                             "every refresh pass does this for the scopes in "
                              "agent-publish.toml")
     ps.add_argument("--scope", required=True)
     ps.add_argument("--dir", default=None,
@@ -3099,7 +3140,8 @@ def main(argv: list[str] | None = None) -> int:
     ev.add_argument("--cache", default="out/vector-cache.db")
     ev.set_defaults(func=cmd_eval)
 
-    emb = sub.add_parser("embed")
+    emb = sub.add_parser("embed", help="compute the vectors vector search needs, for one index, "
+                                       "with a local Ollama model")
     _add_lock_wait(emb)
     emb.add_argument("--registry", default=None,
                      help=f"the registry whose vaults lock to take (default ${scopes.ENV_VAR}, "
@@ -3172,6 +3214,19 @@ def main(argv: list[str] | None = None) -> int:
     sv.add_argument("--registry", default=None,
                     help=f"scope registry (default ${scopes.ENV_VAR}, else {scopes.DEFAULT_REGISTRY})")
     sv.set_defaults(func=cmd_serve)
+
+    hp = sub.add_parser("help", help="what --help prints, for substrate or for one command")
+    hp.add_argument("words", nargs="*", metavar="command",
+                    help="a command, and a subcommand of it (`substrate help blobs gc`)")
+    hp.set_defaults(func=lambda a: _help(ap, sub.choices, a.words))
+
+    sub._choices_actions[:] = [c for c in sub._choices_actions if c.dest not in INTERNAL]
+
+    # An unknown command is answered as an unknown manifest key is, with the near miss; argparse's
+    # own message lists every command, the internal ones too.
+    words = sys.argv[1:] if argv is None else list(argv)
+    if words and not words[0].startswith("-") and words[0] not in sub.choices:
+        return _not_a_command(words[0], sub.choices)
 
     # ONE PARSE. `serve` hands every flag it does not own to the server, so the rest is kept for
     # it; for any other command an unknown flag is the error it always was.
@@ -3398,6 +3453,120 @@ def cmd_version(args: argparse.Namespace) -> int:
         registry = None
     print(json.dumps({"schema": schema.SCHEMA_VERSION, "wire": wire.VERSION,
                       "registry": registry}))
+    return 0
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """Write a minimal `.substrate.toml` into an existing folder of notes (`substrate.manifest_init`
+    decides and writes). Every refusal is exit 2 on stderr, having written nothing; the next command
+    to run goes to stdout."""
+    from substrate import manifest_init as mi
+
+    def refuse(why: str) -> int:
+        # Escaped whole: a path in it may be a folder name the vault's contents chose.
+        print(f"FATAL (init): {_printable(why)}", file=sys.stderr)
+        return 2
+
+    if not args.vault.strip():
+        return refuse("the vault is empty, which names no folder.")
+    given = Path(os.path.expanduser(args.vault))
+    if str(given).startswith("~"):
+        return refuse(f"{args.vault!r} names a home directory that does not exist.")
+    try:
+        entries = scopes.load(args.registry)
+    except scopes.ScopeError as e:
+        return refuse(f"{e}. compose would refuse it too, so nothing was written.")
+    try:
+        plan = mi.plan(given, args.name, entries)
+        path = mi.create(plan)
+    except mi.InitError as e:
+        return refuse(str(e))
+
+    folder = _shell(str(plan.vault))
+    print(f"wrote {_shell(str(path))}: scope {plan.name!r}, {plan.source}")
+    if plan.notes == 0:
+        print(f"nothing to index yet: {folder} holds no .md note, and compose refuses a vault "
+              f"with none. Add a note, then run:")
+        print(f"  substrate compose {folder}")
+    else:
+        print(f"found {plan.notes} note{'s' if plan.notes != 1 else ''}. Next, index them; compose "
+              f"also registers the scope, which search needs:")
+        print(f"  substrate compose {folder}")
+        print(f"  substrate search --scope {_shell(plan.name)} \"your question\"")
+    return 0
+
+
+def _printable(text: str) -> str:
+    """`text` with every character that does not print written as its escape, so nothing in it
+    acts on the terminal."""
+    return "".join(c if c.isprintable() else repr(c)[1:-1] for c in text)
+
+
+class _Version(argparse.Action):
+    """`--version`: the engine's version, one line. Read when asked, so no other command pays."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS,
+                 help=None):
+        super().__init__(option_strings, dest=dest, default=default, nargs=0, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        try:
+            version = package_version()
+        except (OSError, KeyError, TypeError, ValueError) as e:
+            parser.exit(2, f"substrate: the version is unknown: {e}\n")
+        print(f"substrate {version}")
+        parser.exit(0)
+
+
+def package_version() -> str:
+    """`[project] version` from the `pyproject.toml` beside the package: the file a release sets
+    (RELEASING.md), and present in a clone, a deployed pin and the bundle alike."""
+    import tomllib
+
+    path = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    with path.open("rb") as fh:
+        version = tomllib.load(fh)["project"]["version"]
+    if not isinstance(version, str) or not version.isprintable():
+        raise ValueError(f"{path} has no plain [project] version")
+    return version
+
+
+# Commands left out of `substrate --help`: the fixture and eval tooling behind `./run.sh` and the
+# ingest tests, and the refresh pass's own channel. Each still runs, and `substrate help <command>`
+# shows it. A test holds every other command to being listed with a description.
+INTERNAL = ("eval", "index", "ingest-md", "rechunk", "refresh-record", "review", "verify")
+
+_DESCRIPTION = """\
+substrate indexes folders of Markdown notes (vaults) on this machine and answers searches over
+them, here or through its MCP server.
+
+A new vault needs three commands, in order:
+  substrate init <vault>                      write its .substrate.toml
+  substrate compose <vault>                   index it, and register its scope
+  substrate search --scope <name> "question"  search it"""
+
+
+def _not_a_command(word: str, names) -> int:
+    from substrate import vault as _vault
+
+    near = _vault._nearest_key(word, names)
+    guess = f" (did you mean {near!r}?)" if near else ""
+    print(f"substrate: {_vault._shown(word)} is not a command{guess}. `substrate help` lists "
+          f"them.", file=sys.stderr)
+    return 2
+
+
+def _help(ap: argparse.ArgumentParser, commands: dict, words: list[str]) -> int:
+    """`substrate help [command …]`: what `--help` prints, for the whole CLI or one command."""
+    if not words:
+        ap.print_help()
+        return 0
+    if words[0] not in commands:
+        return _not_a_command(words[0], commands)
+    try:
+        ap.parse_args([*words, "--help"])
+    except SystemExit as e:
+        return e.code if isinstance(e.code, int) else 0 if e.code is None else 2
     return 0
 
 
