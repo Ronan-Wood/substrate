@@ -329,7 +329,7 @@ def test_an_empty_note_composes_holding_nothing(world, rel, text):
 
 def test_a_vault_of_empty_notes_past_the_ceiling_composes(world):
     """Fails before: 12 quarantined notes refused the scope. Their bytes differ (a daily note
-    template's date), so none is a byte-identical copy; identical empty notes are Open."""
+    template's date); identical empty notes are `test_identical_notes.py`'s."""
     for i in range(12):
         world.write(f"02-areas/daily/2026-12-{i + 1:02d}.md", f"---\ndate: 2026-12-{i + 1:02d}\n---\n")
     world.compose()

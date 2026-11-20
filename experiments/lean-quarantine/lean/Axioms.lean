@@ -14,3 +14,11 @@ open Quarantine
 #print axioms nothing_left_refuses
 #print axioms an_index_is_never_empty
 #print axioms all_failing_refuses_with_no_ceiling
+#print axioms a_copy_has_its_twin_composed
+#print axioms a_copy_is_never_indexed_or_quarantined
+#print axioms one_note_per_doc_id
+#print axioms every_passing_note_is_indexed_or_a_copy
+#print axioms every_passing_note_is_indexed_or_its_twin_is
+#print axioms without_shared_ids_no_copy
+#print axioms a_copy_is_left_out
+#print axioms a_copy_of_a_failure_is_not_quarantined

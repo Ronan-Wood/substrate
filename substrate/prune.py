@@ -49,10 +49,12 @@ class PruneError(RuntimeError):
     """A vault whose notes would be pruned is missing, unreadable or empty: nothing was removed."""
 
 
-# Why a folder is removed: its note is deleted, skipped by its vault's list, or quarantined.
+# Why a folder is removed: its note is deleted, skipped by its vault's list, quarantined, or left
+# out as a copy of the note indexed in its place (`vault.Scope.duplicates`).
 DELETED = "note deleted"
 SKIPPED = "note skipped by its vault's skip list"
 QUARANTINED = "note quarantined"
+DUPLICATE = "note left out as a copy of another"
 
 
 class Stale(NamedTuple):
@@ -60,7 +62,7 @@ class Stale(NamedTuple):
     note: Path        # the deleted or skipped note, relative to its vault
     folder: Path      # its ingest folder under the index root
     skipped: bool = False   # still on disk, and named by its vault's skip list
-    why: str | None = None  # set for a quarantined note's folder (`QUARANTINED`)
+    why: str | None = None  # set for a quarantined note's or a copy's folder (`QUARANTINED`, …)
 
 
 def _ingest_only(folder: Path) -> set[str] | None:
@@ -214,9 +216,10 @@ def _remove_folder(folder: Path) -> None:
     os.rmdir(folder)
 
 
-def remove_quarantined(folders: Iterable[Path]) -> list[Path]:
-    """Remove the ingest folder of each note compose quarantined, so no earlier version of the
-    note stays indexed. Returns the folders that held an ingested note.
+def remove_unindexed(folders: Iterable[Path]) -> list[Path]:
+    """Remove the ingest folder of each note compose discovered and does not index (quarantined,
+    or left out as a copy of another), so no earlier version of the note stays indexed. Returns
+    the folders that held an ingested note.
 
     Not `stale`'s path, and not under `refuse_missing`: compose discovered each of these notes in
     a vault it can read this run, so none is a sign of a missing vault. Each folder is the one

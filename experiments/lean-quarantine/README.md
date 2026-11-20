@@ -3,9 +3,12 @@
 **The rule that decides which notes a compose indexes is proved, and the real compose agrees with
 the model.** A note that fails on its own is quarantined: left out of the index and named with its
 reason. The scope is refused for a fault that is not one note's own, when more notes fail than the
-ceiling allows, or when every note failed and none is left to index. The model proves that a quarantined note is never indexed and that nothing
-else is withheld. The differential runs the real `substrate compose` on generated vaults and finds
-no disagreement.
+ceiling allows, or when every note failed and none is left to index. Before any of that, of
+several notes that derive one `doc_id` from the same bytes, only the first by path is composed;
+the others are copies, left out and named in `status` (#71). The model proves that a quarantined
+note is never indexed, that a copy is neither indexed nor quarantined, that exactly one note
+answers for each `doc_id`, and that nothing else is withheld. The differential runs the real
+`substrate compose` on generated vaults and finds no disagreement.
 
 Against this repository's `feat/compose-quarantine` (2026-11-14), on macOS:
 
@@ -18,8 +21,20 @@ Against this repository's `feat/compose-quarantine` (2026-11-14), on macOS:
 | `agree --mutant faults-ignored` | 500 | caught: `decide` drops a scope fault found while ingesting |
 | `agree --mutant allow-empty` | 500 | caught: a scope whose every note failed is indexed empty |
 
+Against `feat/identical-notes-compose` (2026-11-19), on macOS, with copies generated:
+
+| run | cases | result |
+|---|---|---|
+| `agree` | 2,000 | no disagreement: 296 index every note, 380 quarantine some, 791 refuse for a scope fault, 342 refuse with nothing left to index, 191 refuse over the ceiling. Of the cases indexed, 219 leave out copies and 185 index a copy under a name of its own |
+| `agree --mutant keep-stale` | 500 | caught |
+| `agree --mutant ceiling-ge` | 500 | caught |
+| `agree --mutant no-default` | 500 | caught |
+| `agree --mutant faults-ignored` | 500 | caught |
+| `agree --mutant allow-empty` | 500 | caught |
+| `agree --mutant last-copy` | 500 | caught: of two notes with one `doc_id`, the last by path is indexed rather than the first |
+
 The non-required `lean` CI job (`.github/workflows/lean.yml`) builds the model, checks its axioms,
-runs 2,000 `agree` cases and requires each of the five planted regressions to be caught.
+runs 2,000 `agree` cases and requires each of the six planted regressions to be caught.
 
 ## What is proved
 
@@ -47,17 +62,40 @@ the declared ceiling, to a refusal or the notes indexed and quarantined. It is
 Three theorems assume the notes are numbered without repeats. Compose keys each note by its path,
 which names one note in a scope.
 
+**Copies** are in [`lean/Quarantine/Copies.lean`](lean/Quarantine/Copies.lean). `outcome` runs
+`verdict` over `composed`: the notes discovery finds, less the copies. So every theorem above is
+about the notes composed, and `every_passing_note_is_indexed` says "every note composed that
+passed". A copy passes and is not indexed, so for every note discovery finds the statement is the
+narrower one below, and it is said, not left to the old name:
+
+| theorem | says |
+|---|---|
+| `every_passing_note_is_indexed_or_a_copy` | When the scope is indexed, every note discovery found that passed is indexed, or is a copy and a note composed in its place, indexed or quarantined, derives the same `doc_id`. |
+| `every_passing_note_is_indexed_or_its_twin_is` | The same, with that note indexed, under an assumption: a copy fails exactly when the note composed in its place does (`twins`). The code makes it likely, not certain (below). |
+| `a_copy_is_never_indexed_or_quarantined` | A copy is in neither list. |
+| `a_copy_has_its_twin_composed` | A copy has a note with its `doc_id`, before it by path, that is composed. |
+| `one_note_per_doc_id` | No two composed notes derive one `doc_id`. |
+| `without_shared_ids_no_copy` | When every note has a `doc_id` of its own (identical notes under their own names among them), nothing is left out and every note is decided as before. |
+| `a_copy_is_left_out`, `a_copy_of_a_failure_is_not_quarantined` | Concrete scopes on which a copy is left out beside an indexed note and beside a quarantined one. |
+
+Two of them assume the found notes are numbered, and ranked by path, without repeats: a path names
+one note, and first-by-path order is total on paths.
+
 ## What is tested
 
 [`harness/run.py`](harness/run.py) generates small cases with Hypothesis: up to 24 notes across a
 project vault and an inherited one, each passing or failing in one of nine ways compose
 quarantines (a status, doc_type or class outside the vocabulary, frontmatter that is not YAML, an
 engine key spelled another way, `superseded` with no link, a class policy refusal, a note that is
-not UTF-8); a declared ceiling (none, a count from 0 to 12, or `"none"`); one of five scope faults
-(a duplicate `doc_id`, a missing inherited vault, a manifest that does not parse, a ceiling that is
-not one, a link where a passing note's ingest folder goes); and, for some notes, an earlier
-compose that indexed them in a good version. The first four faults are refused before any note is
-read; the link reaches `decide` while compose ingests.
+not UTF-8); up to six byte copies of those notes, each under a name of its own or under its
+note's name in another folder (`a/`, before `notes/` by path, or `zz/`, after it) or in the other
+vault; a declared ceiling (none, a count from 0 to 12, or `"none"`); one of seven scope faults (a
+`doc_id` two notes declare, a conflict copy of a note that declares its `doc_id`, one name in two
+folders whose bytes differ and whose `doc_id` fingerprint matches anyway, a missing inherited
+vault, a manifest that does not parse, a ceiling that is not one, a link where a composed passing
+note's ingest folder goes); and, for some notes, an earlier compose that indexed them in a good
+version. All but the link are refused before any note is read; the link reaches `decide` while
+compose ingests.
 
 The real compose runs in the harness's process, against a scratch registry and engine home in a
 temporary folder per case. The compiled model reads the same case as JSON. They must agree:
@@ -66,13 +104,27 @@ temporary folder per case. The compiled model reads the same case as JSON. They 
   compose left (or there is none), every ingest folder that held a version still holds one, and
   compose's report to a refresh pass holds only why it refused;
 - otherwise the index holds exactly the notes the model indexes, and the quarantine table and
-  compose's report both name exactly the notes it quarantines. A failed note whose earlier version
-  is still indexed is a disagreement.
+  compose's report both name exactly the notes it quarantines. Compose's report and `status` both
+  name exactly the copies it leaves out, each with a composed note of its `doc_id` as the one
+  indexed in its place. A failed note whose earlier version is still indexed is a disagreement.
 
 Runs are derandomized, so they are reproducible. Every check is an explicit `raise`, so they hold
 under `python -O`.
 
 ## Where the model is simpler than the code
+
+- **A `doc_id` is a number, and so is first-by-path order.** The harness gives each note one per
+  file name and bytes, and a note that is not UTF-8 one of its own (compose never reads it for
+  one; it is quarantined). It ranks the notes itself, from their vault and path, rather than
+  asking the code. That ranking is a second statement of the rule, so a code that picks another
+  copy disagrees: `last-copy` is how it shows.
+- **A copy is generated to fail exactly when its note does**, as `twins` assumes: the harness
+  writes it with its note's kind. The code makes notes copies only when their bytes and their
+  sources' `_meta.md` bytes are the same, and refuses two that differ only in `_meta.md`
+  (`tests/test_identical_notes.py`). A failure that depends on the path alone can still tell two
+  copies apart: a name with nothing visible titles no note, where a name that slugs alike does.
+  That is not generated; the theorem without `twins` covers it, and compose and `status` then say
+  that neither copy is indexed.
 
 - **Why a note failed is not modelled.** Every per-note failure is one bit. The harness writes
   each kind the code distinguishes, so a kind the code refused the scope for would disagree.
@@ -98,4 +150,5 @@ under `python -O`.
 cd experiments/lean-quarantine/lean && lake build && python3 check_axioms.py && cd ../../..
 uv run python experiments/lean-quarantine/harness/run.py agree --cases 2000
 uv run python experiments/lean-quarantine/harness/run.py agree --mutant keep-stale --cases 300
+uv run python experiments/lean-quarantine/harness/run.py agree --mutant last-copy --cases 300
 ```

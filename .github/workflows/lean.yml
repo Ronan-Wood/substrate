@@ -92,7 +92,7 @@ jobs:
       # Each planted regression must be caught, with a disagreement and not a crash.
       - name: the quarantine harness still notices every planted regression
         run: |
-          for mutant in keep-stale ceiling-ge no-default faults-ignored allow-empty; do
+          for mutant in keep-stale ceiling-ge no-default faults-ignored allow-empty last-copy; do
             if out=$(uv run --no-sync python experiments/lean-quarantine/harness/run.py agree --mutant "$mutant" --cases 500 2>&1); then
               echo "$out"
               echo "the $mutant regression went unnoticed: the harness is not testing compose"

@@ -4,17 +4,19 @@
     python run.py agree --mutant keep-stale     # a guard broken on purpose: the harness must notice
 
 Each case is a generated pair of vaults (a project vault and, sometimes, a vault it inherits) whose
-notes each pass or fail in one of the ways compose quarantines, a project manifest that may declare
-a `quarantine_ceiling`, sometimes a fault that is not one note's own, and sometimes an earlier
-compose in which some of the notes were indexed in a good version. The real compose runs in this
+notes each pass or fail in one of the ways compose quarantines, some of them byte copies of another
+(under a name of their own, or under the same name in another folder or vault), a project manifest
+that may declare a `quarantine_ceiling`, sometimes a fault that is not one note's own, and
+sometimes an earlier compose in which some of the notes were indexed in a good version. The real compose runs in this
 process, against a scratch registry and engine home. The compiled model gets the abstract case as
 JSON. They must agree:
 
   * the model refuses exactly when compose exits non-zero, and then the index is what the earlier
     compose left (or there is none);
-  * otherwise the index holds exactly the notes the model indexes, and the quarantine table names
-    exactly the notes it quarantines. A failed note whose earlier version is still indexed is a
-    disagreement.
+  * otherwise the index holds exactly the notes the model indexes, the quarantine table names
+    exactly the notes it quarantines, and compose's report and `status` name exactly the copies it
+    leaves out, each with the note indexed in its place. A failed note whose earlier version is
+    still indexed is a disagreement.
 
 Runs are derandomized, so the same command gives the same counts. A script, not a module: it
 refuses to be imported, because importing it points `HOME` at a scratch folder. Every check is an
@@ -57,7 +59,8 @@ try:
     from hypothesis import HealthCheck, given, settings
     from hypothesis import strategies as st
 
-    from substrate import cli, private, prune, quarantine, scopes
+    from substrate import cli, introspect, private, prune, quarantine, scopes
+    from substrate import vault as V
 except BaseException:
     with contextlib.suppress(OSError):
         os.rmdir(_RUN_ROOT)
@@ -75,7 +78,8 @@ class Finding(Exception):
 # ---------------------------------------------------------------- the world
 
 # Every way a note fails on its own that the harness writes, each one compose quarantines. `ok`
-# passes. Each body holds the note's number, so no two notes are byte-identical.
+# passes. Each body holds a note's number, so two notes are byte-identical only when one is a copy
+# of the other (`Note.copy_of`).
 KINDS = {
     "ok": lambda i: f"# Note {i}\n\nBody zq{i}x.\n",
     "status": lambda i: f"---\nstatus: someday\n---\n\n# Note {i}\n\nBody zq{i}x.\n",
@@ -91,14 +95,34 @@ FAILURES = [*(k for k in KINDS if k != "ok"), NOT_UTF8]
 # Faults that are not one note's own. Each refuses the scope. The first four `vault.resolve_scope`
 # refuses before any note is read; `planted_folder` (a link where a passing note's ingest folder
 # goes) reaches `quarantine.decide` as a scope fault while compose ingests.
-FAULTS = ["duplicate_doc_id", "missing_vault", "broken_manifest", "bad_ceiling", "planted_folder"]
+# `declared_copies` (a conflict copy of a note that declares its doc_id) and `derived_collision`
+# (one name in two folders, bytes that differ, and a doc_id fingerprint that matches anyway) are
+# refused there too; they are the two kinds of shared doc_id that leaving out copies does not cover.
+FAULTS = ["duplicate_doc_id", "missing_vault", "broken_manifest", "bad_ceiling", "planted_folder",
+          "declared_copies", "derived_collision"]
+# Two bodies whose SHA-256 share their first 32 bits, so one name gives them one derived doc_id.
+COLLIDING = ("# Todo\n\nItem 21779.\n", "# Todo\n\nItem 98006.\n")
+# The folders a copy is written to. `notes` holds every note that is not a copy elsewhere, so a
+# copy in `a` comes before its note by path and one in `zz` after it.
+COPY_FOLDERS = ["a", "notes", "zz"]
 
 
 @dataclass(frozen=True)
 class Note:
     core: bool          # in the inherited vault, else the project vault
-    kind: str           # "ok" or one of FAILURES
+    kind: str           # "ok" or one of FAILURES; a copy's is its note's
     prior: bool         # indexed, in a good version, by an earlier compose
+    copy_of: int | None = None   # its bytes are this note's
+    same_name: bool = False      # and its file name, so the two derive one doc_id
+    folder: str = "notes"
+
+    def rel(self, i: int) -> str:
+        """Its path inside its vault."""
+        own = self.copy_of if self.same_name else i
+        return f"{self.folder}/n{own:02d}.md"
+
+    def body_of(self, i: int) -> int:
+        return i if self.copy_of is None else self.copy_of
 
 
 @dataclass(frozen=True)
@@ -111,8 +135,39 @@ class World:
     def inherits(self) -> bool:
         return any(n.core for n in self.notes) or self.fault == "missing_vault"
 
+    def where(self, i: int) -> tuple[str, str]:
+        n = self.notes[i]
+        return ("core-vault" if n.core else "proj-vault"), n.rel(i)
+
+    def ident(self, i: int) -> int:
+        """The doc_id note `i` derives, as a number: one per file name and bytes. A note that is
+        not UTF-8 is never read for one, so its own."""
+        n = self.notes[i]
+        if n.kind == NOT_UTF8:
+            return 100_000 + i
+        return n.body_of(i) * 1000 + (n.copy_of if n.same_name else i)
+
+    def kept(self, i: int) -> bool:
+        """Whether note `i` is composed: no note with its doc_id comes before it."""
+        ranks = self.ranks()
+        return all(self.ident(j) != self.ident(i) or ranks[i] <= ranks[j]
+                   for j in range(len(self.notes)))
+
+    def ranks(self) -> list[int]:
+        """Each note's place in first-by-path order: the project vault before the one it
+        inherits, then the path inside the vault, folder by folder."""
+        keyed = sorted(range(len(self.notes)), key=lambda i: (
+            self.notes[i].core, tuple(self.notes[i].rel(i).split("/"))))
+        return [keyed.index(i) for i in range(len(self.notes))]
+
+    def plantable(self) -> list[int]:
+        """The notes a link at whose ingest folder compose writes through: composed, and passing."""
+        return [i for i, n in enumerate(self.notes) if n.kind == "ok" and self.kept(i)]
+
     def to_json(self) -> dict:
-        return {"notes": [[i, n.kind != "ok"] for i, n in enumerate(self.notes)],
+        ranks = self.ranks()
+        return {"notes": [[i, n.kind != "ok", self.ident(i), ranks[i]]
+                          for i, n in enumerate(self.notes)],
                 "fault": self.fault is not None, "decl": self.decl}
 
 
@@ -126,13 +181,26 @@ def world(draw) -> World:
         notes.append(Note(core=draw(st.booleans()) and draw(st.booleans()),
                           kind=draw(st.sampled_from(FAILURES)) if failed else "ok",
                           prior=draw(st.booleans())))
+    # Copies: of a note under a name of their own (each is indexed), or under its name in another
+    # folder or vault (one doc_id, so one of them is).
+    taken = {(n.core, n.rel(i)) for i, n in enumerate(notes)}
+    for _ in range(draw(st.sampled_from([0, 1, 3, 6]))):
+        of = draw(st.integers(0, size - 1))
+        c = Note(core=draw(st.booleans()) and draw(st.booleans()), kind=notes[of].kind,
+                 prior=draw(st.booleans()), copy_of=of, same_name=draw(st.booleans()),
+                 folder=draw(st.sampled_from(COPY_FOLDERS)))
+        if (c.core, c.rel(len(notes))) not in taken:
+            taken.add((c.core, c.rel(len(notes))))
+            notes.append(c)
     fault = draw(st.sampled_from([None] * 6 + FAULTS))
-    if fault == "planted_folder" and all(n.kind != "ok" for n in notes):
-        # Ingest opens a note's folder only once the note has passed, so a link at a failing
-        # note's folder is never written through. With no note passing, there is nowhere to plant.
-        fault = None
     decl = draw(st.sampled_from(["absent", "absent", "none"]) | st.integers(0, 12))
-    return World(tuple(notes), fault, decl)
+    w = World(tuple(notes), fault, decl)
+    if fault == "planted_folder" and not w.plantable():
+        # Ingest opens a note's folder only once the note has passed, so a link at a failing
+        # note's folder, or at a copy's, is never written through. With no composed note
+        # passing, there is nowhere to plant.
+        w = World(w.notes, None, decl)
+    return w
 
 
 # ---------------------------------------------------------------- the two deciders
@@ -150,7 +218,8 @@ class Lean:
             raise HarnessBug(f"the model could not read the world: {out['error']}")
         if "refuse" in out:
             return {"refuse": True}
-        return {"indexed": sorted(out["indexed"]), "quarantined": sorted(out["quarantined"])}
+        return {"indexed": sorted(out["indexed"]), "quarantined": sorted(out["quarantined"]),
+                "copies": sorted(out["copies"])}
 
 
 class Layout:
@@ -163,10 +232,11 @@ class Layout:
         self.registry = root / "scopes.toml"
 
     def note(self, i: int, n: Note) -> Path:
-        return (self.core if n.core else self.project) / "notes" / f"n{i:02d}.md"
+        return (self.core if n.core else self.project) / n.rel(i)
 
 
 def _write_note(path: Path, i: int, kind: str) -> None:
+    """Note `i`'s body, as `kind` writes it, at `path`."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if kind == NOT_UTF8:
         path.write_bytes(f"# Note {i}\n\nCaf".encode() + b"\xe9 " + f"zq{i}x.\n".encode())
@@ -215,8 +285,7 @@ def _index_of(lay: Layout, w: World) -> tuple[list[int], list[int]] | None:
     if not lay.db.exists():
         return None
     by_path = {str(lay.note(i, n).resolve()): i for i, n in enumerate(w.notes)}
-    by_rel = {(("core-vault" if n.core else "proj-vault"), f"notes/n{i:02d}.md"): i
-              for i, n in enumerate(w.notes)}
+    by_rel = {w.where(i): i for i in range(len(w.notes))}
     db = sqlite3.connect(f"file:{lay.db}?mode=ro", uri=True)
     try:
         docs = [r[0] for r in db.execute("SELECT source_path FROM documents")]
@@ -249,7 +318,16 @@ def python_verdict(w: World, lay: Layout) -> dict:
     _manifest(lay, w, final=True)
     lay.core.mkdir(parents=True, exist_ok=True)
     for i, n in enumerate(w.notes):
-        _write_note(lay.note(i, n), i, n.kind)
+        _write_note(lay.note(i, n), n.body_of(i), n.kind)
+    if w.fault == "declared_copies":
+        for name in ("twin.md", "twin (conflicted copy).md"):
+            (lay.project / "notes" / name).parent.mkdir(parents=True, exist_ok=True)
+            (lay.project / "notes" / name).write_text(
+                "---\ndoc_id: twin\n---\n\n# Twin\n\nOne.\n", "utf-8")
+    if w.fault == "derived_collision":
+        for folder, body in zip(("x", "y"), COLLIDING, strict=True):
+            (lay.project / folder).mkdir(parents=True, exist_ok=True)
+            (lay.project / folder / "todo.md").write_text(body, "utf-8")
     if w.fault == "duplicate_doc_id":
         (lay.project / "notes").mkdir(parents=True, exist_ok=True)
         (lay.project / "notes" / "twin-a.md").write_text(
@@ -259,7 +337,8 @@ def python_verdict(w: World, lay: Layout) -> dict:
     if w.fault == "missing_vault":
         shutil.rmtree(lay.core)
     if w.fault == "planted_folder":
-        i, n = next((i, n) for i, n in enumerate(w.notes) if n.kind == "ok")
+        i = w.plantable()[0]
+        n = w.notes[i]
         vault = lay.core if n.core else lay.project
         folder = lay.index / private.ingest_dir_name(vault.name, lay.note(i, n).resolve())
         if folder.is_dir():
@@ -286,12 +365,30 @@ def python_verdict(w: World, lay: Layout) -> dict:
         return {"refuse": True}
     if after is None:
         raise HarnessBug("compose exited 0 and wrote no index")
-    by_rel = {f"{'core-vault' if n.core else 'proj-vault'}/notes/n{i:02d}.md": i
-              for i, n in enumerate(w.notes)}
+    by_rel = {"/".join(w.where(i)): i for i in range(len(w.notes))}
     reported = sorted(by_rel[r["path"]] for r in records if r["kind"] == "quarantined")
     if reported != after[1]:
         raise Finding(f"compose's report names quarantined {reported}, its index {after[1]}")
-    return {"indexed": after[0], "quarantined": after[1]}
+    # EACH COPY LEFT OUT IS NAMED, in compose's report and in `status`, with the note composed in
+    # its place, and the report says whether that note was quarantined.
+    dups = [r for r in records if r["kind"] == "duplicate"]
+    copies = {by_rel[r["path"]]: by_rel[r["copy_of"]] for r in dups}
+    named = introspect.identical_report(V.resolve_scope(lay.project))
+    shown = {by_rel[f"{d['vault']}/{d['path']}"]: by_rel[f"{d['copy_of']['vault']}/"
+                                                         f"{d['copy_of']['path']}"]
+             for d in named["duplicate_notes"]}
+    if shown != copies or named["duplicates"] != len(copies):
+        raise Finding(f"compose's report names copies {copies}, `status` {shown}")
+    composed = set(after[0]) | set(after[1])
+    for r in dups:
+        c, twin = by_rel[r["path"]], by_rel[r["copy_of"]]
+        if twin not in composed or w.ident(twin) != w.ident(c):
+            raise Finding(f"copy {c} is named as a copy of {twin}, which is not the note "
+                          f"composed in its place")
+        if r["quarantined"] != (twin in after[1]):
+            raise Finding(f"copy {c}'s report says its note {twin} is "
+                          f"{'' if r['quarantined'] else 'not '}quarantined")
+    return {"indexed": after[0], "quarantined": after[1], "copies": sorted(copies)}
 
 
 def run_case(w: World) -> tuple[dict, dict]:
@@ -308,7 +405,7 @@ def run_case(w: World) -> tuple[dict, dict]:
 
 def _keep_stale():
     """A quarantined note's ingest folder is kept, so its earlier version stays indexed."""
-    prune.remove_quarantined = lambda folders: []
+    prune.remove_unindexed = lambda folders: []
 
 
 def _ceiling_ge():
@@ -343,8 +440,30 @@ def _allow_empty():
     quarantine.decide = decide
 
 
+class _Last:
+    """A sort key in reverse: what sorts first by `key` sorts last by this."""
+
+    def __init__(self, key) -> None:
+        self.key = key
+
+    def __lt__(self, other: _Last) -> bool:
+        return other.key < self.key
+
+
+def _last_copy():
+    """Of several notes with one doc_id, the LAST by path is indexed rather than the first."""
+    real = V._first_by_path
+
+    def first_by_path(where):
+        key = real(where)
+        return lambda n: _Last(key(n))
+
+    V._first_by_path = first_by_path
+
+
 MUTANTS = {"keep-stale": _keep_stale, "ceiling-ge": _ceiling_ge, "no-default": _no_default,
-           "faults-ignored": _faults_ignored, "allow-empty": _allow_empty}
+           "faults-ignored": _faults_ignored, "allow-empty": _allow_empty,
+           "last-copy": _last_copy}
 
 SETTINGS = dict(deadline=None, database=None, derandomize=True,
                 suppress_health_check=list(HealthCheck), print_blob=True)
@@ -360,12 +479,19 @@ def main() -> int:
     if a.mutant:
         MUTANTS[a.mutant]()
     n: collections.Counter = collections.Counter()
+    # Also counted, beside the one outcome each case has: the cases that hold copies.
+    also: collections.Counter = collections.Counter()
 
     @settings(max_examples=a.cases, **SETTINGS)
     @given(world())
     def agree(w):
         model, code = run_case(w)
         failed = sum(nt.kind != "ok" for nt in w.notes)
+        if model.get("copies"):
+            also["model leaves out copies"] += 1
+        if "indexed" in model and any(w.notes[i].copy_of is not None and not w.notes[i].same_name
+                                      for i in model["indexed"]):
+            also["model indexes a copy under a name of its own"] += 1
         if "refuse" in model:
             n["model refuses: " + ("a scope fault" if w.fault else
                                    "nothing left to index" if failed == len(w.notes) else
@@ -390,6 +516,8 @@ def main() -> int:
     print(f"{label}: {sum(n.values())} cases, no disagreement")
     for k, v in sorted(n.items()):
         print(f"  {v:6d}  {k}")
+    for k, v in sorted(also.items()):
+        print(f"  {v:6d}  of which: {k}")
     return 0
 
 

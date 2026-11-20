@@ -13,7 +13,10 @@ The file is private to the engine: it is not in `contract/`, and no client reads
 A compose that refuses writes a `refused` record holding its FATAL text, as a JSON string, so the
 pass shows why without splicing compose's stderr into its report; the stderr goes only to the
 engine's log, each line under a fixed prefix (`refresh.run_pass`). A `quarantined` record names
-the note's path, kind and key, never the reason, which quotes the note.
+the note's path, kind and key, never the reason, which quotes the note. A `duplicate` record names
+a note left out because another derives the same doc_id from the same bytes, that other note, and
+whether it was quarantined; at most `introspect.MAX_DUPLICATES_LISTED` are written, and a
+`duplicates_more` record counts the rest.
 
 A report that does not end with an `end` record, holds a line that is not a record, or is
 missing, was cut short. The pass says so in its report, loudly, rather than reading it as
@@ -31,6 +34,8 @@ from substrate import quarantine
 PRUNED = "pruned"
 PRUNED_VAULT = "pruned_vault"
 QUARANTINED = "quarantined"
+DUPLICATE = "duplicate"
+DUPLICATES_MORE = "duplicates_more"
 REFUSED = "refused"
 END = "end"
 
@@ -110,6 +115,11 @@ def _line(rec: dict) -> str:
     if kind == QUARANTINED:
         what, key = quarantine.checked(rec["fault"], rec["key"])
         return f"quarantined: {s(rec['path'])}  ({what}{': ' + key if key else ''})"
+    if kind == DUPLICATE:
+        then = "quarantined, so neither is indexed" if rec["quarantined"] else "indexed"
+        return f"duplicate: {s(rec['path'])}  (a copy of {s(rec['copy_of'])}, which is {then})"
+    if kind == DUPLICATES_MORE:
+        return f"duplicate: … and {int(rec['count'])} more"
     if kind == REFUSED:
         return f"refused: {s(str(rec['message']), MAX_REFUSED_CHARS)}"
     raise KeyError(kind)

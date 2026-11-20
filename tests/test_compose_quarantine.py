@@ -367,9 +367,18 @@ def _duplicate_doc_id(w: World) -> int:
     return 2
 
 
-def _byte_identical(w: World) -> int:
-    w.write("02-areas/plain.md", "# Plain\n\nThe same words twice.\n")
-    w.write("02-areas/plain (conflicted copy).md", "# Plain\n\nThe same words twice.\n")
+def _declared_twins(w: World) -> int:
+    """A conflict copy of a note that declares its doc_id: the same bytes, the declaration too."""
+    for name in ("plain.md", "plain (conflicted copy).md"):
+        w.write(f"02-areas/{name}", "---\ndoc_id: plain\n---\n\n# Plain\n\nThe same words.\n")
+    return 2
+
+
+def _derived_collision(w: World) -> int:
+    """One name in two folders, different bytes, and a doc_id fingerprint that matches anyway:
+    these two bodies share the first 32 bits of their SHA-256."""
+    w.write("02-areas/a/todo.md", "# Todo\n\nItem 21779.\n")
+    w.write("02-areas/b/todo.md", "# Todo\n\nItem 98006.\n")
     return 2
 
 
@@ -398,7 +407,9 @@ def _planted_ingest_folder(w: World) -> int:
 
 WHOLE_SCOPE = [
     ("a doc_id two notes claim", _duplicate_doc_id, "retrieval-tuning"),
-    ("two byte-identical notes", _byte_identical, "byte-identical"),
+    ("two identical notes that both declare one doc_id", _declared_twins, "both declare it"),
+    ("one derived doc_id from two notes whose bytes differ", _derived_collision,
+     "whose bytes differ"),
     ("a declared vault that is not there", _missing_vault, "demo-core-vault"),
     ("a manifest that does not parse", _broken_manifest, "malformed manifest"),
     ("a quarantine ceiling that is not one", _bad_ceiling, "quarantine_ceiling"),

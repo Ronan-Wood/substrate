@@ -123,33 +123,28 @@ def test_cross_vault_doc_id_collision_refused() -> None:
     raise AssertionError("expected VaultError for a doc_id claimed by two composed notes")
 
 
-def test_filename_derived_doc_id_collision_refused() -> None:
-    # The subtle case: two byte-identical, same-stem notes in different vaults declare NO frontmatter
-    # doc_id, so both resolve to the SAME filename+content id — one would silently overwrite the
-    # other at reconcile. resolve_scope computes the EFFECTIVE id (not just declared ones) to catch it.
+def test_one_derived_doc_id_from_the_same_bytes_indexes_the_project_copy() -> None:
+    # Two byte-identical, same-stem notes in different vaults declare NO frontmatter doc_id, so
+    # both derive the SAME id from file name and content. Refused before #71; now one is composed,
+    # first by path, which puts the project vault's copy before an inherited one, and the other is
+    # left out and named as its duplicate. No text is lost: the two are the same bytes.
     root = _fresh_root()
     c = root / "core-vault"
     _note(c / "00-operator", "dup.md", "byte identical body across vaults.")  # no doc_id declared
     p = _project(root)
     _note(p / "02-areas", "dup.md", "byte identical body across vaults.")  # identical bytes, same stem
-    try:
-        V.resolve_scope(p)
-    except V.VaultError:
-        return
-    raise AssertionError("expected VaultError for a filename-derived doc_id collision across vaults")
+    scope = V.resolve_scope(p)
+    [(left, kept)] = scope.duplicates
+    assert (kept.vault, scope.relative(kept)) == ("demo-vault", "02-areas/dup.md")
+    assert (left.vault, scope.relative(left)) == ("core-vault", "00-operator/dup.md")
+    assert left.path not in {n.path for n in scope.notes}
+    assert scope.identical == ()
 
 
-def test_sync_conflict_copy_under_a_different_name_refused() -> None:
-    # THE CASE THE TWO TESTS ABOVE CANNOT REACH, and the one a file sync actually produces.
-    #
-    # A conflict copy lands under a DIFFERENT filename ("… (conflicted copy)", "…-MacBookPro",
-    # "….sync-conflict-…") in the SAME vault. Both notes declare no doc_id, so each derives one from
-    # filename+content — different names, different ids, no collision. Measured 2026-08-17 before
-    # the guard existed: composed clean, every gate green, two identical notes answering.
-    #
-    # Byte identity is the signal because it is convention-independent: keying on a vendor's
-    # conflict-filename shape would fail for the next tool, and Doc 2 §0 says the engine has an
-    # opinion on shape and none on location.
+def test_a_sync_conflict_copy_under_a_different_name_composes_and_is_grouped() -> None:
+    # The shape a file sync produces: a byte copy beside the note, under another file name. Each
+    # derives its own doc_id from its own name, so both compose, each under its own title. Refused
+    # as "byte-identical" before #71; now both are in `notes` and listed as one identical group.
     #
     # COPIED, not re-authored through `_note` — which interpolates the filename into the heading, so
     # two names could never produce identical bytes. A sync conflict IS a byte copy; the fixture has
@@ -160,25 +155,24 @@ def test_sync_conflict_copy_under_a_different_name_refused() -> None:
     _note(proj / "02-areas", "note.md", "the note both machines edited.")
     original = proj / "02-areas" / "note.md"
     (proj / "02-areas" / "note-MacBook-Pro.md").write_bytes(original.read_bytes())
-    try:
-        V.resolve_scope(proj)
-    except V.VaultError as e:
-        assert "byte-identical" in str(e), f"refused for the wrong reason: {e}"
-        return
-    raise AssertionError("expected VaultError for a byte-identical sync-conflict copy")
+    scope = V.resolve_scope(proj)
+    assert scope.duplicates == ()
+    [group] = scope.identical
+    assert [scope.relative(n) for n in group.notes] == ["02-areas/note-MacBook-Pro.md",
+                                                       "02-areas/note.md"]
+    assert group.body
+    assert {n.path.name for n in scope.notes} >= {"note.md", "note-MacBook-Pro.md"}
 
 
 def test_distinct_notes_in_one_vault_still_compose() -> None:
-    # The guard must refuse duplication, not similarity. Two notes that differ by one line are
-    # ordinary content, and a guard that refused them would fail a whole scope on a resemblance —
-    # a worse failure than the one it prevents. Measured across the seven live vaults before
-    # shipping: 693 notes, zero exact-duplicate groups.
+    # Two notes that differ by one line are ordinary content: neither left out nor grouped.
     root = _fresh_root()
     _core(root)
     proj = _project(root)
     _note(proj / "02-areas", "note.md", "the note both machines edited.")
     _note(proj / "02-areas", "note-2.md", "the note both machines edited, plus one more line.")
-    V.resolve_scope(proj)   # must not raise
+    scope = V.resolve_scope(proj)
+    assert scope.duplicates == () and scope.identical == ()
 
 
 def test_inheritance_cycle_refused() -> None:
@@ -265,6 +259,12 @@ def _seed_doc(store: IndexStore, doc_id: str, vault: str, tier: int) -> None:
     store.upsert(doc, [ch], markdown_path=f"/{doc_id}.md", markdown_mtime=0.0, markdown_sha256="m")
 
 
+def _src(*doc_ids: str) -> dict[str, Path]:
+    """What compose hands `assert_composed`: each doc_id ingested, with the note it came from
+    (`_seed_doc` indexes each from `/<doc_id>.md`)."""
+    return {d: Path(f"/{d}.md") for d in doc_ids}
+
+
 def _db() -> str:
     return str(Path(tempfile.mkdtemp()) / "index.db")
 
@@ -273,7 +273,7 @@ def test_assert_composed_passes_when_indexed_equals_ingested() -> None:
     with IndexStore(_db()) as s:
         _seed_doc(s, "op", "core-vault", 1)
         _seed_doc(s, "pr", "demo-vault", 3)
-        rep = V.assert_composed(s, ingested_doc_ids={"op", "pr"})
+        rep = V.assert_composed(s, sources=_src("op", "pr"))
         assert rep["by_vault"] == {"core-vault": 1, "demo-vault": 1}
         assert rep["by_tier"] == {1: 1, 3: 1}
 
@@ -284,7 +284,7 @@ def test_assert_composed_refuses_silently_dropped_core_tier() -> None:
     with IndexStore(_db()) as s:
         _seed_doc(s, "pr", "demo-vault", 3)  # only the project doc indexed; the core doc was dropped
         try:
-            V.assert_composed(s, ingested_doc_ids={"op", "pr"})  # op (core) ingested, not indexed
+            V.assert_composed(s, sources=_src("op", "pr"))  # op (core) ingested, not indexed
         except V.VaultError:
             return
         raise AssertionError("expected VaultError when an ingested core note is missing from index")
@@ -295,7 +295,7 @@ def test_assert_composed_refuses_ingested_but_not_indexed() -> None:
         _seed_doc(s, "op", "core-vault", 1)
         _seed_doc(s, "pr", "demo-vault", 3)
         try:
-            V.assert_composed(s, ingested_doc_ids={"op", "pr", "ghost"})  # ghost never indexed
+            V.assert_composed(s, sources=_src("op", "pr", "ghost"))  # ghost never indexed
         except V.VaultError:
             return
         raise AssertionError("expected VaultError when an ingested note is missing from the index")
@@ -309,7 +309,7 @@ def test_assert_composed_refuses_stale_or_out_of_scope_doc() -> None:
         _seed_doc(s, "pr", "demo-vault", 3)
         _seed_doc(s, "stale", "demo-vault", 3)  # in-scope vault, but NOT ingested this run
         try:
-            V.assert_composed(s, ingested_doc_ids={"op", "pr"})
+            V.assert_composed(s, sources=_src("op", "pr"))
         except V.VaultError:
             return
         raise AssertionError("expected VaultError when the index holds a doc this compose didn't ingest")
@@ -320,7 +320,7 @@ def test_assert_composed_allows_empty_inherited_vault() -> None:
     # nothing to either side of indexed==ingested, so it is neither required nor flagged missing.
     with IndexStore(_db()) as s:
         _seed_doc(s, "pr", "demo-vault", 3)  # core-vault present in scope but empty; only project docs
-        rep = V.assert_composed(s, ingested_doc_ids={"pr"})
+        rep = V.assert_composed(s, sources=_src("pr"))
         assert rep["by_vault"] == {"demo-vault": 1}
 
 

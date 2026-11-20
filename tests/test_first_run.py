@@ -53,7 +53,7 @@ def _notes(folder: Path) -> Path:
     (folder / "trips").mkdir()
     (folder / "trips" / "coast.md").write_text("# Coast\n\nThe path closes at dusk in winter.\n",
                                                "utf-8")
-    (folder / "inbox.md").write_text("", "utf-8")  # one empty note; two would be byte-identical
+    (folder / "inbox.md").write_text("", "utf-8")  # an empty note composes, holding nothing
     return folder
 
 
@@ -108,6 +108,30 @@ def test_init_compose_and_search_run_in_order_on_plain_notes(tmp_path, home):
     assert rc == 0, err
     hits = json.loads(out)["passages"]
     assert hits and hits[0]["expand_ref"].startswith("field-notes/garden-")
+
+
+def test_init_then_compose_a_folder_of_empty_untitled_notes(tmp_path, home):
+    """Where #71 meets `init`: a stranger's folder whose only notes are empty `Untitled` notes, two
+    in one folder and one in another. `init` counts them all, compose indexes the two with names
+    of their own and leaves the third out as a copy, and nothing is quarantined. Failed before
+    #71: compose refused the scope, the notes being byte-identical."""
+    vault = tmp_path / "Inbox Folder"
+    (vault / "later").mkdir(parents=True)
+    for rel in ("Untitled.md", "Untitled 1.md", "later/Untitled.md"):
+        (vault / rel).write_text("", "utf-8")
+    rc, out, err = init(vault)
+    assert (rc, err) == (0, "")
+    assert "found 3 notes" in out
+    rc, out, err = run("compose", str(vault))
+    assert rc == 0, err
+    assert "quarantined" not in out + err
+    # First by path, by code point: `Untitled.md` (`U`) before the folder `later/` (`l`).
+    assert ("duplicate: Inbox Folder/later/Untitled.md  (the same doc_id and bytes as "
+            "Inbox Folder/Untitled.md, which is indexed in its place)") in out
+    rc, out, err = run("status", "--scope", "inbox-folder", "--lexical-only", "--json")
+    assert rc == 0, err
+    ident = json.loads(out)["identical"]
+    assert (ident["duplicates"], ident["groups"], ident["empty"]) == (1, 0, 2)
 
 
 def test_the_manifest_it_writes_holds_the_name_and_nothing_else(tmp_path, home):

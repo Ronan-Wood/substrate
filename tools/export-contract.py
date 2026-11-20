@@ -85,6 +85,11 @@ WIRE_OBJECTS: dict[str, tuple[str, str, tuple[int, ...], str | None]] = {
     "agent_refresh": ("agent.py", "refresh", (), "block"),
     "snapshot": ("agent.py", "refresh", (0,), None),
     "drift": ("freshness.py", "drift", (0,), None),
+    # `status.identical`: notes with the same text, the copies left out and the groups indexed.
+    "identical": ("introspect.py", "identical_report", (0,), None),
+    "identical_duplicate": ("introspect.py", "_duplicate_note", (0,), None),
+    "identical_group": ("introspect.py", "_identical_group", (0,), None),
+    "note_ref": ("introspect.py", "_note_ref", (0,), None),
     "expand": ("mcp/server.py", "_tool_expand", (0,), "out"),
     "expand_note": ("mcp/server.py", "_note_text", (0,), None),
     # What the `list_scopes` TOOL adds around the roster (`EXTENDS`), and the `server` block in it.

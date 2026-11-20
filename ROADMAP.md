@@ -49,6 +49,7 @@ flowchart TD
         PB3["#23 writable_folders"]
         PB4["#24 skip list"]
         PB5["#55 title from file name"]
+        PB8["#71 identical notes compose"]
     end
     subgraph pkg["2. Converter and PyPI"]
         CV1["#25 converter phase 1"]
@@ -73,6 +74,7 @@ flowchart TD
     PB3 --> CV2
     PB4 --> CV2
     PB5 --> CV2
+    PB8 --> CV2
     CV1 --> CV2
     L1 -.-> CV1
     R2 -.-> CV2
@@ -95,6 +97,7 @@ These come first: until an ordinary vault composes, a pip package has nothing to
 | [#23](https://github.com/Ronan-Wood/substrate/issues/23) | The manifest declares `writable_folders` for `ingest`. The default becomes any folder in the project vault that compose doesn't skip, instead of three fixed folder names. Path containment checks stay as they are. | planned |
 | [#24](https://github.com/Ronan-Wood/substrate/issues/24) | The manifest declares a `skip` list. Today's hard-coded skips (`_meta.md`, `log.md`, `MEMORY.md`, `99-templates/` and the rest) become defaults a vault can change. | planned |
 | [#55](https://github.com/Ronan-Wood/substrate/issues/55) | A note with no `title:` and no heading takes its file name as its title, as Obsidian names it, instead of being quarantined. A declared title or a heading still wins. An empty note composes holding nothing. | planned |
+| [#71](https://github.com/Ronan-Wood/substrate/issues/71) | Decided: notes with the same bytes compose. Under different names each is indexed as its own note; of copies that derive one `doc_id`, the first by path is indexed and the others are named in `status` as its copies. `status` lists each group of identical notes, so a sync conflict stays visible. A declared `doc_id` two notes share still refuses. | planned |
 
 ## 2. Converter carve-out, then PyPI
 

@@ -304,6 +304,27 @@
       "text",
       "truncated"
     ],
+    "identical": [
+      "duplicate_notes",
+      "duplicates",
+      "empty",
+      "groups",
+      "listed",
+      "notes"
+    ],
+    "identical_duplicate": [
+      "copy_of",
+      "path",
+      "vault"
+    ],
+    "identical_group": [
+      "first",
+      "notes"
+    ],
+    "note_ref": [
+      "path",
+      "vault"
+    ],
     "outline_record": [
       "kind"
     ],
@@ -420,6 +441,7 @@
       "drift",
       "entities",
       "exposed",
+      "identical",
       "index_version",
       "outlines",
       "passages",

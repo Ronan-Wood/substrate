@@ -21,6 +21,8 @@ simply an edit made since the last tick.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from substrate import freshness, private, refresh_state, scopes
 from substrate import quarantine as _quarantine
 from substrate import vault as _vault
@@ -85,6 +87,69 @@ def _shown_quarantine(q: dict) -> dict:
     return {"vault": q["vault"], "path": q["path"], "kind": kind, "key": key}
 
 
+# How much of the identical notes `identical_report` lists: a count of each, and the first ones.
+# A month of daily notes made from one template is one group of thirty, and a vault copied into a
+# folder of itself is a duplicate per note, so neither is listed whole.
+MAX_DUPLICATES_LISTED = 50
+MAX_GROUPS_LISTED = 20
+MAX_GROUP_NOTES_LISTED = 10
+
+
+def identical_report(scope, quarantined: Iterable[tuple[str, str]] = ()) -> dict:
+    """What `status` says about notes with the same text (`vault.Scope.duplicates` and
+    `.identical`), from the vault as it stands, as `drift` is. Each note is named by its vault and
+    its path inside it, never by anything it holds. `quarantined` names the notes, as (vault,
+    vault-relative path), that are not in the index for failing on their own: `status` passes the
+    index's quarantine record, compose the notes it quarantined.
+
+      * `duplicates`, `duplicate_notes`: the copies left out because another note derives the
+        same doc_id from the same bytes, each with that note as `copy_of`. That note is indexed,
+        unless it is quarantined (`quarantined` says so), and then neither answers;
+      * `groups`, `notes`, `listed`: the groups of two or more notes with the same text that the
+        vault composes, less those the index quarantines, and the notes in them, each group with
+        its size and its first notes. A quarantined note is in no group, and a group it leaves
+        with one note is no group: neither answers twice. Like `drift`, this is the vault as it
+        stands, so a note added since the last compose counts before it is indexed. A sync
+        conflict copy shows here: it is indexed, and answers what the note it copies answers;
+      * `empty`: such notes with no body (nothing after the frontmatter but headings: an empty
+        note, an unfilled template) that have the same text as another of them.
+        Counted, not listed: they index no passage, so none answers anything twice, and thirty
+        `Untitled` notes would bury the group that matters.
+
+    Ordered first by path (`vault._first_by_path`), so two calls on one vault list the same
+    notes."""
+    held = set(quarantined)
+    indexed = [g._replace(notes=kept) for g in scope.identical
+               if len(kept := tuple(n for n in g.notes
+                                    if (n.vault, scope.relative(n)) not in held)) > 1]
+    with_body = [g for g in indexed if g.body]
+    return {
+        "duplicates": len(scope.duplicates),
+        "duplicate_notes": [_duplicate_note(scope, n, kept)
+                            for n, kept in scope.duplicates[:MAX_DUPLICATES_LISTED]],
+        "groups": len(with_body),
+        "notes": sum(len(g.notes) for g in with_body),
+        "listed": [_identical_group(scope, g) for g in with_body[:MAX_GROUPS_LISTED]],
+        "empty": sum(len(g.notes) for g in indexed if not g.body),
+    }
+
+
+def _note_ref(scope, n) -> dict:
+    """A note as `status` names it: its vault and its path inside it."""
+    return {"vault": n.vault, "path": scope.relative(n)}
+
+
+def _duplicate_note(scope, n, kept) -> dict:
+    """A copy left out, and the note composed in its place."""
+    return {"vault": n.vault, "path": scope.relative(n), "copy_of": _note_ref(scope, kept)}
+
+
+def _identical_group(scope, g) -> dict:
+    """A group's size, and its first notes."""
+    return {"notes": len(g.notes),
+            "first": [_note_ref(scope, n) for n in g.notes[:MAX_GROUP_NOTES_LISTED]]}
+
+
 def status_payload(store, entry, *, stack, registry: str | None = None,
                    refresh: dict | None = None, drift: bool = True) -> dict:
     """Everything `status` reports for one composed scope.
@@ -127,6 +192,11 @@ def status_payload(store, entry, *, stack, registry: str | None = None,
         # In agent mode always null: a quarantined note's class may be unknown, so its path is
         # not the agent's to read (`agent._fill`).
         "quarantined": quarantined,
+        # NOTES WITH THE SAME TEXT, from the vault as it stands, as `drift` is: the copies left out
+        # because another note derives the same doc_id from the same bytes, and the groups each
+        # indexed under its own name, where a sync conflict copy shows (`identical_report`).
+        # Null when the vault is not read: agent mode, or a scope that does not resolve.
+        "identical": None,
         # WHO THIS CORPUS IS ABOUT, ordered by how many notes name each. Empty when the scope's
         # vault declares no identity roster, which is most of them — an absent list here means
         # "nobody was resolved", never "nobody was mentioned".
@@ -152,6 +222,7 @@ def status_payload(store, entry, *, stack, registry: str | None = None,
         scope = _vault.resolve_scope(entry.vault)
         out["drift"] = freshness.drift(store, [n.path for n in scope.notes], held,
                                        _fingerprints(scope))
+        out["identical"] = identical_report(scope, ((q["vault"], q["path"]) for q in held or []))
     except _vault.VaultError as e:
         # A scope that cannot be RESOLVED cannot be drift-checked — the vault is gone, a manifest
         # is malformed, or a skip-list file declares a spine (`_refuse_skipped_note_with_a_spine`).

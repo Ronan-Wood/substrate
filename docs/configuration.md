@@ -144,7 +144,7 @@ Scripta writes.
   the scope's chain names a folder at or inside the project vault, whether it exists yet or not,
   `ingest` and `amend` refuse every write to the project vault, naming the entry. Move the
   inherited vault out of the project vault's folder and update `inherits`. Such a layout usually
-  fails to compose anyway, because both vaults index the nested notes. The known cost: a project
+  fails to compose anyway, because each nested note is one file both vaults discover. The known cost: a project
   vault that also skips the nested folder composes, and still takes no write.
 - **A project vault without its manifest takes no write.** Without it nothing says where a write
   may go, and the default would widen a declared list.
@@ -182,7 +182,7 @@ domains: [storage]
 - `title` is optional. Without it, a note's title is its first level-1 heading, else its first
   heading, else its file name without `.md`, so renaming such a note renames it in results. A
   title that is not a heading is not searchable text. An empty note composes, holding no passage,
-  but two empty notes are byte-identical and refuse the scope.
+  and so do any number of them (see "Identical notes" below).
 - `doc_id` is derived from the file name when it is absent. Declare one to keep a note's identity
   stable across renames.
 - `confidence` is optional. Without it, a note is stored as `unjudged`.
@@ -272,15 +272,15 @@ missing from the index.
 | what fails | what compose does |
 |---|---|
 | one note: frontmatter it cannot read, a value outside the vocabulary, an engine key spelled another way, `superseded` with no `superseded_by`, a class policy refusal (`missing required field(s) ['version']`), a note that is not UTF-8 or is over the 64 MiB cap, an A18 or A22 per-note assertion | quarantines the note |
-| the scope: a duplicate `doc_id`, two byte-identical notes, a declared vault that is not there, a manifest it cannot read or a key it doesn't define (whatever `quarantine_ceiling` says), a skipped file that declares a spine, a `_meta.md` the vault layer cannot read, a note the filesystem refuses to read, a link or another user's folder where a note's ingest folder goes | refuses the whole scope, as before |
+| the scope: a `doc_id` one note declares and another has, one derived `doc_id` from two notes whose bytes differ, one file compose finds twice under one name (a vault inside the vault that inherits it, or a hard link of the same name), a declared vault that is not there, a manifest it cannot read or a key it doesn't define (whatever `quarantine_ceiling` says), a skipped file that declares a spine, a `_meta.md` the vault layer cannot read, a note the filesystem refuses to read, a link or another user's folder where a note's ingest folder goes | refuses the whole scope, as before |
 | more notes than the ceiling | refuses the whole scope, saying how many failed and what the ceiling is |
 | every note the scope discovered | refuses the whole scope, whatever the ceiling (`"none"` included), so the earlier index stays |
 
 **The ceiling.** Without `quarantine_ceiling`, it is the larger of 10 notes and 1% of the scope's
 notes, rounded down. The scope's notes are every note compose discovers, in the project vault and
-every vault it inherits, failed or not; skipped files are not counted. So a scope of up to 1,099
-notes may quarantine 10, one of 1,100 to 1,199 may quarantine 11, and so on. One note more refuses
-the scope. Set it in the project vault's manifest, above any `[table]`:
+every vault it inherits, failed or not; skipped files and copies left out (below) are not
+counted. So a scope of up to 1,099 notes may quarantine 10, one of 1,100 to 1,199 may quarantine
+11, and so on. One note more refuses the scope. Set it in the project vault's manifest, above any `[table]`:
 
 ```toml
 quarantine_ceiling = 25        # a count: refuse when more than 25 notes fail
@@ -294,6 +294,49 @@ A compose that refuses before it starts removing ingest folders removes none and
 pruned or quarantined. One that refuses later (a folder that cannot be removed, an assertion after
 the index is written) may already have removed some; the next compose reports what it removes. An inherited
 vault's `quarantine_ceiling` is checked the same way and then ignored.
+
+### Identical notes
+
+Notes with the same text (the same bytes once line endings are normalized) compose. Unfilled daily
+notes made from one template, `Untitled.md` and `Untitled 1.md` both empty, and a note beside the
+copy a file sync left (`Plan (conflicted copy).md`) are ordinary in a vault. Up to 0.2.x they
+refused the whole scope.
+
+| the notes | what compose does |
+|---|---|
+| the same text under different names | indexes each as its own note, under its own title. A conflict copy then answers what its note answers, so `status` lists each such group |
+| the same text, and names that give one `doc_id` (`A/todo.md` and `B/todo.md`, `Todo.md` and `todo.md`, `a b.md` and `a-b.md`, or two long names whose slugs agree in their first 48 characters, once lower-cased with each run of anything but letters and digits made one `-`) | indexes the first by path and leaves the others out, each named as a copy of it. No text is lost, but a copy's own title, its file name, is not indexed. When the indexed one is deleted, the next one takes its place under the same `doc_id` |
+| the same text, one `doc_id`, and sources whose `_meta.md` files are not the same bytes (two versions of a spec holding one passage) | refuses the whole scope: neither can stand for the other |
+| a declared `doc_id` that another note also has, even an identical copy | refuses the whole scope, naming both. A conflict copy of a note that declares its `doc_id` carries the declaration, so it refuses: delete one |
+
+**First by path** is the project vault's note before an inherited vault's, then a vault before the
+vaults it inherits, then the path inside the vault compared folder by folder, by code point, each
+name in NFC first. Upper case sorts before lower case (`A/` before `a/`), and the order is the same
+on every filesystem and every compose.
+
+A copy left out is not a failure: it is not quarantined and does not count toward the ceiling, and
+`status`'s `drift` does not count it as missing. When the note in its place is quarantined, the
+copy fails the same way, and neither is indexed; that is said wherever the copy is named. A copy
+in an inherited vault is left out for the project vault's, so a search filtered to the inherited
+vault does not find that text. Compose says `duplicate:` on a line of its own for each of the first
+50, and a refresh pass's report names the same ones and counts the rest. `status` reports, under
+`identical`:
+
+- `duplicates`, `duplicate_notes`: each copy left out (`vault`, `path`) with the note composed in
+  its place (`copy_of`), which `quarantined` names if it was quarantined. The first 50 are listed;
+- `groups`, `notes`, `listed`: the groups of notes with the same text that the vault composes,
+  less those the index quarantines, with each group's size and its first 10 notes. The first 20
+  groups are listed. A quarantined note is in no group, and a group it leaves with one note is
+  none. A note added since the last compose counts before it is indexed, as in `drift`;
+- `empty`: those notes with no body (nothing after the frontmatter but headings) that have the
+  same text as another of them. They are counted, not listed: they index no passage, so
+  none answers anything twice.
+
+It is read from the vault as it stands, as `drift` is, and is null in agent mode.
+
+`amend` writes the `doc_id` a note derives into its frontmatter. Amending either note of a pair
+that shares a derived `doc_id` therefore makes it a declared `doc_id` the other note has, and the
+next compose refuses until one is deleted or renamed.
 
 ## The engine's folder: `~/.substrate`
 

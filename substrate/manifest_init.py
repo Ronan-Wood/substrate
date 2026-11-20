@@ -15,9 +15,9 @@ refused:
 - **No folder is created.** The vault must be an existing folder. A symlink to one is followed, as
   compose follows it, and the manifest is written in the folder it names.
 - **Not inside another vault, not around one.** A folder with a manifest above it or below it would
-  give two scopes the same notes, and one inheriting the other cannot compose at all (both index
-  the nested notes, so their doc_ids collide). Written by hand with `skip`, such a layout works;
-  `init` does not guess that it is meant. A folder below that cannot be read refuses too: a nested
+  give two scopes the same notes, and one inheriting the other cannot compose at all (each nested
+  note is one file both vaults discover, which `vault.resolve_scope` refuses). Written by hand
+  with `skip`, such a layout works; `init` does not guess that it is meant. A folder below that cannot be read refuses too: a nested
   manifest there would go unseen.
 - **Not around an index.** Compose refuses an index root with a manifest in it or above it
   (`cli._refuse_index_root`), so a manifest at or above `~/.substrate/index`, or a registered ingest

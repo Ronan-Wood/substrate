@@ -1225,25 +1225,14 @@ def cmd_register(args: argparse.Namespace) -> int:
     return 0
 
 
-def _vault_root(n, vaults) -> Path:
-    """The root of the vault `n` was discovered in. By name AND containment: two vaults in a chain
-    may share a directory name, and a map keyed by name keeps only one of them."""
-    return next(v.path for v in vaults if v.name == n.vault and n.path.is_relative_to(v.path))
-
-
-def _vault_relative(n, vaults) -> str:
-    """A note's path inside its vault, as `status` and the refresh record name it."""
-    return n.path.relative_to(_vault_root(n, vaults)).as_posix()
-
-
-def _fingerprint(n, vaults) -> str | None:
+def _fingerprint(n, scope) -> str | None:
     """`freshness.quarantine_fingerprint` of a note compose has just failed, over the note and its
     source's `_meta.md`. Taken when the note fails, so a fix saved later in the compose is not
     fingerprinted as the broken version."""
     from substrate import vault as _vault
 
     return freshness.quarantine_fingerprint(
-        n.path, _vault.source_meta_path(n.path, _vault_root(n, vaults)))
+        n.path, _vault.source_meta_path(n.path, scope.root(n)))
 
 
 def cmd_compose(args: argparse.Namespace) -> int:
@@ -1319,7 +1308,7 @@ def _compose(args: argparse.Namespace, report) -> int:
         **A20** (the status filter partitions exactly), **A21** (every doc_type valid, chunk↔doc
         denormalization intact) and **A23** (the same two properties for confidence).
     """
-    from substrate import compose_report
+    from substrate import compose_report, introspect
     from substrate import vault as _vault
     from substrate.markdown.ingest import CoverageError, OutputDirError, ingest_markdown
     from substrate.spine import SpineError
@@ -1351,7 +1340,9 @@ def _compose(args: argparse.Namespace, report) -> int:
     db, index_root = location
 
     print(f"scope: {scope.project.name}  <-  {[v.name for v in scope.vaults]}")
-    print(f"  {len(scope.notes)} notes across {len(scope.vaults)} vault(s)")
+    print(f"  {len(scope.notes)} notes across {len(scope.vaults)} vault(s)"
+          + (f", and {len(scope.duplicates)} left out as copies of one indexed"
+             if scope.duplicates else ""))
 
     # BEFORE THE FIRST WRITE. Registration refuses a second vault under one name, but it runs last,
     # after this compose has already rebuilt whatever index --db and --index-root name. An
@@ -1455,7 +1446,7 @@ def _compose(args: argparse.Namespace, report) -> int:
         if n.path in scope.unreadable:
             kind, text = scope.unreadable[n.path]
             outcomes[n.path] = (kind, None, f"unreadable: {text}")
-            fingerprints[n.path] = _fingerprint(n, scope.vaults)
+            fingerprints[n.path] = _fingerprint(n, scope)
             continue
         try:
             r = ingest_markdown(
@@ -1465,7 +1456,7 @@ def _compose(args: argparse.Namespace, report) -> int:
                 raw=n.raw, raw_sha256=n.raw_sha256, raw_location=n.raw_location,
                 override_version=n.override_version,
                 extra_domains=n.extra_domains, vault=n.vault,
-                vault_root=_vault_root(n, scope.vaults),
+                vault_root=scope.root(n),
                 tier=n.tier,
             )
         except OutputDirError as e:
@@ -1475,7 +1466,7 @@ def _compose(args: argparse.Namespace, report) -> int:
             continue
         except (ValueError, classes.ClassPolicyError, SpineError, CoverageError) as e:
             outcomes[n.path] = (*_quarantine.kind_of(e), f"{type(e).__name__}: {e}")
-            fingerprints[n.path] = _fingerprint(n, scope.vaults)
+            fingerprints[n.path] = _fingerprint(n, scope)
             continue
         except OSError as e:
             # The note could not be read after discovery read it: deleted, or its mode changed,
@@ -1513,7 +1504,7 @@ def _compose(args: argparse.Namespace, report) -> int:
         else:
             outcomes[path] = (*outcomes[path][:2],
                               f"{outcomes[path][2]}; A22 per-note assertion: {name} — {detail}")
-        fingerprints[path] = _fingerprint(notes[path], scope.vaults)
+        fingerprints[path] = _fingerprint(notes[path], scope)
     warned = [w for w in warned if w[0] in results]
 
     ceiling = _quarantine.ceiling_for(scope.quarantine_ceiling, len(scope.notes))
@@ -1543,7 +1534,8 @@ def _compose(args: argparse.Namespace, report) -> int:
         for n, _, _, why in quarantined:
             print(f"    {_quarantine.shown(str(n.path))}: {why}", file=sys.stderr)
         return 3
-    ingested = {results[p][0] for p in decision.indexed}
+    # Which note each doc_id is read from: several notes can derive one (`Scope.duplicates`).
+    sources = {results[p][0]: p for p in decision.indexed}
     ingest_dirs = [(p, results[p][1]) for p in decision.indexed]
 
     # DELETED NOTES, AND NOTES A VAULT NOW SKIPS. Their ingest folders are the only stale content
@@ -1552,7 +1544,9 @@ def _compose(args: argparse.Namespace, report) -> int:
     # included: a vault that looks unmounted refuses the scope with the tree untouched.
     stale = prune.stale(index_root, scope.vaults, {d.name for _, d in ingest_dirs})
     try:
-        emptied = prune.refuse_missing(stale, scope.vaults, Counter(n.vault for n in scope.notes))
+        # A copy left out for another note was discovered, so it counts: its vault is there.
+        emptied = prune.refuse_missing(stale, scope.vaults, Counter(
+            n.vault for n in (*scope.notes, *(d for d, _ in scope.duplicates))))
     except prune.PruneError as e:
         print(f"\nFATAL (prune): {e}", file=sys.stderr)
         return 3
@@ -1561,15 +1555,22 @@ def _compose(args: argparse.Namespace, report) -> int:
     # (or this run's artifacts, when A22 failed it), and reconcile indexes every folder it finds,
     # so the folder goes before reconcile runs. A folder that holds anything ingest did not write
     # is left, and `assert_composed` below refuses the scope for it.
-    folders = {index_root / private.ingest_dir_name(n.vault, n.path): n
+    #
+    # SO IS A COPY LEFT OUT FOR ANOTHER NOTE (`Scope.duplicates`). Its folder is there when it was
+    # the copy indexed before: a note first by path appeared since, or it was moved. It holds the
+    # doc_id the indexed copy holds now, and reconcile keeps whichever folder comes last, so it
+    # goes too. One that cannot be removed is refused below (`assert_composed`, `sources`).
+    folders = {index_root / private.ingest_dir_name(n.vault, n.path): (n, prune.QUARANTINED)
                for n, _, _, _ in quarantined}
+    folders.update({index_root / private.ingest_dir_name(n.vault, n.path): (n, prune.DUPLICATE)
+                    for n, _ in scope.duplicates})
     removed: list[prune.Stale] = []
     try:
-        for folder in prune.remove_quarantined(folders):
-            n = folders[folder]
+        for folder in prune.remove_unindexed(folders):
+            n, why = folders[folder]
             if n.path not in wrote:
-                removed.append(prune.Stale(n.vault, Path(_vault_relative(n, scope.vaults)),
-                                           folder, why=prune.QUARANTINED))
+                removed.append(prune.Stale(n.vault, Path(scope.relative(n)),
+                                           folder, why=why))
         prune.remove(stale, removed.append)
     except OSError as e:
         print(f"\nFATAL (prune): could not remove an ingest folder: {e}", file=sys.stderr)
@@ -1580,8 +1581,21 @@ def _compose(args: argparse.Namespace, report) -> int:
         print(f"  {prune.emptied_line(name, stale)}", flush=True)
     for n, _, _, why in quarantined:
         print(f"  {_quarantine.MARK} "
-              f"{_quarantine.shown(f'{n.vault}/{_vault_relative(n, scope.vaults)}')}  ({why})",
+              f"{_quarantine.shown(f'{n.vault}/{scope.relative(n)}')}  ({why})",
               flush=True)
+    # Each copy left out, as a quarantined note is, up to the count `status` lists: a vault copied
+    # into a folder of itself is a copy per note, on every pass, for as long as it stays.
+    failed = {n.path for n, _, _, _ in quarantined}
+    listed = scope.duplicates[:introspect.MAX_DUPLICATES_LISTED]
+    for n, kept in listed:
+        left, held = (_quarantine.shown(f"{m.vault}/{scope.relative(m)}") for m in (n, kept))
+        then = ("is quarantined, so neither is indexed" if kept.path in failed
+                else "is indexed in its place")
+        print(f"  {_vault.DUPLICATE_MARK} {left}  (the same doc_id and bytes as {held}, which "
+              f"{then})", flush=True)
+    if len(scope.duplicates) > len(listed):
+        print(f"  {_vault.DUPLICATE_MARK} … and {len(scope.duplicates) - len(listed)} more "
+              f"(`substrate status` counts them)", flush=True)
 
     with IndexStore(db) as store:
         announce_if_rebuilt(store)
@@ -1589,12 +1603,12 @@ def _compose(args: argparse.Namespace, report) -> int:
         # What this index leaves out, kept beside it: `status` names each note, `drift` does not
         # count it as missing, and the refresh record copies it. Written right after reconcile, so
         # it describes the documents just written even when an assertion below refuses.
-        # A note whose folder `remove_quarantined` had to leave is indexed by now, in its earlier
+        # A note whose folder `remove_unindexed` had to leave is indexed by now, in its earlier
         # version, and `assert_composed` refuses below; it is not recorded as left out.
         held_now = {str(Path(r[0]).resolve())
                     for r in store.db.execute("SELECT source_path FROM documents")}
         store.set_quarantined([
-            (str(n.path), n.vault, _vault_relative(n, scope.vaults), fingerprints.get(n.path),
+            (str(n.path), n.vault, scope.relative(n), fingerprints.get(n.path),
              kind, key, why)
             for n, kind, key, why in quarantined if str(n.path.resolve()) not in held_now])
         # The pass's report, only now the record is committed: what was removed, and what is left
@@ -1607,11 +1621,17 @@ def _compose(args: argparse.Namespace, report) -> int:
         for n, kind, key, _ in quarantined:
             if str(n.path.resolve()) not in held_now:
                 report.write(compose_report.QUARANTINED,
-                             path=f"{n.vault}/{_vault_relative(n, scope.vaults)}", fault=kind,
+                             path=f"{n.vault}/{scope.relative(n)}", fault=kind,
                              key=key)
+        for n, kept in listed:
+            report.write(compose_report.DUPLICATE, path=f"{n.vault}/{scope.relative(n)}",
+                         copy_of=f"{kept.vault}/{scope.relative(kept)}",
+                         quarantined=kept.path in failed)
+        if len(scope.duplicates) > len(listed):
+            report.write(compose_report.DUPLICATES_MORE, count=len(scope.duplicates) - len(listed))
         s = store.stats()
         try:
-            comp = _vault.assert_composed(store, ingested_doc_ids=ingested)
+            comp = _vault.assert_composed(store, sources=sources)
             part = store.assert_status_partition()
             dtp = store.assert_doc_type_valid()
             cfp = store.assert_confidence_valid()
@@ -1652,6 +1672,13 @@ def _compose(args: argparse.Namespace, report) -> int:
     else:
         print(f"  A22 per-note PASS  {len(ingest_dirs)} note(s) · 0 quality warnings")
     _report_frontmatter(scope.notes)
+    same = introspect.identical_report(scope, ((n.vault, scope.relative(n))
+                                               for n, _, _, _ in quarantined))
+    if same["groups"]:
+        # Not a warning: each note is indexed under its own name. A conflict copy answers twice,
+        # so the groups are named where `status` lists them, and counted here.
+        print(f"  identical: {same['groups']} group(s) of notes with the same text, "
+              f"{same['notes']} notes, each indexed as its own (`substrate status` lists them)")
     print(f"  db: {db} (schema v{s['schema_version']}) · index {index_version}")
 
     # Register the scope only now — after every gate passed. The registry's contract is that a
@@ -1679,7 +1706,7 @@ def _compose(args: argparse.Namespace, report) -> int:
               f"indexed (ceiling {'none' if ceiling is None else ceiling}). Fix each and "
               f"recompose:", file=sys.stderr)
         for n, _, _, why in quarantined:
-            print(f"    {_quarantine.shown(f'{n.vault}/{_vault_relative(n, scope.vaults)}')}: {why}",
+            print(f"    {_quarantine.shown(f'{n.vault}/{scope.relative(n)}')}: {why}",
                   file=sys.stderr)
     return 0
 
@@ -2056,6 +2083,37 @@ def cmd_status(args: argparse.Namespace) -> int:
                 q["kind"] + (f": {q['key']}" if q["key"] else ""))
             print(f"      {_quarantine.shown(q['vault'] + '/' + q['path'])}: "
                   f"{_quarantine.shown(why)}")
+    # The copies left out are named one per line, as quarantined notes are: each is missing from
+    # the index under its own path. Groups are counted and their first notes named.
+    ident = payload["identical"]
+    if ident is not None:
+        if ident["duplicates"]:
+            held_out = {(q["vault"], q["path"]) for q in held or []}
+            print(f"  duplicates: {ident['duplicates']} note(s) are not indexed, each a copy of a "
+                  f"note with the same doc_id and bytes, which answers in its place unless it is "
+                  f"marked QUARANTINED:")
+            for d in ident["duplicate_notes"]:
+                of = d["copy_of"]
+                print(f"      {_quarantine.shown(d['vault'] + '/' + d['path'])}: a copy of "
+                      f"{_quarantine.shown(of['vault'] + '/' + of['path'])}"
+                      + (", which is QUARANTINED, so neither is indexed"
+                         if (of["vault"], of["path"]) in held_out else ""))
+            if ident["duplicates"] > len(ident["duplicate_notes"]):
+                print(f"      … and {ident['duplicates'] - len(ident['duplicate_notes'])} more")
+        if ident["groups"]:
+            print(f"  identical: {ident['groups']} group(s) of notes with the same text, "
+                  f"{ident['notes']} notes, each indexed as its own. A sync conflict copy is one; "
+                  f"delete or merge it:")
+            for g in ident["listed"]:
+                names = ", ".join(_quarantine.shown(n["vault"] + "/" + n["path"])
+                                  for n in g["first"])
+                more = g["notes"] - len(g["first"])
+                print(f"      {names}" + (f", … and {more} more" if more else ""))
+            if ident["groups"] > len(ident["listed"]):
+                print(f"      … and {ident['groups'] - len(ident['listed'])} more group(s)")
+        if ident["empty"]:
+            print(f"  identical: {ident['empty']} note(s) with no body share their bytes with "
+                  f"another (each indexed, holding nothing)")
     v = payload["vectors"]
     if v is None:
         # "Not asked for" and "asked for, could not start" are the SAME None here, and stating the

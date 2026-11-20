@@ -28,15 +28,17 @@ import unicodedata
 
 import tomllib
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import NamedTuple
 
 from substrate import quarantine
-from substrate.extract.base import doc_id_for  # stdlib-only; no Docling/torch pulled in
+from substrate.extract.base import doc_id_from, sha256_file  # stdlib-only; no Docling/torch
 from substrate.markdown.reader import (
-    _DOC_ID, _DOMAIN, FrontmatterError, _parse_frontmatter, _parse_list, normalized_text,
+    _DOC_ID, _DOMAIN, FrontmatterError, _blocks, _parse_frontmatter, _parse_list, normalized_text,
     unread_keys,
 )
+from substrate.models import Kind
 
 MANIFEST = ".substrate.toml"
 
@@ -153,6 +155,14 @@ class NoteRef:
     extra_domains: list[str] = field(default_factory=list)  # merged from _meta.md
 
 
+class IdenticalGroup(NamedTuple):
+    """Notes with the same text (the same bytes once line endings are normalized), first by path
+    (`resolve_scope`). `body` is false when the text after the frontmatter is nothing but headings
+    and blank lines, so the notes index no passage (`_has_body`)."""
+    notes: tuple[NoteRef, ...]
+    body: bool
+
+
 @dataclass(frozen=True)
 class Scope:
     """The composed retrieval scope: the ordered vaults (roots first, project last) and the notes
@@ -174,10 +184,26 @@ class Scope:
     unreadable: Mapping[Path, tuple[str, str]] = field(default_factory=dict)
     # The project manifest's `quarantine_ceiling`, as declared (`_declared_ceiling`).
     quarantine_ceiling: int | str | None = None
+    # Each note discovered and LEFT OUT because another note derives the same doc_id from the same
+    # bytes, paired with the note indexed in its place (`resolve_scope`). Not in `notes`.
+    duplicates: tuple[tuple[NoteRef, NoteRef], ...] = ()
+    # Every set of two or more notes in `notes` with the same text, each indexed as its own note.
+    identical: tuple[IdenticalGroup, ...] = ()
 
     @property
     def vault_names(self) -> frozenset[str]:
         return frozenset(v.name for v in self.vaults)
+
+    def root(self, n: NoteRef) -> Path:
+        """The root of the vault `n` was discovered in. By name AND containment: two vaults in a
+        chain may share a directory name, and a map keyed by name keeps only one of them."""
+        return next(v.path for v in self.vaults
+                    if v.name == n.vault and n.path.is_relative_to(v.path))
+
+    def relative(self, n: NoteRef) -> str:
+        """`n`'s path inside its vault, as `status`, compose's output and the refresh record name
+        it."""
+        return n.path.relative_to(self.root(n)).as_posix()
 
 
 # A TOML key that needs no quotes.
@@ -867,19 +893,27 @@ def resolve_scope(project_vault: Path) -> Scope:
     """Read a project vault's manifest, resolve its inheritance, and compose the note set to index.
 
     Refuses (VaultError) rather than mislead: a missing manifest, a malformed one, an inherited
-    vault that does not exist, a scope that composes zero notes, or a doc_id that two notes in the
-    composed scope both claim (reconcile keys the index on doc_id — a collision would silently make
-    one note overwrite the other). A note over the size cap or not in UTF-8 is not refused here: it
-    is listed in `Scope.unreadable`, and compose quarantines it. One the filesystem cannot read
-    still refuses.
+    vault that does not exist, a scope that composes zero notes, one file two vaults discover, or a
+    doc_id that two notes claim when neither can stand for the other (reconcile keys the index on
+    doc_id — a collision would silently make one note overwrite the other). Notes with the same
+    bytes are not refused: each is composed, except that of several deriving one doc_id only the
+    first by path is (`Scope.duplicates`). A note over the size cap or not in UTF-8 is not refused
+    here: it is listed in `Scope.unreadable`, and compose quarantines it. One the filesystem cannot
+    read still refuses.
     """
     project_vault = project_vault.expanduser().resolve()
     ordered = list(resolve_vaults(project_vault))
     project_ref = next(v for v in ordered if v.path == project_vault)
 
+    # Each note with its vault's place in first-by-path order (`_first_by_path`) and its root.
     notes: list[NoteRef] = []
-    for v in ordered:
-        notes.extend(_discover_notes(v))
+    where: dict[Path, tuple[int, Path]] = {}
+    for i, v in enumerate(ordered):
+        for n in _discover_notes(v):
+            if n.path in where:
+                _refuse_one_file(n.path, n.path, where[n.path][1], v.path)
+            where[n.path] = (len(ordered) - 1 - i, v.path)
+            notes.append(n)
 
     if not notes:
         raise VaultError(
@@ -887,37 +921,45 @@ def resolve_scope(project_vault: Path) -> Scope:
             "scope is refused rather than indexed into a silently-empty retrieval set."
         )
 
-    # doc_id is computed at ingest from frontmatter, else filename+content (doc_id_for). A collision
-    # across the composed scope makes one note silently overwrite another at reconcile (keyed on
-    # doc_id), while every A-series gate stays green — the exact "green gates, silent loss" shape.
-    # The EFFECTIVE id is checked (not just frontmatter-declared ones): two byte-identical, same-stem
-    # notes in different vaults produce one filename-derived id, and assert_composed cannot catch
-    # that (the ingested-id SET has already deduped them). Refuse it here, at the source.
+    # IDENTICAL NOTES. doc_id is computed at ingest from frontmatter, else from the file name and
+    # the bytes (`doc_id_for`), and reconcile keys the index on it, so two notes with one doc_id
+    # would make one silently replace the other while every A-series gate stayed green. What two
+    # such notes are decides what happens:
     #
-    # AND THE SAME COLLISION WHERE NO ID WAS DECLARED. The guard above catches a duplicate whose
-    # doc_id is declared, because both copies carry it. It CANNOT catch the undeclared case: the id
-    # then derives from filename AND content, so a copy under a different filename gets a different
-    # id and both notes compose — measured 2026-08-17, all gates green, two near-identical notes
-    # answering the same query.
+    #   * SAME TEXT, DIFFERENT NAMES: each is indexed as its own note. That is ordinary in a vault:
+    #     a month of daily notes made from one template and never filled in, `Untitled.md` and
+    #     `Untitled 1.md` both empty, a note and the copy a file sync left beside it. Each derives
+    #     its own doc_id from its own name, and since a note with no title takes its file name as
+    #     one, each is found under its own title. Nothing is withheld. A conflict copy then answers
+    #     twice, so `status` lists each such group by path (`introspect.identical_report`), and
+    #     the conflict stays visible without stopping the vault. Up to 0.2.x this refused the
+    #     whole scope, on the reasoning that two files with the same bytes are one note twice; a
+    #     vault of plain notes trips that without any sync, so it was a refusal of ordinary use.
+    #   * THE SAME DERIVED doc_id FROM THE SAME BYTES (one name in two folders, or two names that
+    #     slug alike, such as `Todo.md` and `todo.md`, or `a b.md` and `a-b.md`): ONE is indexed,
+    #     first by path, and the others are listed in `Scope.duplicates` and named in `status`.
+    #     No text is lost, because they are identical. When the indexed one is deleted, the next
+    #     note in that order takes its place under the same doc_id. A slug keeps 48 characters, so
+    #     two long names that differ only after them (a template's date at the end) are this case
+    #     too, and the copy's title, its file name, is not indexed. Their sources' `_meta.md` must
+    #     be the same bytes, or both absent: two versions of a standard can hold the same passage
+    #     under one name, and leaving one out would drop it from that version, and ingest judges a
+    #     passage on its `_meta.md`, so a copy must not wait on a note that fails for a file the
+    #     copy does not share. A copy in an inherited vault is left out for the project's, so a
+    #     search filtered to the inherited vault no longer finds that text.
     #
-    # That is what every file-sync tool produces on a conflict, whatever it calls the sibling
-    # ("… (conflicted copy)", "…-MacBookPro", "….sync-conflict-…"). Keying on those names would tie
-    # this engine to one vendor's convention and fail for the next; Doc 2 §0 says the engine has an
-    # opinion on shape and none on location, and a sync tool is part of location. **Byte identity is
-    # the convention-independent signal** — two files with the same bytes are one note twice, which
-    # is never intentional in a vault.
+    # STILL A WHOLE-SCOPE FAULT, so the scope is refused: a doc_id that a note DECLARES and another
+    # note also has, whether declared or derived (the owner wrote it, and the engine does not pick
+    # between an owner's two claims), and one derived doc_id from two notes whose bytes differ
+    # (a 32-bit collision of the fingerprint `doc_id_from` keeps). A conflict copy of a note that
+    # declares its doc_id carries the declaration too, so it still refuses, naming both files.
     #
-    # EXACT ONLY, stated rather than implied: a conflict copy that was then EDITED is not caught.
-    # Near-duplicate detection needs a threshold, and a threshold that refuses a whole scope on a
-    # similarity score is a worse failure than the one it prevents. Measured before shipping this:
-    # 693 notes across all seven live vaults, zero exact-duplicate groups — so this refuses nothing
-    # that exists.
-    #
-    # A NOTE WHOSE BYTES ARE NOT A NOTE is left out of both checks and listed in `unreadable`,
+    # A NOTE WHOSE BYTES ARE NOT A NOTE is left out of these checks and listed in `unreadable`,
     # where compose quarantines it. It cannot overwrite another note at index time, because it is
     # never indexed.
-    ids: dict[str, Path] = {}
-    bodies: dict[str, Path] = {}
+    by_id: dict[str, list[tuple[NoteRef, bool, str, str | None]]] = {}
+    by_text: dict[str, list[NoteRef]] = {}
+    bodiless: set[str] = set()
     unreadable: dict[Path, tuple[str, str]] = {}
     for n in notes:
         try:
@@ -935,45 +977,180 @@ def resolve_scope(project_vault: Path) -> Scope:
                 ("not_utf8", "not UTF-8") if isinstance(cause, UnicodeDecodeError)
                 else ("over_size_cap", f"larger than the {_MAX_BYTES // (1024 * 1024)} MiB cap"))
             continue
-        front, _ = _parse_frontmatter(raw)  # size-checked before doc_id_for reads it
+        front, body = _parse_frontmatter(raw)  # size-checked before the bytes are hashed
         fid = front.get("doc_id", "")
-        eff = fid if _DOC_ID.fullmatch(fid) else doc_id_for(n.path)
-        if eff in ids:
-            raise VaultError(
-                f"doc_id {eff!r} produced by two notes: {ids[eff]} and {n.path}. Composed vaults "
-                "share one id space; refusing an ambiguous overwrite — one would silently replace "
-                "the other at index time."
-            )
-        ids[eff] = n.path
+        declared = bool(_DOC_ID.fullmatch(fid))
+        try:
+            sha = sha256_file(n.path)
+        except OSError as e:
+            raise VaultError(f"cannot read {n.path}: {e}") from e
+        eff = fid if declared else doc_id_from(n.path.stem, sha)
+        by_id.setdefault(eff, []).append((n, declared, sha, _meta_sha(n.path, where[n.path][1])))
+        text = hashlib.sha256(raw.encode("utf-8", "surrogateescape")).hexdigest()
+        by_text.setdefault(text, []).append(n)
+        if not _has_body(body):
+            bodiless.add(text)
 
-        digest = hashlib.sha256(raw.encode("utf-8", "surrogateescape")).hexdigest()
-        if digest in bodies:
-            raise VaultError(
-                f"two notes are byte-identical: {bodies[digest]} and {n.path}. That is what a file "
-                "sync leaves behind when two machines edited a note, and indexing both answers one "
-                "question with the same passage twice while hiding that a conflict happened. "
-                "Delete or merge one, then recompose."
-            )
-        bodies[digest] = n.path
+    first = _first_by_path(where)
+    roots = {path: root for path, (_, root) in where.items()}
+    duplicates: list[tuple[NoteRef, NoteRef]] = []
+    for eff, claims in by_id.items():
+        if len(claims) < 2:
+            continue
+        claims.sort(key=lambda c: first(c[0]))
+        _refuse_unshared_id(eff, claims, roots)
+        kept = claims[0][0]
+        duplicates.extend((c[0], kept) for c in claims[1:])
+    left_out = {n.path for n, _ in duplicates}
+    composed = tuple(n for n in notes if n.path not in left_out)
+
+    groups: list[IdenticalGroup] = []
+    for text, same in by_text.items():
+        same = sorted((n for n in same if n.path not in left_out), key=first)
+        if len(same) > 1:
+            groups.append(IdenticalGroup(tuple(same), text not in bodiless))
+    groups.sort(key=lambda g: first(g.notes[0]))
+    duplicates.sort(key=lambda d: first(d[0]))
 
     # The project's own manifest is re-read for its declared name. `visit` parsed it already but
     # kept only `inherits`; the file is size-capped and tiny, and reading it here keeps the name
     # sourced from the manifest rather than inferred from the directory (they legitimately differ).
     manifest = _read_manifest(project_vault)
     return Scope(
-        project=project_ref, vaults=tuple(ordered), notes=tuple(notes),
+        project=project_ref, vaults=tuple(ordered), notes=composed,
         name=manifest["name"], unreadable=unreadable,
         quarantine_ceiling=_declared_ceiling(manifest, project_vault / MANIFEST),
+        duplicates=tuple(duplicates), identical=tuple(groups),
     )
 
 
-def assert_composed(store, *, ingested_doc_ids: set[str]) -> dict:
+def _has_body(body: str) -> bool:
+    """Whether a note's text after its frontmatter holds anything but headings, by the reader's
+    own blocks: an unfilled template of headings indexes no passage, as an empty note does not."""
+    return any(b.kind is not Kind.HEADING for b in _blocks(body))
+
+
+def _meta_sha(note: Path, root: Path) -> str | None:
+    """The SHA-256 of the `_meta.md` a note inherits from (`source_meta_path`), or None."""
+    meta = source_meta_path(note, root)
+    if meta is None:
+        return None
+    try:
+        return sha256_file(meta)
+    except OSError as e:
+        raise VaultError(f"cannot read {meta}: {e}") from e
+
+
+def _first_by_path(where: Mapping[Path, tuple[int, Path]]):
+    """The order "first by path" means, as a sort key over notes: which of two notes with one
+    doc_id is indexed, and how a group of identical notes is listed.
+
+    The vault first: the project vault's copy before any it inherits, then the inherited vaults in
+    the reverse of the order compose lists them (`Scope.vaults`, roots first), so a vault comes
+    before the vaults it inherits. The project is the vault the scope is for, and the one `ingest`
+    and `amend` write. Then the path inside the vault, folder by folder, as strings compared by
+    code point: each name in NFC first, so a name a sync tool stored decomposed sorts where it does
+    composed, then as stored, which orders two names one volume holds and only NFC tells apart.
+    Never the filesystem's listing order and never the locale's, so it is the same on APFS and
+    ext4, and from one compose to the next while the notes are the same."""
+
+    def key(n: NoteRef) -> tuple:
+        rank, root = where[n.path]
+        parts = n.path.relative_to(root).parts
+        return rank, tuple(_nfc(p) for p in parts), parts
+
+    return key
+
+
+def _composed_alike(n: NoteRef) -> NoteRef:
+    """What a note's source adds when compose reads it: its NoteRef, by construction, less where
+    it is."""
+    return replace(n, path=Path(), vault="", tier=0)
+
+
+def _refuse_one_file(a: Path, b: Path, a_root: Path, b_root: Path) -> None:
+    """Refuse one note found twice: by one path in two vaults (an inherited vault inside the
+    project vault), or as one file under two paths (that layout under another spelling, or a hard
+    link). Not a copy of a note but one note with two owners, so neither can be left out for the
+    other."""
+    if a == b:
+        raise VaultError(
+            f"{a} is discovered by two vaults, {a_root} and {b_root}: one lies inside the other. "
+            f"Skip the inner folder in the outer vault's {MANIFEST} (`skip`), or move the inner "
+            f"vault out.")
+    if a_root == b_root:
+        raise VaultError(f"{a} and {b} are one file, discovered twice: it has two names in one "
+                         f"vault (a hard link). Remove one.")
+    raise VaultError(
+        f"{a} and {b} are one file, discovered twice, through two vaults, {a_root} and {b_root}: "
+        f"one lies inside the other under another spelling, or the file is hard-linked into "
+        f"both. Skip the inner folder in the outer vault's {MANIFEST} (`skip`), move the inner "
+        f"vault out, or remove one link.")
+
+
+def _refuse_shared_file(notes: list[NoteRef], roots: Mapping[Path, Path]) -> None:
+    """Refuse when two notes claiming one doc_id are one file: on a volume that folds case, or
+    through a macOS firmlink, a vault inside another is reached by a spelling `resolve` keeps
+    apart, and a hard link is one file under two names. Asked by the file's identity, and only of
+    notes that would otherwise be copies, so a volume whose inode numbers mean nothing (0, as some
+    network and FAT mounts report) can at worst miss one, never refuse a vault for it."""
+    seen: dict[tuple[int, int], NoteRef] = {}
+    for n in notes:
+        try:
+            st = os.lstat(n.path)
+        except OSError as e:
+            raise VaultError(f"cannot read {n.path}: {e}") from e
+        if not st.st_ino:
+            continue
+        other = seen.setdefault((st.st_dev, st.st_ino), n)
+        if other is not n:
+            _refuse_one_file(other.path, n.path, roots[other.path], roots[n.path])
+
+
+def _refuse_unshared_id(eff: str, claims: list[tuple[NoteRef, bool, str, str | None]],
+                        roots: Mapping[Path, Path]) -> None:
+    """Refuse, naming two of the notes, when the notes claiming doc_id `eff` (first by path) are
+    not copies one may stand for: any of them declares it, their bytes differ, or their sources
+    compose them differently. Otherwise return, and the first is indexed for all of them."""
+    (a, a_declared, a_sha, a_meta), *rest = claims
+    _refuse_shared_file([c[0] for c in claims], roots)
+    if a_declared or any(c[1] for c in rest):
+        b, b_declared, *_ = rest[0] if a_declared else next(c for c in rest if c[1])
+        how = ("both declare it" if a_declared and b_declared else
+               f"{(a if a_declared else b).path} declares it, and the other derives it from its "
+               f"file name and bytes")
+        raise VaultError(
+            f"doc_id {eff!r} is claimed by two notes: {a.path} and {b.path}; {how}. Composed "
+            "vaults share one id space, and one would silently replace the other at index time. "
+            "A declared doc_id is the owner's, so the engine does not choose between them. If "
+            "one is a copy of the other (a file sync's conflict copy carries the declaration "
+            "too), delete or merge it; otherwise give one a doc_id of its own.")
+    for b, _, b_sha, b_meta in rest:
+        if b_sha != a_sha:
+            raise VaultError(
+                f"doc_id {eff!r} is derived by two notes whose bytes differ: {a.path} and "
+                f"{b.path}. Their names slug alike and the fingerprint the id keeps matches by "
+                "chance, so one would silently replace the other at index time. Rename one, or "
+                "declare a doc_id in one.")
+        if b_meta != a_meta or _composed_alike(b) != _composed_alike(a):
+            raise VaultError(
+                f"doc_id {eff!r} is derived by two notes with the same bytes, {a.path} and "
+                f"{b.path}, whose sources compose them differently: their `_meta.md` files are "
+                "not the same bytes. Neither can stand for the other, and one would silently "
+                "replace the other at index time. Rename one.")
+
+
+# The marker each copy's line starts with in compose's output (`Scope.duplicates`).
+DUPLICATE_MARK = "duplicate:"
+
+def assert_composed(store, *, sources: Mapping[str, Path]) -> dict:
     """A-series composition proof: inheritance actually composed, nothing silently dropped or added.
 
     Runs after indexing. The core guarantee is that the indexed doc set is EXACTLY what this compose
     ingested — no more, no less — which closes the "green gates, silent loss" shape from both sides.
-    `ingested_doc_ids` is the ground truth (every note this run indexes, one id each: the discovered
-    set less the notes compose quarantined), so the scope is not needed a second time:
+    `sources` is the ground truth: each doc_id this run indexes, with the note it was ingested
+    from (one id each: the discovered set less the notes compose quarantined and the copies it
+    left out), so the scope is not needed a second time:
 
       1. every ingested note is indexed. A note discovered, ingested, then absent from the index
          means reconcile dropped it. When a whole vault's notes go missing this way, the message
@@ -983,6 +1160,10 @@ def assert_composed(store, *, ingested_doc_ids: set[str]) -> dict:
          (one compose could not attribute to a deleted or skipped note, and so did not prune) would keep
          answering queries; out-of-scope content in the index root would answer from sources the
          manifest never authorised. Both are `indexed − ingested`.
+      3. each indexed doc was read from the note compose ingested it from. Several notes can
+         derive one doc_id (`Scope.duplicates`), and reconcile keeps whichever folder holding it
+         comes last, so an earlier folder of a copy compose left out holds an ingested id and
+         passes 1 and 2.
 
     A vault that legitimately contributes zero notes (e.g. a freshly-scaffolded, empty core) is NOT
     an error — it simply adds nothing to either side of the equality, so it is neither required to
@@ -992,11 +1173,11 @@ def assert_composed(store, *, ingested_doc_ids: set[str]) -> dict:
     Raises VaultError on any breach; returns per-vault / per-tier counts for the read-out.
     """
     # Which vault each indexed doc belongs to — so a missing/stale doc can be named with its vault.
-    doc_vault = {
-        r["doc_id"]: (r["vault"] or "")
-        for r in store.db.execute("SELECT doc_id, COALESCE(vault,'') AS vault FROM documents")
-    }
+    rows = store.db.execute(
+        "SELECT doc_id, COALESCE(vault,'') AS vault, source_path FROM documents").fetchall()
+    doc_vault = {r["doc_id"]: r["vault"] for r in rows}
     indexed_ids = set(doc_vault)
+    ingested_doc_ids = set(sources)
 
     # (1) ingested ⊆ indexed. A note discovered and ingested but absent from the index means
     # reconcile dropped it; a wholly-missing vault this way is the silent-tier-drop this catches.
@@ -1018,6 +1199,18 @@ def assert_composed(store, *, ingested_doc_ids: set[str]) -> dict:
             "out-of-scope content that compose could not attribute to a deleted or skipped note "
             "(it prunes only those) — re-run with --clean."
         )
+
+    # (3) each from its own note. A copy left out for the note indexed in its place derives the
+    # same doc_id, so its folder, if one survived, answers under an id this compose did ingest.
+    wrong = sorted(
+        (r["doc_id"], r["source_path"]) for r in rows
+        if Path(r["source_path"] or "").resolve() != Path(sources[r["doc_id"]]).resolve())
+    if wrong:
+        raise VaultError(
+            f"{len(wrong)} indexed doc(s) were read from another note than the one this compose "
+            f"ingested: {[(d, sources[d].as_posix(), p) for d, p in wrong][:5]}. An ingest folder "
+            "of a note compose left out as a copy is still in the index root — re-run with "
+            "--clean.")
 
     # Counted by the store, not here: this hand-rolled its own GROUP BY with a third missing-value
     # convention (`COALESCE(vault,'')`, so a NULL vault and an empty one shared a bucket). The

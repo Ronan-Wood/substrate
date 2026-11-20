@@ -171,7 +171,9 @@ def audit(scope: Scope) -> dict:
     # (vault name, vault-relative area dir) -> {"digests": [(path, mtime)], "members": [(path, mtime)]}
     areas: dict[tuple[str, Path], dict[str, list[tuple[Path, float]]]] = {}
 
-    for n in scope.notes:
+    # Membership is folder position, so a copy compose leaves out for a note elsewhere
+    # (`Scope.duplicates`) is still a member of the area it sits in.
+    for n in (*scope.notes, *(copy for copy, _ in scope.duplicates)):
         note_path, vault_name, area_dir = _area_of(n.path, roots)
         try:
             # Both reads under one guard: a note that cannot be read has an unknown doc_type, so it

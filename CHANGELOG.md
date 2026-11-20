@@ -61,6 +61,27 @@ Every release of the engine, newest first. The format follows
   probably a slip for, as an unknown manifest key does, instead of the list of every command.
 - **Compose and register, refusing a vault with no manifest, name `substrate init <vault>`.**
   They still refuse it rather than guess a scope.
+- **Notes with the same bytes compose.** Two such notes refused the whole scope (exit 2, "two notes
+  are byte-identical"), and so did one name with the same text in two folders ("doc_id … produced
+  by two notes"). An ordinary vault does both without any sync conflict: unfilled daily notes from
+  one template, two empty `Untitled` notes, an empty `Untitled.md` in two folders. Now notes with
+  the same text under different names are each indexed as their own note, under their own titles.
+  Of notes that also derive one `doc_id` (one name in two folders, or `Todo.md` and `todo.md`), the
+  first by path is indexed and the others are left out, each named as its copy: compose prints a
+  `duplicate:` line, a refresh pass's report names it, and `status` lists it under a new
+  `identical` key (`duplicates`, `duplicate_notes`) with the groups of identical notes that are
+  indexed (`groups`, `listed`), so a sync conflict copy stays visible. A slug keeps 48 characters,
+  so two long names that differ only after them are copies too. A copy left out is not
+  quarantined, does not count toward the ceiling, and is not drift. A `doc_id` a note declares
+  that another note has still refuses the scope, a conflict copy of such a note included, and so
+  does one derived `doc_id` from two notes whose bytes differ, or from copies whose sources'
+  `_meta.md` files are not the same bytes. One file compose finds twice under one name (a vault
+  inside the vault that inherits it, also under another spelling where the volume reports inode
+  numbers, or a hard link of the same name) refuses on its own message, where it used to refuse
+  as a `doc_id` produced by two notes.
+  `amend` pins the `doc_id` it derives, so amending either note of such a pair makes the next
+  compose refuse until one is deleted. [`docs/configuration.md`](docs/configuration.md) has the
+  rules.
 - **A key `.substrate.toml` doesn't define fails the compose.** A manifest used to compose with
   an unknown key ignored, so a misspelt `skips` or `writeable_folders` left the default in place
   of what was written. This breaks a manifest that carries an extra key, a typo or one another
@@ -89,7 +110,7 @@ Every release of the engine, newest first. The format follows
   until now, is no longer withheld. Declare `class: conversation` on a transcript.
 - An empty note, or one holding only frontmatter, composes as a document with no passage, as a
   heading-only note already did: `documents` lists it by its file name, and `search` never
-  returns it. Two such notes with the same bytes still refuse the scope as byte-identical.
+  returns it. Any number of them compose (above).
 - **`ingest` and `amend` write in any folder of a vault that declares no `writable_folders`,**
   except a folder its `skip` list skips, a hidden one, a `passages/` folder, and `_sources/` and
   `_archive/` at the top of the vault. They used to write only under `02-areas/`,
@@ -122,7 +143,7 @@ Every release of the engine, newest first. The format follows
   nothing: one that isn't a list of folder paths, or names a folder that doesn't exist, is reached
   through a symlink or is skipped. It doesn't affect what compose indexes.
 - A per-note failure no longer fails the compose. What still refuses the whole scope: a duplicate
-  `doc_id`, two byte-identical notes, a missing declared vault, a manifest the engine can't read
+  `doc_id`, a missing declared vault, a manifest the engine can't read
   or a key it doesn't define, a skipped file that declares a spine, a `_meta.md` the vault layer can't read, an ingest folder it
   can't write safely, a note the filesystem refuses to read, more failures than the ceiling, and
   a compose whose every note failed.

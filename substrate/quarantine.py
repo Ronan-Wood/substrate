@@ -8,8 +8,9 @@ every refresh until it was fixed.
 
 Three things still refuse the whole scope, so a broken index never looks complete:
 
-  * a SCOPE FAULT, which is not one note's own: a duplicate `doc_id`, a missing inherited vault, a
-    broken manifest, an ingest folder the engine cannot write safely. Most of these refuse before
+  * a SCOPE FAULT, which is not one note's own: a `doc_id` two notes claim when neither is a copy
+    the other can stand for (`vault.resolve_scope`), a missing inherited vault, a broken manifest,
+    an ingest folder the engine cannot write safely. Most of these refuse before
     any note is read (`vault.resolve_scope`); the ones found while ingesting reach `decide`.
   * MORE QUARANTINED NOTES THAN THE CEILING. The project vault's `quarantine_ceiling` sets it;
     without one it is the larger of 10 notes and 1% of the scope's notes, rounded down.
