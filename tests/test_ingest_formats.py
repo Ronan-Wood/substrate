@@ -27,6 +27,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -380,6 +381,15 @@ def test_vtt_probe_counts_cue_text_and_not_timings() -> None:
     text = convert.raw_text(src, convert.spec_for(src)).text
     assert "widen ingestion past PDF." in text
     assert "WEBVTT" not in text and "00:00:01.000" not in text and "NOTE" not in text
+
+
+def test_vtt_probe_skips_every_line_holding_a_cue_arrow() -> None:
+    """WebVTT reads any line holding `-->` as a cue's timings, wherever the arrow sits."""
+    src = _tmp() / "arrows.vtt"
+    src.write_text("WEBVTT\n\n00:01.000 --> 00:02.000 align:start\nkept line\n2\n"
+                   "  00:00:03.000-->00:00:04.000\nkept -- dash\nNOTE aside\n", "utf-8")
+    assert convert.raw_text(src, convert.spec_for(src)).text.split("\n") == [
+        "kept line", "kept -- dash"]
 
 
 # ---------------------------------------------------------------- identity and the shared gates
@@ -752,6 +762,40 @@ def test_docling_roundtrip_docx() -> None:
     assert conv.stats["raw_coverage"] == 1.0
     assert conv.stats["raw_coverage_probe"] == "ooxml-w"
     assert conv.stats["docling_status"].endswith("SUCCESS")
+
+
+def test_docling_roundtrip_html_is_not_slowed_by_deep_nesting() -> None:
+    """Docling's HTML reader runs a `p:has(...)` selector over every page, and soupsieve before 4.0
+    took time polynomial in the nesting depth (GHSA-mmhr-3c5m-f64f): this 6 KB page took 9 to 42
+    seconds to convert on soupsieve 2.9, and 0.4 on 4.0.1. The first conversion warms Docling up."""
+    if not DOCLING_TESTS:
+        return
+    warm = _tmp() / "warm.html"
+    warm.write_text("<html><body><p>Warm</p></body></html>", "utf-8")
+    convert.to_markdown(warm, convert.spec_for(warm), log=lambda *_: None)
+    src = _tmp() / "nested.html"
+    src.write_text("<html><body><p>Quarterly review</p>" + "<p>" * 2000 + "deep text</body></html>",
+                   "utf-8")
+    t0 = time.perf_counter()
+    conv = convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None)
+    assert time.perf_counter() - t0 < 3.0
+    assert "deep text" in conv.markdown and conv.stats["raw_coverage"] == 1.0
+
+
+def test_docling_roundtrip_email_with_a_received_date_past_int64() -> None:
+    """mail-parser before 4.6.3 raised OverflowError on a `Received` date whose year overflows
+    int64 (GHSA-xhrq-2mqv-q8wx), and Docling refused the whole message. A sender writes that header."""
+    if not DOCLING_TESTS:
+        return
+    src = _tmp() / "hop.eml"
+    src.write_bytes(
+        b"Received: from x ([192.0.2.1]) by mx.example; Tue, 7 Mar 292277026596 14:29:24 +0000\r\n"
+        b"From: Sender <sender@example.com>\r\nTo: reader@example.com\r\n"
+        b"Subject: Quarterly review\r\nMIME-Version: 1.0\r\n"
+        b"Content-Type: text/html; charset=utf-8\r\n\r\n"
+        b"<html><body><p>The engine ingested six scopes without a refusal.</p></body></html>\r\n")
+    conv = convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None)
+    assert "six scopes" in conv.markdown and "without a refusal." in conv.markdown
 
 
 def test_docling_refuses_a_file_whose_bytes_disagree_with_its_extension() -> None:

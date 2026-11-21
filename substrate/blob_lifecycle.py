@@ -83,7 +83,9 @@ _ANCHOR_11, _ALIAS_11 = re.compile(r"&([\w-]+)"), re.compile(r"\*([\w-]+)")
 _QUOTE_COLON = re.compile(r'"[ \t]*:')
 # A one-line flow collection that cannot hold a claim: flat, closed, no quote, escape or checksum key.
 _CLOSED_FLOW = re.compile(r"(?i)\[(?:(?!sha256)[^\[\]{}'\"\\])*\]|\{(?:(?!sha256)[^\[\]{}'\"\\])*\}")
-_NON_PRINTABLE = re.compile("[^\x09\x0A\x0D\x20-\x7E\x85\xA0-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]")
+# A raw string, so the PATTERN holds escapes and no astral character: CodeQL reads one as U+FFFD and
+# then reports the range ending at U+FFFD as overlapping the one above it.
+_NON_PRINTABLE = re.compile(r"[^\x09\x0A\x0D\x20-\x7E\x85\xA0-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]")
 _FIELD = r"""^\s*["']?{key}["']?\s*:\s*(.*?)\s*$"""
 _ITEM_LINE = re.compile(r"^\s*-(?:\s+(.*?))?\s*$")
 _HEX = re.compile(r"[0-9a-fA-F]{64}")
