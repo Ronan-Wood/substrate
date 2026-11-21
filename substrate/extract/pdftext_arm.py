@@ -377,9 +377,13 @@ class TextLayerExtractor:
             except apple_arm.AppleReaderUnavailable as e:
                 # THE ENGINE is incomplete, not the document. Collapsing this into the message below
                 # would send the operator to look at their PDF for a build problem.
+                # Apple's alone: docling's PDF reader runs no OCR, so `--docling-models` reads no
+                # word from such a page, and naming it, or the extra it needs, sends the operator
+                # to a reader that returns nothing.
                 raise PdfReadError(
                     f"{pdf.name} has {len(scanned)} page(s) with no text layer, and this engine "
-                    f"cannot read them — {e}"
+                    f"cannot read them — {str(e).rstrip('.')}. Nothing else here reads a page that "
+                    "is only an image."
                 ) from e
             except apple_arm.AppleReaderError as e:
                 raise PdfReadError(

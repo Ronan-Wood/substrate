@@ -18,6 +18,7 @@ import os
 import re
 import statistics
 import subprocess
+import sys
 from pathlib import Path
 
 from substrate.extract.base import LIST_MARKER
@@ -57,6 +58,24 @@ class AppleReaderUnavailable(AppleReaderError):
     """The reader is not in this engine, so nothing was attempted."""
 
 
+def available() -> bool:
+    """Whether the reader is in this engine. It says nothing about whether it will run."""
+    return BINARY.is_file() and os.access(BINARY, os.X_OK)
+
+
+def on_macos() -> bool:
+    """Whether Vision is here: this reader, and the Apple Vision OCR docling reads an image with."""
+    return sys.platform == "darwin"
+
+
+def unavailable() -> str:
+    """Why the reader is not in this engine, and the one way to have it where there is one."""
+    if on_macos():
+        return (f"Apple's document reader is not in this engine (no {BINARY}); "
+                "`tools/build-bundled-engine` compiles it.")
+    return "Apple's document reader is not in this engine, and it runs only on macOS."
+
+
 def read(path: Path, *, pages: list[int] | None = None) -> dict:
     """The recognizer's JSON for an image, or for the named pages of a PDF, numbered from 1."""
     if not pages:
@@ -69,12 +88,8 @@ def read(path: Path, *, pages: list[int] | None = None) -> dict:
 
 def _read_once(path: Path, pages: list[int] | None) -> dict:
     """One run of the reader, over one batch of pages or a whole image."""
-    if not (BINARY.is_file() and os.access(BINARY, os.X_OK)):
-        raise AppleReaderUnavailable(
-            f"Apple's document reader is not in this engine (no {BINARY}). "
-            "`tools/build-bundled-engine` compiles it; naming a docling models folder with "
-            "--docling-models reads the document without it."
-        )
+    if not available():
+        raise AppleReaderUnavailable(unavailable())
     command = [str(BINARY)]
     if pages:
         command += ["--pages", ",".join(str(p) for p in pages)]

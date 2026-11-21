@@ -15,10 +15,10 @@ different from merely calling it with more format options:
     A18 all still fire on a converted document, because it goes through `ingest_markdown` rather
     than a second ingest body of its own.
 
-The Docling round-trip is `test_docling_roundtrip_*`, opt-in behind SUBSTRATE_DOCLING_TESTS=1: it
-costs a five-second torch import per format and this suite runs in thirteen seconds. Everything
-else here is stdlib-only and builds its own OOXML fixtures with `zipfile`, so the gates stay
-testable on a machine with no Docling at all.
+The Docling round-trips are `test_docling_roundtrip_*`, one per `convert` format, opt-in behind
+SUBSTRATE_DOCLING_TESTS=1, which the `engine convert` and `engine docling` jobs set. Opted in, a
+missing docling fails them. Everything else here is stdlib-only and builds its own OOXML fixtures
+with `zipfile`, so the gates stay testable on a machine with no Docling at all.
 """
 
 from __future__ import annotations
@@ -44,24 +44,9 @@ from substrate.markdown.ingest import (  # noqa: E402
 )
 from substrate.models import SourceOrigin  # noqa: E402
 
-def _docling_roundtrip_enabled() -> bool:
-    """Opt-in AND present. Both halves are load-bearing:
-
-      * opt-in, because a Docling round-trip costs a five-second torch import per format and this
-        suite runs in thirteen;
-      * present, because `uv run pytest` resolves pytest into an EPHEMERAL environment that does
-        not carry the project's dependencies — `uv run python -c 'import docling'` succeeds
-        against `.venv` and `uv run pytest` does not. A test that fails there would be reporting
-        the test runner's environment, not the engine.
-    """
-    if os.environ.get("SUBSTRATE_DOCLING_TESTS") != "1":
-        return False
-    import importlib.util
-
-    return importlib.util.find_spec("docling") is not None
-
-
-DOCLING_TESTS = _docling_roundtrip_enabled()
+# Opt-in only, not opt-in and docling present: a job that opts in on an install whose docling will
+# not import must fail, or the `convert` extra breaks unseen.
+DOCLING_TESTS = os.environ.get("SUBSTRATE_DOCLING_TESTS") == "1"
 
 
 def _tmp() -> Path:
@@ -771,6 +756,27 @@ def test_a_markdown_note_falls_back_to_its_filename_too() -> None:
 
 # ---------------------------------------------------------------- docling round-trip (opt-in)
 
+def test_opting_in_to_the_round_trips_needs_docling() -> None:
+    if not DOCLING_TESTS:
+        return
+    import importlib.util
+
+    assert importlib.util.find_spec("docling") is not None, (
+        "SUBSTRATE_DOCLING_TESTS=1, and docling is not importable: install the `convert` extra")
+
+
+def _roundtrip(src: Path, *expect: str) -> convert.Conversion:
+    """Convert `src` with docling and check the reading: each expected string is in the markdown,
+    and a format with a raw-text probe was measured whole."""
+    spec = convert.spec_for(src)
+    conv = convert.to_markdown(src, spec, log=lambda *_: None)
+    for text in expect:
+        assert text in conv.markdown, (spec.token, text, conv.markdown)
+    assert conv.stats["docling_status"].endswith("SUCCESS"), conv.stats
+    assert conv.stats["raw_coverage"] == (1.0 if spec.probe else None), conv.stats
+    return conv
+
+
 def test_docling_roundtrip_docx() -> None:
     """The real thing, end to end. Opt-in: SUBSTRATE_DOCLING_TESTS=1."""
     if not DOCLING_TESTS:
@@ -786,6 +792,109 @@ def test_docling_roundtrip_docx() -> None:
     assert conv.stats["raw_coverage"] == 1.0
     assert conv.stats["raw_coverage_probe"] == "ooxml-w"
     assert conv.stats["docling_status"].endswith("SUCCESS")
+
+
+def test_docling_roundtrip_pptx() -> None:
+    if not DOCLING_TESTS:
+        return
+    import pptx
+
+    deck = pptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[1])
+    slide.shapes.title.text = "Quarterly Substrate Review"
+    slide.placeholders[1].text = "Six scopes ingested without a refusal"
+    src = _tmp() / "review.pptx"
+    deck.save(src)
+    _roundtrip(src, "Quarterly Substrate Review", "Six scopes ingested without a refusal")
+
+
+def test_docling_roundtrip_xlsx() -> None:
+    if not DOCLING_TESTS:
+        return
+    import openpyxl
+
+    book = openpyxl.Workbook()
+    book.active.append(["scope", "notes"])
+    book.active.append(["harbour", 140])
+    src = _tmp() / "scopes.xlsx"
+    book.save(src)
+    _roundtrip(src, "scope", "harbour", "140")
+
+
+def test_docling_roundtrip_html() -> None:
+    if not DOCLING_TESTS:
+        return
+    src = _tmp() / "review.html"
+    src.write_text("<html><body><h1>Quarterly Substrate Review</h1>"
+                   "<p>Six scopes ingested without a refusal.</p></body></html>", "utf-8")
+    _roundtrip(src, "# Quarterly Substrate Review", "Six scopes ingested without a refusal.")
+
+
+def test_docling_roundtrip_csv() -> None:
+    if not DOCLING_TESTS:
+        return
+    src = _tmp() / "scopes.csv"
+    src.write_text("scope,notes\nharbour,140\nmeadow,222\n", "utf-8")
+    _roundtrip(src, "scope", "harbour", "222")
+
+
+def test_docling_roundtrip_vtt() -> None:
+    if not DOCLING_TESTS:
+        return
+    src = _tmp() / "call.vtt"
+    src.write_text("WEBVTT\n\n00:00.000 --> 00:02.000\nThe engine ingested six scopes.\n\n"
+                   "00:02.000 --> 00:04.000\nNone of them was refused.\n", "utf-8")
+    _roundtrip(src, "The engine ingested six scopes.", "None of them was refused.")
+
+
+def test_docling_roundtrip_asciidoc() -> None:
+    if not DOCLING_TESTS:
+        return
+    src = _tmp() / "review.adoc"
+    src.write_text("= Quarterly Substrate Review\n\nSix scopes ingested without a refusal.\n", "utf-8")
+    _roundtrip(src, "Quarterly Substrate Review", "Six scopes ingested without a refusal.")
+
+
+def test_docling_roundtrip_latex() -> None:
+    if not DOCLING_TESTS:
+        return
+    src = _tmp() / "review.tex"
+    src.write_text("\\documentclass{article}\\begin{document}\\section{Quarterly Review}"
+                   "Six scopes ingested without a refusal.\\end{document}\n", "utf-8")
+    _roundtrip(src, "Quarterly Review", "Six scopes ingested without a refusal.")
+
+
+def test_docling_roundtrip_email() -> None:
+    if not DOCLING_TESTS:
+        return
+    src = _tmp() / "review.eml"
+    src.write_text("From: sender@example.com\nTo: reader@example.com\nSubject: Quarterly review\n\n"
+                   "Six scopes ingested without a refusal.\n", "utf-8")
+    _roundtrip(src, "Quarterly review", "Six scopes ingested without a refusal.")
+
+
+def test_docling_roundtrip_epub() -> None:
+    if not DOCLING_TESTS:
+        return
+    src = _tmp() / "review.epub"
+    opf = ('<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+           'unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+           '<dc:identifier id="id">review</dc:identifier><dc:title>Review</dc:title>'
+           '<dc:language>en</dc:language></metadata><manifest><item id="c1" href="c1.xhtml" '
+           'media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine>'
+           '</package>')
+    with zipfile.ZipFile(src, "w") as z:
+        z.writestr("mimetype", "application/epub+zip")
+        z.writestr("META-INF/container.xml",
+                   '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:'
+                   'opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/c.opf" '
+                   'media-type="application/oebps-package+xml"/></rootfiles></container>')
+        z.writestr("OEBPS/c.opf", opf)
+        z.writestr("OEBPS/c1.xhtml",
+                   '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>'
+                   'Review</title></head><body><h1>Quarterly Substrate Review</h1><p>Six scopes '
+                   'ingested without a refusal.</p></body></html>')
+    _roundtrip(src, "Quarterly Substrate Review", "Six scopes ingested without a refusal.")
 
 
 def test_docling_roundtrip_html_is_not_slowed_by_deep_nesting() -> None:

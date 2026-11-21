@@ -8,6 +8,7 @@ never behind a path filter, since a required check that never reports blocks eve
 
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
 
@@ -69,7 +70,7 @@ def test_no_staged_workflow_runs_on_a_trigger_that_hands_out_secrets() -> None:
 
 def test_the_required_engine_check_runs_on_every_change() -> None:
     tests = _workflow("tests.yml")
-    assert [job["name"] for job in tests["jobs"].values()] == ["engine"]
+    assert [job["name"] for job in tests["jobs"].values()] == ["engine", "engine convert"]
     for event in ("push", "pull_request"):
         trigger = tests["on"][event] or {}
         assert "paths" not in trigger and "paths-ignore" not in trigger, event
@@ -129,3 +130,58 @@ def test_engine_docling_runs_both_extras_with_no_skip() -> None:
     runs = _runs("docling.yml", "docling")
     assert "--extra convert --extra convert-ml" in runs
     assert "! grep -q '<skipped'" in runs
+
+
+def test_engine_convert_installs_convert_alone_and_runs_the_round_trips() -> None:
+    """The `convert` extra and nothing of `convert-ml`, from the lock with hashes, the round-trips
+    opted in, and its skips held to its own list."""
+    job = _workflow("tests.yml")["jobs"]["engine-convert"]
+    runs = _runs("tests.yml", "engine-convert")
+    assert job["name"] == "engine convert"
+    assert job["env"]["SUBSTRATE_DOCLING_TESTS"] == "1"
+    assert "uv export --frozen --no-dev --no-emit-project --extra convert -o" in runs
+    assert "convert-ml" not in runs and "--all-extras" not in runs and "uv sync" not in runs
+    installs = [line for line in runs.splitlines() if "uv pip install" in line]
+    assert installs and all("--require-hashes -r" in line for line in installs), installs
+    assert "import importlib.util as u, docling.document_converter" in runs
+    assert all(m in runs for m in ("'torch'", "'transformers'", "'cv2'", "'ocrmac'", "'docling_parse'"))
+    assert "tools/check-skips.py" in runs and "tests/convert-job-skips.txt" in runs
+    assert (ROOT / "tests" / "convert-job-skips.txt").is_file()
+    setup = [s for s in job["steps"] if "setup-uv" in s.get("uses", "")]
+    assert setup and setup[0]["with"]["version"] == "0.12.2"
+
+
+def test_engine_convert_builds_its_sdists_under_the_cutoff_and_nothing_else() -> None:
+    """An sdist is built with tools pinned by version alone, so its install takes `docling.yml`'s
+    cutoff. `uv pip` resolves every pin under it, so it is on that step only, and every package the
+    step installs must predate it, or the job installs nothing."""
+    import tomllib
+
+    job = _workflow("tests.yml")["jobs"]["engine-convert"]
+    docling = _workflow("docling.yml")["jobs"].values()
+    (cutoff,) = {j["env"]["UV_EXCLUDE_NEWER"] for j in docling if "UV_EXCLUDE_NEWER" in j.get("env", {})}
+    assert "UV_EXCLUDE_NEWER" not in job.get("env", {})
+    (step,) = [s for s in job["steps"] if "UV_EXCLUDE_NEWER" in s.get("env", {})]
+    assert step["env"]["UV_EXCLUDE_NEWER"] == cutoff
+    assert step["run"] == 'uv pip install --require-hashes -r "$RUNNER_TEMP/sdist.txt"'
+    taken = set(re.findall(r"/\^([\w.-]+)==/", _runs("tests.yml", "engine-convert")))
+    lock = tomllib.loads((ROOT / "uv.lock").read_text("utf-8"))["package"]
+    spec = importlib.util.spec_from_file_location("_tiers", ROOT / "tests" / "test_dependency_tiers.py")
+    tiers = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tiers)
+    convert = tiers._closure("convert")
+    sdists = {p["name"]: p["sdist"]["upload-time"] for p in lock
+              if p["name"] in convert and "sdist" in p and not p.get("wheels")}
+    assert taken == set(sdists), (taken, sdists)
+    assert all(t < cutoff for t in sdists.values()), sdists
+
+
+def test_the_convert_job_skips_nothing_the_core_job_runs() -> None:
+    """`engine convert` installs everything `engine` does and more, so a test it skips that the core
+    job runs is one the extra broke."""
+    spec = importlib.util.spec_from_file_location("_check_skips", ROOT / "tools" / "check-skips.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    convert, core = (tool.expected(ROOT / "tests" / f) for f in ("convert-job-skips.txt",
+                                                                 "core-job-skips.txt"))
+    assert convert <= core, convert - core

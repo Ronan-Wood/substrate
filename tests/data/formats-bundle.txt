@@ -1,0 +1,29 @@
+  format    extensions                             doc class                        note
+  pdf       .pdf                                   declared (--doc-class required)  Its own text layer, with Apple's recognizer for pages that are only an image; docling's layout and table models when --docling-models names them. Furniture adjudication, inferred heading levels.
+  markdown  .md .markdown                          absence → unclassified           The vault format. Read by the markdown reader, not Docling — frontmatter, spine and doc_id round-trip, and a project vault ingests with nothing installed.
+  text      .txt .text                             absence → unclassified           Read by the markdown reader, which is a superset: every line routes into a block. A `#` or `-` line is read as structure it may not have meant — content is preserved (A18), hierarchy may be over-read.
+  docx      .docx .docm .dotx .dotm                absence → unclassified           Word (Office Open XML).
+  pptx      .pptx .pptm .potx .ppsx .potm .ppsm    absence → unclassified           PowerPoint; one page per slide.
+  xlsx      .xlsx .xlsm                            absence → unclassified           Excel; each sheet renders as a markdown table.
+  html      .html .htm .xhtml                      absence → unclassified           HTML; scripts and styles are not content and are excluded from the probe too.
+  csv       .csv                                   absence → unclassified           Renders as one markdown table.
+  vtt       .vtt                                   absence → unclassified           WebVTT captions — cue text only; timings are not content.
+  asciidoc  .adoc .asciidoc .asc                   absence → unclassified           AsciiDoc. No probe: its markup and its content share a token space.
+  latex     .tex .latex                            absence → unclassified           LaTeX source. No probe, for the same reason as AsciiDoc — `\section` is markup, and a probe that counted it would report loss on a faithful conversion.
+  email     .eml                                   absence → unclassified           RFC-822 message. No probe: Docling rewrites the headers it keeps (dates are normalised) and drops the ones it does not.
+  epub      .epub                                  absence → unclassified           EPUB. No probe: chapter selection is the backend's decision, so a whole-archive reading would report loss on a correct conversion.
+  image     .png .jpg .jpeg .tif .tiff .bmp .webp  absence → unclassified           Apple's on-device document recognizer; docling with Apple Vision OCR and table structure when --docling-models names its models. The pixels are the only reading there is, so there is no independent probe — the non-empty gate is the whole guarantee.
+  REFUSED   .doc .dot .ppt .pot .pps .xls .xlt     —                                legacy Office binary. Docling converts it by shelling out to LibreOffice, which is not on PATH here. Re-save as .docx / .pptx / .xlsx and ingest that.
+  REFUSED   .odt .ott .ods .ots .odp .otp          —                                OpenDocument. Docling's backend imports, then raises at open time — it needs the `odfdo` package, which is not installed in this venv.
+  REFUSED   .wav .mp3 .m4a .aac .ogg .flac         —                                audio. Docling's ASR pipeline needs a speech-recognition model (whisper / faster-whisper) and ffmpeg; none of them are installed here.
+  REFUSED   .mp4 .avi .mov .mkv .webm              —                                video. Same missing ASR stack as audio, plus frame extraction.
+  REFUSED   .xml .nxml                             —                                ambiguous: Docling maps .xml to three unrelated backends (JATS, XBRL, USPTO patents) and picks between them by sniffing content. None is verified in this engine, so a wrong pick would produce a plausible document from the wrong reader.
+  REFUSED   .json                                  —                                Docling's .json is its OWN serialization of an already-converted document, not a general JSON reader. An arbitrary .json is not a document.
+  REFUSED   .tar.gz                                —                                METS/Google-Books archive. Not verified in this engine.
+  REFUSED   .dclx                                  —                                Docling archive format. Not verified in this engine.
+  REFUSED   .boxnote                               —                                Box Notes. Not verified in this engine.
+
+  doc class: a file EXTENSION is evidence about the container, not the document, so every
+  detected format defaults to ABSENCE — stored as unclassified, retrieved by default,
+  drawn as undeclared. Declare one with --doc-class ['conversation', 'reference-frozen', 'reference-versioned'].
+  PDF is the exception and requires it, as it always has.

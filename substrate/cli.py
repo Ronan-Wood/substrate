@@ -346,7 +346,9 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
         print(f"\nFATAL (conversion): {e}", file=sys.stderr)
         return 3
     except AppleReaderUnavailable as e:
-        print(f"\nFATAL (converter): {e}", file=sys.stderr)
+        # Said as `formats` says it, naming another reader only where one would work.
+        print(f"\nFATAL (converter): {str(e).rstrip('.')}. "
+              f"{convert.image_remedy(convert.installed_extras())}", file=sys.stderr)
         return 2
     # The two ways the CONVERTER, rather than the document, is what is wrong. Both exit 2 and both
     # follow the precedent already in `convert.REFUSED`: ".odt … needs the `odfdo` package, which is

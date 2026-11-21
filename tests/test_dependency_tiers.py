@@ -162,3 +162,14 @@ def test_dependabot_groups_one_per_tier() -> None:
     assert set(groups["core"]) == _closure() == set(CORE.values())
     assert set(groups["convert"]) == _closure("convert") - _closure()
     assert set(groups["convert-ml"]) == _closure("convert-ml") - _closure("convert")
+
+
+def test_formats_reads_each_extra_by_distributions_that_extra_installs() -> None:
+    """`substrate formats` decides a tier is installed from these names. One the tier does not
+    install would hold its formats refused forever; one from the tier below would read a half-install
+    as whole."""
+    from substrate.extract.convert import EXTRA_DISTRIBUTIONS
+
+    assert set(EXTRA_DISTRIBUTIONS) == {"convert", "convert-ml"}
+    assert set(EXTRA_DISTRIBUTIONS["convert"]) <= _closure("convert") - _closure()
+    assert set(EXTRA_DISTRIBUTIONS["convert-ml"]) <= _closure("convert-ml") - _closure("convert")

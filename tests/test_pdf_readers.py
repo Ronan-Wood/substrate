@@ -125,8 +125,32 @@ def test_a_scan_in_an_engine_without_the_recognizer_blames_the_engine(tmp_path, 
     """The ENGINE is incomplete, not the document — the two failures read differently."""
     scan = _scan(tmp_path)
     monkeypatch.setattr(apple_arm, "BINARY", tmp_path / "no-extract-apple")
-    with pytest.raises(PdfReadError, match=r"this engine cannot read them"):
+    with pytest.raises(PdfReadError, match=r"this engine cannot read them") as e:
         TextLayerExtractor().extract(scan, "reference-frozen", **QUIET)
+    # docling's PDF reader runs no OCR, so neither its flag nor the extra it needs reads this page.
+    said = str(e.value)
+    assert "Nothing else here reads a page that is only an image" in said
+    assert "convert-ml" not in said and "--docling-models" not in said
+    # A reader that is there and will not start says so without a full stop: the sentence after it
+    # still reads as one.
+    started = "Apple's document reader could not start: [Errno 8] Exec format error"
+
+    def unstartable(path, *, pages=None):
+        raise apple_arm.AppleReaderUnavailable(started)
+
+    monkeypatch.setattr(apple_arm, "read", unstartable)
+    with pytest.raises(PdfReadError) as e:
+        TextLayerExtractor().extract(scan, "reference-frozen", **QUIET)
+    assert f"{started}. Nothing else here reads" in str(e.value)
+
+
+@pytest.mark.parametrize("macos", [True, False], ids=["macos", "linux"])
+def test_the_missing_recognizer_names_the_build_only_where_it_builds(monkeypatch, macos):
+    monkeypatch.setattr(apple_arm, "on_macos", lambda: macos)
+    said = apple_arm.unavailable()
+    assert ("tools/build-bundled-engine" in said) == macos
+    assert ("only on macOS" in said) == (not macos)
+    assert "convert-ml" not in said and "--docling-models" not in said
 
 
 def test_a_scan_the_recognizer_could_not_read_names_the_pages(tmp_path, monkeypatch):

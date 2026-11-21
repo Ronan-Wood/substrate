@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import html as _html
 import re
+import sys
 import time
 import zipfile
 from dataclasses import dataclass, field
@@ -122,8 +123,43 @@ def needs_extra(spec: FormatSpec, error: Exception) -> str:
     """
     extra = spec.docling_extra
     return (f"{spec.token} needs the engine's [{extra}] extra, and it could not be loaded here "
-            f"— {str(error).rstrip('.')}. From a clone, `uv sync --inexact --extra {extra}` "
-            f"installs it.")
+            f"— {str(error).rstrip('.')}. {install_hint(extra)}")
+
+
+def install_hint(extra: str) -> str:
+    """How to install an extra, said the same way wherever the engine names one."""
+    return f"From a clone, `uv sync --inexact --extra {extra}` installs it."
+
+
+# The distributions each extra installs that its readers need, by name. `formats` reads them as
+# installed distributions, without importing anything: an import is what ingest does, and a listing
+# must not cost a torch load. `tests/test_dependency_tiers.py` holds each to its tier in the lock.
+# An install without OpenCV reads as no `convert-ml`, on purpose: TableFormer, which every models
+# run loads, needs it.
+EXTRA_DISTRIBUTIONS: dict[str, tuple[str, ...]] = {
+    "convert": ("docling-slim", "docling-core", "beautifulsoup4", "mail-parser", "python-oxmsg",
+                "pylatexenc", "openpyxl", "python-docx", "python-pptx", "marko"),
+    "convert-ml": ("docling-parse", "docling-ibm-models", "torch", "torchvision", "accelerate",
+                   "huggingface-hub", "scipy", "rtree", "opencv-python-headless")
+                  + (("ocrmac",) if sys.platform == "darwin" else ()),
+}
+
+
+def installed_extras() -> frozenset[str]:
+    """The extras whose every distribution is installed. `convert-ml` holds all of `convert`."""
+    from importlib.metadata import PackageNotFoundError, distribution
+
+    def present(name: str) -> bool:
+        try:
+            distribution(name)
+        except PackageNotFoundError:
+            return False
+        return True
+
+    have = {extra for extra, names in EXTRA_DISTRIBUTIONS.items() if all(map(present, names))}
+    if "convert" not in have:
+        have.discard("convert-ml")
+    return frozenset(have)
 
 
 def engine_import_fault(error: ImportError) -> bool:
@@ -131,11 +167,20 @@ def engine_import_fault(error: ImportError) -> bool:
     return (error.name or "").partition(".")[0] == "substrate"
 
 
-PDF = FormatSpec(
-    "pdf", (".pdf",), "pdf", "pdf", True, None,
-    "Its own text layer, with Apple's recognizer for pages that are only an image; docling's layout "
-    "and table models when --docling-models names them. Furniture adjudication, inferred heading levels.",
-)
+# The PDF and image notes name their readers, and `formats` leaves out the ones an engine lacks
+# (`_pdf_note`, `_image_note`). The static notes are the full state, built from the same pieces.
+_PDF_TEXT = "Its own text layer"
+_PDF_APPLE = ", with Apple's recognizer for pages that are only an image"
+_PDF_DOCLING = "; docling's layout and table models when --docling-models names them"
+_PDF_TAIL = ". Furniture adjudication, inferred heading levels."
+_IMAGE_APPLE = "Apple's on-device document recognizer"
+_IMAGE_DOCLING = ("docling with Apple Vision OCR and table structure when --docling-models names its "
+                  "models")
+_IMAGE_TAIL = (". The pixels are the only reading there is, so there is no independent probe — the "
+               "non-empty gate is the whole guarantee.")
+
+PDF = FormatSpec("pdf", (".pdf",), "pdf", "pdf", True, None,
+                 _PDF_TEXT + _PDF_APPLE + _PDF_DOCLING + _PDF_TAIL)
 MARKDOWN = FormatSpec(
     "markdown", (".md", ".markdown"), "markdown", None, False, None,
     "The vault format. Read by the markdown reader, not Docling — frontmatter, spine and doc_id "
@@ -147,6 +192,9 @@ TEXT = FormatSpec(
     "`-` line is read as structure it may not have meant — content is preserved (A18), hierarchy "
     "may be over-read.",
 )
+
+IMAGE = FormatSpec("image", (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"), "docling",
+                   "image", True, None, f"{_IMAGE_APPLE}; {_IMAGE_DOCLING}{_IMAGE_TAIL}")
 
 _CONVERTED = (
     FormatSpec("docx", (".docx", ".docm", ".dotx", ".dotm"), "docling", "docx", False, "ooxml-w",
@@ -172,11 +220,7 @@ _CONVERTED = (
     FormatSpec("epub", (".epub",), "docling", "epub", False, None,
                "EPUB. No probe: chapter selection is the backend's decision, so a whole-archive "
                "reading would report loss on a correct conversion."),
-    FormatSpec("image", (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"), "docling",
-               "image", True, None,
-               "Apple's on-device document recognizer; docling with Apple Vision OCR and table structure "
-               "when --docling-models names its models. The pixels are the only reading there is, so "
-               "there is no independent probe — the non-empty gate is the whole guarantee."),
+    IMAGE,
 )
 
 ACCEPTED: tuple[FormatSpec, ...] = (PDF, MARKDOWN, TEXT) + _CONVERTED
@@ -608,11 +652,79 @@ def to_markdown(src: Path, spec: FormatSpec, *, models: Path | None = None, log=
                       stats=stats, arm=f"docling-{spec.token}")
 
 
+def _pdf_note(extras: frozenset[str], apple: bool) -> str:
+    """The PDF row's note, naming only the readers this engine has: the text layer always.
+
+    Only Apple's recognizer reads a page that is only an image. Docling's PDF reader runs no OCR, so
+    the note never offers its models, or the extra they need, for one, and says what they do with it.
+    """
+    docling = "convert-ml" in extras
+    note = _PDF_TEXT + (_PDF_APPLE if apple else "") + (_PDF_DOCLING if docling else "")
+    if not apple:
+        note += (", which read no word from a page that is only an image. Without them such a page"
+                 if docling else ". A page that is only an image")
+        note += " is refused: only Apple's recognizer reads one, and it is not in this engine"
+    return note + _PDF_TAIL
+
+
+def _image_note(extras: frozenset[str], apple: bool) -> str | None:
+    """The image row's note, naming only the readers this engine has, or None when it has neither."""
+    from substrate.extract import apple_arm
+
+    readers = ([_IMAGE_APPLE] if apple else []) + (
+        [_IMAGE_DOCLING] if "convert-ml" in extras and apple_arm.on_macos() else [])
+    if not readers:
+        return None
+    note = "; ".join(readers)
+    return note[0].upper() + note[1:] + _IMAGE_TAIL
+
+
+def image_remedy(extras: frozenset[str]) -> str:
+    """What reads an image here once Apple's recognizer is missing, as `formats` and ingest say it.
+
+    Docling's image OCR is Apple Vision's, through `ocrmac`, so off macOS nothing does, and the
+    extra is named only where installing it gives a working reader.
+    """
+    from substrate.extract import apple_arm
+
+    if not apple_arm.on_macos():
+        return ("Nothing else here reads an image: docling's image OCR is Apple Vision's, which needs "
+                "macOS too.")
+    docling = "Docling reads an image with Apple Vision's OCR when --docling-models DIR names its models"
+    if "convert-ml" in extras:
+        return f"{docling}."
+    return (f"{docling}, and that needs the engine's [convert-ml] extra, which is not installed here. "
+            f"{install_hint('convert-ml')}")
+
+
 def table() -> list[tuple[str, str, str, str]]:
-    """(format, extensions, doc-class default, note) for every accepted format, then the refusals."""
-    rows = [(s.token, " ".join(s.extensions), s.doc_class_default, s.note) for s in ACCEPTED]
-    seen: dict[str, list[str]] = {}
+    """(format, extensions, doc-class default, note) for every format this engine reads, then the
+    refusals: a format whose extra is not installed is refused, in the same four columns.
+
+    With both extras and Apple's recognizer, which is the bundle, the table is the one this engine
+    printed before the extras existed.
+    """
+    from substrate.extract import apple_arm
+
+    extras, apple = installed_extras(), apple_arm.available()
+    rows, refused = [], {}
+    for s in ACCEPTED:
+        note = s.note
+        if s is IMAGE:
+            note = _image_note(extras, apple)
+            if note is None:
+                why = f"image. {apple_arm.unavailable()} {image_remedy(extras)}"
+                refused.setdefault(why, []).extend(s.extensions)
+                continue
+        elif s is PDF:
+            note = _pdf_note(extras, apple)
+        elif s.docling_extra and s.docling_extra not in extras:
+            why = (f"docling's readers for these are the engine's [{s.docling_extra}] extra, which "
+                   f"is not installed here. {install_hint(s.docling_extra)}")
+            refused.setdefault(why, []).extend(s.extensions)
+            continue
+        rows.append((s.token, " ".join(s.extensions), s.doc_class_default, note))
     for ext, why in REFUSED.items():
-        seen.setdefault(why, []).append(ext)
-    rows += [("REFUSED", " ".join(exts), "—", why) for why, exts in seen.items()]
+        refused.setdefault(why, []).append(ext)
+    rows += [("REFUSED", " ".join(exts), "—", why) for why, exts in refused.items()]
     return rows

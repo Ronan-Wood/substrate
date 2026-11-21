@@ -40,6 +40,7 @@ uv run python -m pytest tests -q
 | check | runs | required |
 |---|---|---|
 | `engine` (`tests` workflow, Ubuntu, the core alone, every skip named in `tests/core-job-skips.txt`) | every push to `main` and every PR | **yes** |
+| `engine convert` (`tests` workflow, Ubuntu, the core plus `convert` alone, the round-trip for each `convert` format, every skip named in `tests/convert-job-skips.txt`) | every push to `main` and every PR | no |
 | `engine docling` (macOS, both extras from the lock minus OpenCV, no skips allowed) | PRs, unless they change only Markdown at the root, `docs/`, `experiments/`, the licence or the other CI files | no |
 | `lean` (Ubuntu, the models of the [verified paths](#verified-paths) against the real code) | PRs that touch `substrate/`, `pyproject.toml`, `uv.lock`, a model or its workflow | no |
 | `codeql python` (`code scanning` workflow) | pushes to `main`, PRs, and weekly | no |

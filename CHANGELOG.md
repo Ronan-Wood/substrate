@@ -85,6 +85,15 @@ Every release of the engine, newest first. The format follows
   and table models, image OCR, torch, `ocrmac` and OpenCV. A plain `uv sync` installs the core; run
   `uv sync --extra convert --extra convert-ml` for everything. A format whose extra is missing is
   refused with exit 2, naming the extra. The bundled engine has both.
+- **An image or a scanned PDF page with no Apple reader names only a reader that would work.** For
+  an image on macOS that is docling, with the `convert-ml` extra and `--docling-models DIR`; off
+  macOS nothing else reads one. For a scanned page there is none, since docling's PDF reader runs no
+  OCR. Both named the flag alone, which never reads a scanned page and reads an image only on macOS
+  with `convert-ml`. The bundled engine has the reader, so nothing changes there.
+- **`substrate formats` lists a format whose extra is not installed as `REFUSED`,** in the same four
+  columns, naming the extra and how to install it, and the PDF and image notes name only the readers
+  the engine has. With both extras and Apple's reader, as the bundled engine has them, the listing is
+  unchanged.
 - **`substrate --help` says what the engine does and the three commands a new vault needs,** and
   every command it lists has a description. `ingest-md`, `verify`, `rechunk`, `index`, `eval`,
   `review` and `refresh-record` are left out of the listing; each still runs, and

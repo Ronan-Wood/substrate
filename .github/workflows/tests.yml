@@ -62,3 +62,48 @@ jobs:
       # EVERY SKIP IS NAMED. The list holds the tests that need an extra or another platform, each
       # with its reason; a skip it does not name, or a named test that ran, fails the job.
       - run: uv run --no-sync python tools/check-skips.py "$RUNNER_TEMP/junit.xml" tests/core-job-skips.txt
+
+  engine-convert:
+    # The core plus `convert` and nothing else: docling's format readers without torch. NOT YET A
+    # REQUIRED CHECK, so its name can still change; once a rule requires it, it is a contract like
+    # `engine`'s.
+    name: engine convert
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Opts in the docling round-trips in `tests/test_ingest_formats.py`, one per `convert` format.
+      SUBSTRATE_DOCLING_TESTS: "1"
+      # No model downloads: nothing `convert` reads uses docling's weights.
+      HF_HUB_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: echo "PYTHONPATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.12.2"
+      - run: uv venv --python 3.14
+      - run: |
+          uv export --frozen --no-dev --no-emit-project --extra convert -o "$RUNNER_TEMP/convert.txt"
+          uv export --frozen --only-group test --no-emit-project -o "$RUNNER_TEMP/test-group.txt"
+          awk '/^pylatexenc==/ { take = 1 } take { print } take && !/\\$/ { exit }' "$RUNNER_TEMP/convert.txt" > "$RUNNER_TEMP/sdist.txt"
+          grep -q '^pylatexenc==' "$RUNNER_TEMP/sdist.txt"
+      # `pylatexenc` is an sdist, so it is built here, with build tools pinned by version, never by
+      # hash. The cutoff ignores any file added to those releases later. It is on this step alone,
+      # because `uv pip` resolves every pin under it, and the lock holds releases newer than it.
+      # Moves with `docling.yml`.
+      - env:
+          UV_EXCLUDE_NEWER: "2026-11-04T00:00:00Z"
+        run: uv pip install --require-hashes -r "$RUNNER_TEMP/sdist.txt"
+      - run: uv pip install --require-hashes -r "$RUNNER_TEMP/convert.txt" -r "$RUNNER_TEMP/test-group.txt"
+      # Fails the job if docling cannot import, or if a piece of `convert-ml` is here: either would
+      # let this job pass on what `convert` alone does not have.
+      - run: >-
+          uv run --no-sync python -c "import importlib.util as u, docling.document_converter;
+          found = [m for m in ('torch', 'transformers', 'cv2', 'ocrmac', 'docling_parse')
+          if u.find_spec(m)]; assert not found, f'not convert: {found}'"
+      - run: >-
+          uv run --no-sync python -m pytest tests -q -rsx --junitxml "$RUNNER_TEMP/junit.xml"
+      # Its own list: the tests that need `convert-ml`, macOS or the bundle's interpreter.
+      - run: uv run --no-sync python tools/check-skips.py "$RUNNER_TEMP/junit.xml" tests/convert-job-skips.txt
