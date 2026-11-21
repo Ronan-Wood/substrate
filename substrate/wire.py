@@ -10,17 +10,21 @@ moves whenever the index's stored contract does. Most of those moves change noth
 decodes, so keying on it would refuse compatible pairs on every schema bump.
 
 **THE ENGINE SERVES A RANGE,** on the model of Docker's daemon API (`ApiVersion` and
-`MinAPIVersion`): every client from `MIN_VERSION` to `VERSION`. That holds because every change
-between the two is additive. A reply is shaped for `VERSION`, and a client of an older version in
-the range reads it by ignoring the keys it does not know. A client below `MIN_VERSION`, or above
-`VERSION`, is refused, loudly.
+`MinAPIVersion`): every client from `MIN_VERSION` to `VERSION`. That holds while no change
+between the two is one an older client reads wrongly; the contract document names the one that
+was let in. A reply is shaped for `VERSION`, and a client of an older version in the range reads
+it by ignoring the keys it does not know. A client below `MIN_VERSION`, or above `VERSION`, is
+refused, loudly.
 
 **Bump `VERSION` when a client may rely on a change being there,** in a request or a reply: a
 new tool, argument or key a newer client will use. An optional key whose absence every client
 already handles needs no bump. **Raise `MIN_VERSION` too when an older client would send or read
 something wrongly:** a tool, argument or key removed or renamed, an argument made required, a
 default, type or meaning changed, or a new value in a closed vocabulary. That refuses every client
-below it, so it is the breaking change, and it comes with an app release.
+below it, so it is the breaking change, and it comes with an app release. A changed meaning that
+reaches every client in the range as something it already handles, a tool refusal, a refused
+compose read as a frozen scope, or a call or compose that now succeeds where it refused, is not
+misread, so it bumps `VERSION` alone (`docs/client-contract.md`).
 
 **Clients from before the range match exactly.** A Scripta or `substrate-mcp --connect` older than
 `MIN_VERSION` reads only a reply stating its own version, so the first bump of `VERSION` refuses
@@ -37,7 +41,7 @@ from __future__ import annotations
 
 from typing import Any
 
-VERSION = 3
+VERSION = 4
 # The oldest client this engine serves. Raised only by a change an older client would misread.
 MIN_VERSION = 1
 HEADER = "Substrate-Wire"

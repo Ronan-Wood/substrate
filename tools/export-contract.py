@@ -39,6 +39,9 @@ A key set is every key the engine MAY send: one bolted on under a condition, or 
 the engine sometimes filters, is in it all the same. A nested dict with keys is refused; docstrings
 and f-strings contribute nothing.
 
+A KEYED OBJECT, built as `{k: … for k in NAME}` over a set of strings another module binds, is
+declared in `KEYED_OBJECTS`, and its keys are NAME's members.
+
 Exit 0: printed. 2: the export could not be made (or the arguments were wrong), and stderr says
 why.
 """
@@ -93,6 +96,8 @@ WIRE_OBJECTS: dict[str, tuple[str, str, tuple[int, ...], str | None]] = {
     "identical_duplicate": ("introspect.py", "_duplicate_note", (0,), None),
     "identical_group": ("introspect.py", "_identical_group", (0,), None),
     "note_ref": ("introspect.py", "_note_ref", (0,), None),
+    # Each row of `status.quarantined`: the note, the kind of fault and the engine key.
+    "quarantined_note": ("introspect.py", "_shown_quarantine", (0,), None),
     "expand": ("mcp/server.py", "_tool_expand", (0,), "out"),
     "expand_note": ("mcp/server.py", "_note_text", (0,), None),
     # What the `list_scopes` TOOL adds around the roster (`EXTENDS`), and the `server` block in it.
@@ -114,10 +119,20 @@ EXTENDS: dict[str, tuple[tuple[str, str], ...]] = {
     "agent_refresh": (("refresh", "refresh_state.block_for"),),
 }
 
+# wire object: (module under the package, builder, the module that binds NAME, NAME), for an object
+# the builder makes as `{k: … for k in NAME}`.
+KEYED_OBJECTS: dict[str, tuple[str, str, str, str]] = {
+    # `status.defaulted`: a count for each field compose may default.
+    "defaulted": ("store/index_store.py", "defaulted_counts", "spine.py", "DEFAULTED_FIELDS"),
+    # `retrieval_mode.health.arms`: each retrieval arm's state.
+    "engine_health_arms": ("render.py", "engine_health", "stack.py", "ARMS"),
+}
+
 MODULES = ("agent.py", "markdown/yaml_scalar.py", "wire.py", "local_socket.py", "refresh.py",
            "spine.py", "classes.py", "stack.py",
            "retrieve/retriever.py", "refresh_state.py", "render.py", "introspect.py",
-           "freshness.py", "mcp/server.py", "grants.py", "writelog.py", "quarantine.py")
+           "freshness.py", "mcp/server.py", "grants.py", "writelog.py", "quarantine.py",
+           "store/index_store.py")
 
 
 class ExportError(Exception):
@@ -517,6 +532,91 @@ def wire_objects(modules: dict[str, _Module]) -> dict[str, list[str]]:
     return dict(sorted(out.items()))
 
 
+# Methods that read a dict without changing it.
+_READERS = ("get", "items", "keys", "values")
+
+
+def _read_only(n: ast.Name, parents: dict[int, ast.AST]) -> bool:
+    """Whether `n` is a value in a dict literal, or the dict a `_READERS` method is called on."""
+    up = parents[id(n)]
+    if isinstance(up, ast.Dict):
+        return any(v is n for v in up.values)
+    return (isinstance(up, ast.Attribute) and up.attr in _READERS
+            and isinstance(parents[id(up)], ast.Call) and parents[id(up)].func is up)
+
+
+def _binds(node: ast.AST, name: str) -> bool:
+    """Whether `node`, inside a function, binds `name` there."""
+    if isinstance(node, ast.Name):
+        return node.id == name and isinstance(node.ctx, (ast.Store, ast.Del))
+    if isinstance(node, ast.arg):
+        return node.arg == name
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.ExceptHandler,
+                         ast.MatchAs, ast.MatchStar)):
+        return node.name == name
+    if isinstance(node, ast.MatchMapping):
+        return node.rest == name
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return name in node.names
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return any((a.asname or a.name.split(".")[0]) == name or a.name == "*" for a in node.names)
+    return False
+
+
+def keyed_objects(modules: dict[str, _Module]) -> dict[str, list[str]]:
+    """Each keyed object's keys. The dict over NAME must be what reaches the wire: returned, with
+    nothing else returned but None, or kept in one local that is only ever read or a value in a
+    dict literal of a builder `WIRE_OBJECTS` reads."""
+    literal_builders = {(m, b) for m, b, _, _ in WIRE_OBJECTS.values()}
+    out: dict[str, list[str]] = {}
+    for name, (module, builder, source, constant) in KEYED_OBJECTS.items():
+        where = f"{module}:{builder}"
+        function = modules[module].function(builder)
+        over = [n for n in ast.walk(function) if isinstance(n, ast.DictComp)
+                and any(isinstance(g.iter, ast.Name) and g.iter.id == constant
+                        for g in n.generators)]
+        if len(over) != 1:
+            raise ExportError(f"{where} builds {len(over)} dicts over {constant}, not one")
+        comp = over[0]
+        gen = comp.generators[0] if len(comp.generators) == 1 else None
+        if not (gen and isinstance(gen.target, ast.Name) and isinstance(comp.key, ast.Name)
+                and comp.key.id == gen.target.id and not gen.ifs and not gen.is_async):
+            raise ExportError(f"{where}: the dict over {constant} is not keyed by each of its "
+                              "members, unfiltered")
+        parents = {id(c): p for p in ast.walk(function) for c in ast.iter_child_nodes(p)}
+        parent = parents[id(comp)]
+        if isinstance(parent, ast.Return):
+            if any(r is not parent and r.value is not None
+                   and not (isinstance(r.value, ast.Constant) and r.value.value is None)
+                   for r in ast.walk(function) if isinstance(r, ast.Return)):
+                raise ExportError(f"{where} returns something besides the dict over {constant} "
+                                  "and None")
+        elif (isinstance(parent, ast.Assign) and len(parent.targets) == 1
+              and isinstance(parent.targets[0], ast.Name) and (module, builder) in literal_builders):
+            local = parent.targets[0]
+            uses = [n for n in ast.walk(function)
+                    if isinstance(n, ast.Name) and n.id == local.id and n is not local]
+            values = [n for n in uses if isinstance(parents[id(n)], ast.Dict)]
+            if not values or not all(isinstance(n.ctx, ast.Load) and _read_only(n, parents)
+                                     for n in uses):
+                raise ExportError(f"{where}: {local.id}, the dict over {constant}, is used other "
+                                  "than as a value in a dict literal or read by "
+                                  f"{', '.join(_READERS)}")
+        else:
+            raise ExportError(f"{where}: the dict over {constant} is neither returned nor kept in "
+                              "a local of a builder WIRE_OBJECTS reads")
+        sites = _module_bindings(modules[module].tree, constant) + [
+            n for n in ast.walk(function) if _binds(n, constant)]
+        origin = "substrate." + source.removesuffix(".py").replace("/", ".")
+        if not (len(sites) == 1 and isinstance(sites[0], ast.ImportFrom)
+                and sites[0].module == origin and sites[0].level == 0
+                and any(a.name == constant and a.asname is None for a in sites[0].names)):
+            raise ExportError(f"{where}: {constant} must be bound once, by `from {origin} import "
+                              f"{constant}`")
+        out[name] = modules[source].members(constant)
+    return out
+
+
 def _lock_suffix(module: _Module) -> str:
     """The `<socket>.lock` suffix, from `path.with_name(path.name + ".lock")`."""
     found = []
@@ -792,10 +892,17 @@ def _export(root: Path) -> dict:
         # (`tools/engine-manifest.py`), and the features it may name.
         "engine_manifest": {"file": manifest.string("NAME"),
                             "features": manifest.members("FEATURES")},
-        "payloads": wire_objects(m),
+        "payloads": _payloads(m),
         "extends": {name: sorted(b for b, _ in bases) for name, bases in sorted(EXTENDS.items())},
         "tiers": _tiers(root),
     }
+
+
+def _payloads(modules: dict[str, _Module]) -> dict[str, list[str]]:
+    literal, keyed = wire_objects(modules), keyed_objects(modules)
+    if both := set(literal) & set(keyed):
+        raise ExportError(f"{sorted(both)} declared as both a literal and a keyed wire object")
+    return dict(sorted({**literal, **keyed}.items()))
 
 
 def render(contract: dict) -> str:

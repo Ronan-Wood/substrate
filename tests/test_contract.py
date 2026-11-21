@@ -34,6 +34,9 @@ CAPTURE_ENV = "SUBSTRATE_CAPTURE_CONTRACT"
 # The one path-shaped token the contract carries on purpose: the tail of the default socket,
 # `~/.substrate/run/substrate.sock`, which names no machine.
 SOCKET_TAIL = "/.substrate/run/substrate.sock"
+# The line of `wire.py` the mutations below edit, as it reads now, so a bump moves no anchor.
+_V = next(f"\n{line}\n" for line in (ROOT / "substrate" / "wire.py").read_text(encoding="utf-8")
+          .splitlines() if line.startswith("VERSION = "))
 
 
 def _tool():
@@ -101,7 +104,7 @@ def test_the_export_found_everything_it_should():
     still match itself."""
     contract = tool.export()
     objects = contract["payloads"]
-    assert sorted(objects) == sorted(tool.WIRE_OBJECTS)
+    assert sorted(objects) == sorted([*tool.WIRE_OBJECTS, *tool.KEYED_OBJECTS])
     assert all(objects.values()), [name for name, keys in objects.items() if not keys]
     assert sum(map(len, objects.values())) >= 90
     for section in ("spine", "classes", "retrieval", "refresh"):
@@ -126,6 +129,15 @@ def test_a_renamed_payload_key_changes_the_export(tmp_path):
     assert _stale(root)
 
 
+def test_a_new_member_of_a_keyed_object_s_set_changes_the_export(tmp_path):
+    root = _tree(tmp_path)
+    _edit(root / "substrate" / "spine.py", 'DEFAULTED_FIELDS: tuple[str, ...] = ("status", "doc_type")',
+          'DEFAULTED_FIELDS: tuple[str, ...] = ("status", "doc_type", "confidence")')
+
+    assert tool.export(root)["payloads"]["defaulted"] == ["confidence", "doc_type", "status"]
+    assert _stale(root)
+
+
 def test_a_changed_wire_version_changes_the_export(tmp_path):
     root = _tree(tmp_path)
     version = tool.export(root)["wire"]["version"]
@@ -135,14 +147,17 @@ def test_a_changed_wire_version_changes_the_export(tmp_path):
     assert _stale(root)
 
 
+_DEFAULTED = "        return {f: counts.get(f, 0) for f in DEFAULTED_FIELDS}"
+
+
 @pytest.mark.parametrize("module, old, new, refusal", [
     # A constant that is not a literal.
-    ("wire.py", "\nVERSION = 3\n", "\nVERSION = int(1)\n", "not an integer literal"),
+    ("wire.py", _V, "\nVERSION = int(1)\n", "not an integer literal"),
     # Features an engine root may state, built rather than written down.
     ("../tools/engine-manifest.py", 'FEATURES = ("serve", "refresh", "connect-unix")',
      'FEATURES = tuple(["serve", "refresh", "connect-unix"])', "not a set of string literals"),
     # A name bound twice: Python keeps the last, a first-match reader would keep the first.
-    ("wire.py", "\nVERSION = 3\n", "\nVERSION = 3\nVERSION = 3\n", "bound 2 times"),
+    ("wire.py", _V, _V + _V[1:], "bound 2 times"),
     # A vocabulary member that is not a string.
     ("spine.py", '"active", "complete", "archived"', '"active", "complete", ARCHIVED',
      "ARCHIVED is bound 0 times"),
@@ -167,7 +182,7 @@ def test_a_changed_wire_version_changes_the_export(tmp_path):
     ("spine.py", '"active", "complete", "archived"', '"active", "complete", 1',
      "holds a member that is not a string literal"),
     # A module-level rebinding, `|=`-style.
-    ("wire.py", "\nVERSION = 3\n", "\nVERSION = 3\nVERSION += 1\n", "bound 2 times"),
+    ("wire.py", _V, _V + "VERSION += 1\n", "bound 2 times"),
     # An arm state rebound in a form the reader does not read.
     ("retrieve/retriever.py", 'reranker = "skipped"', 'reranker += "skipped"',
      "binds reranker in a form"),
@@ -183,10 +198,10 @@ def test_a_changed_wire_version_changes_the_export(tmp_path):
      '    c = result.capability\n    res = make()\n    res["x"] = 1\n',
      "Say which wire object each belongs to"),
     # Rebindings a first-match reader would miss: inside an `if`, by import, from a function.
-    ("wire.py", "\nVERSION = 3\n", "\nVERSION = 3\nif True:\n    VERSION = 3\n", "bound 2 times"),
-    ("wire.py", "\nVERSION = 3\n", "\nVERSION = 3\nfrom os import sep as VERSION\n",
+    ("wire.py", _V, _V + "if True:\n    VERSION = 1\n", "bound 2 times"),
+    ("wire.py", _V, _V + "from os import sep as VERSION\n",
      "bound 2 times"),
-    ("wire.py", "\nVERSION = 3\n", "\nVERSION = 3\n\n\ndef _f():\n    global VERSION\n    VERSION = 4\n",
+    ("wire.py", _V, _V + "\n\ndef _f():\n    global VERSION\n    VERSION = 1\n",
      "bound 2 times"),
     # An arm state bound by a `for`.
     ("retrieve/retriever.py", 'reranker = "skipped"', 'for reranker in ("skipped",): pass',
@@ -207,7 +222,7 @@ def test_a_changed_wire_version_changes_the_export(tmp_path):
     ("classes.py", "\nEXCLUDED_CLASSES", '\nPOLICIES["x"] = None\nEXCLUDED_CLASSES',
      "POLICIES is bound 2 times"),
     ("refresh_state.py", "\nOUTCOMES", "\nOUTCOMES.update({})\nOUTCOMES", "OUTCOMES is bound 2 times"),
-    ("wire.py", "\nVERSION = 3\n", "\nVERSION = 3\nfrom os import *\n", "bound 2 times"),
+    ("wire.py", _V, _V + "from os import *\n", "bound 2 times"),
     # A bolt target whose base keys come from something the reader cannot see.
     ("introspect.py", 'row["sources"] = None', 'row["sources"] = None; row = make()',
      "neither a dict literal"),
@@ -294,6 +309,38 @@ def test_a_changed_wire_version_changes_the_export(tmp_path):
     # Nesting deeper than the reader recurses: refused, not a traceback.
     ("render.py", 'state, note = "ready", None',
      'state, note = "ready", None; _x = ' + "+".join(["1"] * 3000), "nests too deeply|cannot read"),
+    # A keyed object filtered, keyed by something other than its members, built twice, or over a
+    # name bound some other way.
+    ("store/index_store.py", "for f in DEFAULTED_FIELDS}", "for f in DEFAULTED_FIELDS if f}",
+     "unfiltered"),
+    ("store/index_store.py", "{f: counts.get(f, 0) for f in DEFAULTED_FIELDS}",
+     "{f.upper(): counts.get(f, 0) for f in DEFAULTED_FIELDS}", "unfiltered"),
+    ("render.py", "arms = {a: wiring.get(a, ARM_OFF) for a in ARMS}",
+     "arms = {a: wiring.get(a, ARM_OFF) for a in ARMS}; _b = {a: 1 for a in ARMS}",
+     "2 dicts over ARMS"),
+    ("store/index_store.py", "from substrate.spine import DEFAULTED_FIELDS,",
+     "from substrate.spine import DEFAULTED_FIELDS as DEFAULTED_FIELDS,", "must be bound once"),
+    ("render.py", "    from substrate.stack import ARMS, ARM_OFF, ARM_UNAVAILABLE\n",
+     "    from substrate.stack import ARMS, ARM_OFF, ARM_UNAVAILABLE\n    ARMS = ARMS[:1]\n",
+     "must be bound once"),
+    ("render.py", "unavailable: tuple[str, ...] = ()) -> dict:",
+     "unavailable: tuple[str, ...] = (), ARMS=(\"x\",)) -> dict:", "must be bound once"),
+    # A keyed object that is not what reaches the wire: changed after, spread into another dict,
+    # built and dropped, or returned beside something else.
+    ("store/index_store.py", _DEFAULTED,
+     _DEFAULTED.replace("return ", "out = ") + '\n        out["confidence"] = 1\n        return out',
+     "neither returned nor kept"),
+    ("store/index_store.py", _DEFAULTED,
+     _DEFAULTED.replace("return {f:", 'return {"confidence": 0, **{f:') + "}", "neither returned"),
+    ("store/index_store.py", _DEFAULTED,
+     _DEFAULTED.replace("return ", "_unused = ") + '\n        return {"status": 0}',
+     "neither returned nor kept"),
+    ("store/index_store.py", _DEFAULTED,
+     '        if not counts:\n            return {"status": 0}\n' + _DEFAULTED,
+     "returns something besides"),
+    ("render.py", "    arms = {a: wiring.get(a, ARM_OFF) for a in ARMS}\n",
+     '    arms = {a: wiring.get(a, ARM_OFF) for a in ARMS}\n    arms["x"] = 1\n',
+     "used other than|bolts keys onto"),
 ])
 def test_what_the_reader_cannot_read_with_certainty_is_refused(tmp_path, module, old, new, refusal):
     root = _tree(tmp_path)
@@ -364,19 +411,35 @@ def test_a_word_written_straight_onto_the_wire_is_in_the_vocabulary(tmp_path):
     assert "kw_word" in contract["retrieval"]["arm_states"]
 
 
+SEARCH = [((), "search"), (("passages", "*"), "passage"),
+          (("passages", "*", "provenance"), "provenance"),
+          (("outline_records", "*"), "outline_record"),
+          (("outline_records", "*", "provenance"), "provenance"),
+          (("filters",), "applied_filters"), (("retrieval_mode",), "retrieval_mode"),
+          (("retrieval_mode", "health"), "engine_health"),
+          (("retrieval_mode", "health", "arms"), "engine_health_arms"), (("refresh",), "refresh")]
 # What each captured frame holds, by the wire object that must describe it. The frames are the
 # engine's real replies, so this is the check on everything the static reader cannot see: a key the
 # engine sends that the contract lacks fails here, whatever code added it.
 FRAME_OBJECTS = {
-    "search.frame.json": [((), "search"), (("passages", "*"), "passage"),
-                          (("outline_records", "*"), "outline_record"),
-                          (("filters",), "applied_filters"), (("retrieval_mode",), "retrieval_mode"),
-                          (("refresh",), "refresh")],
+    "search.frame.json": SEARCH,
+    "search-sources.frame.json": SEARCH,
     "status.frame.json": [((), "status"), (("drift",), "drift"), (("refresh",), "refresh"),
-                          (("retrieval_arms",), "arms")],
+                          (("retrieval_arms",), "arms"), (("defaulted",), "defaulted"),
+                          (("identical",), "identical"), (("engine_keys",), "engine_keys")],
+    "agent-status.frame.json": [((), "status"), (("drift",), "drift"),
+                                (("refresh",), "agent_refresh"),
+                                (("refresh", "snapshot"), "snapshot"),
+                                (("retrieval_arms",), "arms"), (("defaulted",), "defaulted")],
+    "agent-status-unpublished.frame.json": [((), "status"), (("drift",), "drift"),
+                                            (("refresh",), "agent_refresh"),
+                                            (("refresh", "snapshot"), "snapshot"),
+                                            (("retrieval_arms",), "arms"),
+                                            (("defaulted",), "defaulted")],
     "documents.frame.json": [((), "documents"), (("documents", "*"), "document"),
-                             (("refresh",), "refresh")],
-    "expand.frame.json": [((), "expand"), (("note",), "expand_note")],
+                             (("filters",), "applied_filters"), (("refresh",), "refresh")],
+    "expand.frame.json": [((), "expand"), (("note",), "expand_note"), (("passage",), "passage"),
+                          (("passage", "provenance"), "provenance")],
     # A reply with several bases is held to the ONE base its frame was built from, and must carry
     # every key of its own: the registry's roster, or the agent's.
     "list_scopes.frame.json": [((), "scope_list_reply", "scope_list"), (("scopes", "*"), "scope_row"),
@@ -388,6 +451,34 @@ FRAME_OBJECTS = {
                                      (("scopes", "*", "refresh", "snapshot"), "snapshot"),
                                      (("retrieval_arms",), "arms"), (("server",), "server")],
 }
+
+
+# The frames that are no tool's reply payload, so hold no wire object.
+NOT_PAYLOADS = {
+    "rpc-error.frame.json": "a JSON-RPC error: `code` and `message`",
+    "tool-fault.frame.json": "a tool refusal: one text item, no payload",
+    "http-415-refusal.body.json": "the HTTP refusal of a body that is not JSON",
+}
+# Objects keyed by data rather than by the engine: a vault's name, a tier, a value from one of the
+# spine's vocabularies. Their keys are the corpus's, so no contract can list them.
+DATA_KEYED = {"by_vault", "by_tier", "by_status", "by_doc_type", "by_confidence"}
+# Objects a reply carries that the contract does not declare, each with why.
+UNDECLARED = {
+    ("entities", "*"): "a row of `IndexStore.entity_roster`, a SQL row whose columns the reader "
+                       "does not read; wire 3 sent it already",
+}
+
+# A `status` reply over a vault that fills every object it can carry, which the demo frames leave
+# empty: a quarantined note, two notes with the same text, one note copied under one name, a
+# renamed key, an entity, and an embedder.
+LIVE_STATUS = [*FRAME_OBJECTS["status.frame.json"],
+               (("quarantined", "*"), "quarantined_note"),
+               (("identical", "duplicate_notes", "*"), "identical_duplicate"),
+               (("identical", "duplicate_notes", "*", "copy_of"), "note_ref"),
+               (("identical", "listed", "*"), "identical_group"),
+               (("identical", "listed", "*", "first", "*"), "note_ref"),
+               (("engine_keys", "renamed", "*"), "engine_keys_renamed"),
+               (("vectors",), "vector")]
 
 
 def _keys(contract: dict, obj: str, seen: tuple[str, ...] = ()) -> set[str]:
@@ -419,12 +510,91 @@ def _at(value, path):
         yield from _at(item, rest)
 
 
+def _payload(name: str) -> dict:
+    frame = json.loads((ROOT / "contract" / "frames" / name).read_text(encoding="utf-8"))
+    return json.loads(frame["result"]["content"][0]["text"])
+
+
+def _objects(value, path: tuple[str, ...] = ()):
+    """The path of every object in a reply, a list's items under `*`."""
+    if isinstance(value, dict):
+        yield path
+        for key, item in value.items():
+            yield from _objects(item, (*path, key))
+    elif isinstance(value, list):
+        for item in value:
+            yield from _objects(item, (*path, "*"))
+
+
+def _undeclared(payload: dict, paths: list) -> set[str]:
+    """Each object in `payload` that no wire object in `paths` describes, and that is not keyed by
+    data."""
+    held = {path for path, *_ in paths} | set(UNDECLARED)
+    return {".".join(p) or "(top)" for p in _objects(payload)
+            if p not in held and not (len(p) == 1 and p[0] in DATA_KEYED)}
+
+
+def _live_status(tmp_path, monkeypatch) -> dict:
+    import dataclasses
+    import types
+
+    from test_compose_quarantine import World
+    from substrate import scopes, stack
+    from substrate.mcp import server
+    from substrate.store.index_store import IndexStore
+
+    monkeypatch.setattr(scopes, "engine_home", lambda: tmp_path)
+    world = World(tmp_path)
+    spine = "---\nstatus: active\ndoc_type: reference\n---\n\n"
+    world.write("02-areas/broken.md", "---\nstatus: done\ndoc_type: reference\n---\n\n# Broken\n")
+    for rel in ("02-areas/twin-a.md", "02-areas/twin-b.md"):
+        world.write(rel, spine + "# Twin\n\nThe same text in two notes.\n")
+    for rel in ("02-areas/Copy.md", "03-references/Copy.md"):
+        world.write(rel, spine + "# Copy\n\nOne name in two folders.\n")
+    manifest = world.vault / ".substrate.toml"
+    manifest.write_text(manifest.read_text("utf-8") + '\n[engine_keys]\nconfidence = "certainty"\n',
+                        "utf-8")
+    rc, _, err = world.compose()
+    assert rc == 0, err
+    with IndexStore(str(world.db)) as store:
+        store.replace_identity([("someone", "Someone", "person", "made up")])
+    wired = dataclasses.replace(stack.build(lexical_only=True),
+                                embedder=types.SimpleNamespace(key="an-embedder"))
+    reply = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "status", "arguments": {"scope": "demo"}}},
+                          server.Config(str(world.registry), wired, read_only=True))
+    return json.loads(reply["result"]["content"][0]["text"])
+
+
+def test_every_frame_is_held_to_the_contract_or_says_why_not():
+    frames = {p.name for p in (ROOT / "contract" / "frames").glob("*.json")}
+    assert frames == set(FRAME_OBJECTS) | set(NOT_PAYLOADS), frames ^ (set(FRAME_OBJECTS)
+                                                                       | set(NOT_PAYLOADS))
+
+
+def test_every_object_a_reply_carries_is_a_declared_wire_object(tmp_path, monkeypatch):
+    """A reply object no wire object describes is one a client has no keys for. The frames and one
+    live `status` reply, whose rows the demo frames leave empty, are walked whole."""
+    for name, paths in FRAME_OBJECTS.items():
+        assert not (extra := _undeclared(_payload(name), paths)), (name, sorted(extra))
+    live = _live_status(tmp_path, monkeypatch)
+    assert live["quarantined"] and live["identical"]["duplicate_notes"], live
+    assert live["identical"]["listed"] and live["engine_keys"]["renamed"], live
+    assert live["entities"] and live["vectors"], live
+    assert not (extra := _undeclared(live, LIVE_STATUS)), sorted(extra)
+    contract = json.loads(COMMITTED.read_text(encoding="utf-8"))
+    assert not (missing := {obj for _, obj in LIVE_STATUS} - set(contract["payloads"])), (
+        f"the contract declares no {sorted(missing)}")
+    for path, obj in LIVE_STATUS:
+        for value in _at(live, path):
+            assert not (extra := set(value) - _keys(contract, obj)), (path, obj, sorted(extra))
+
+
 def test_every_key_in_the_captured_frames_is_in_the_contract():
     contract = json.loads(COMMITTED.read_text(encoding="utf-8"))
     checked = 0
     for name, paths in FRAME_OBJECTS.items():
-        frame = json.loads((ROOT / "contract" / "frames" / name).read_text(encoding="utf-8"))
-        payload = json.loads(frame["result"]["content"][0]["text"])
+        payload = _payload(name)
         for path, obj, *branch in paths:
             for value in _at(payload, path):
                 # `status.drift` has two shapes: the drift itself, or the refusal to check it.

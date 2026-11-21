@@ -1,6 +1,6 @@
 {
   "wire": {
-    "version": 3,
+    "version": 4,
     "min_version": 1,
     "header": "Substrate-Wire",
     "mismatch": -32010,
@@ -246,6 +246,10 @@
       "reranker",
       "unavailable"
     ],
+    "defaulted": [
+      "doc_type",
+      "status"
+    ],
     "document": [
       "confidence",
       "doc_id",
@@ -290,6 +294,11 @@
       "known",
       "note",
       "state"
+    ],
+    "engine_health_arms": [
+      "embedder",
+      "hyde",
+      "reranker"
     ],
     "engine_keys": [
       "guarded",
@@ -363,6 +372,12 @@
       "stamp",
       "stamped_by",
       "state"
+    ],
+    "quarantined_note": [
+      "key",
+      "kind",
+      "path",
+      "vault"
     ],
     "refresh": [
       "attempted",

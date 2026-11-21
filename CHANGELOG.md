@@ -224,6 +224,18 @@ Every release of the engine, newest first. The format follows
     frontmatter under `_sources/` used to freeze its scope. It now composes as `unclassified`
     and `active`, is retrieved by default, and is copied into agent snapshots. Declare
     `class: conversation` on a transcript before it goes into a vault.
+- **Wire 4.** The new `status` keys (`defaulted`, `quarantined`, `identical`, `engine_keys`),
+  `drift.quarantined` and `refresh.quarantined` are reply keys a newer client relies on, so
+  `VERSION` is 4. `MIN_VERSION` stays 1: older clients ignore the keys, the write tools' new
+  refusals reach them as ordinary tool refusals, and notes that refused a scope now compose. One
+  change is breaking by the contract's own rule and was kept anyway: a note that answered at 0.2.2
+  can now be quarantined, and drops out of an older client's answers with only `refresh.note` to
+  say so.
+  [`docs/client-contract.md`](docs/client-contract.md) lists each change.
+- `contract/contract.json` declares three objects it left out: `defaulted`, `quarantined_note`
+  (each row of `status.quarantined`) and `engine_health_arms` (`retrieval_mode.health.arms`). The
+  suite now fails on any object a reply carries that the contract does not declare, except the
+  two it names: the `by_*` maps, keyed by data, and each row of `status.entities`.
 
 ### Removed
 
