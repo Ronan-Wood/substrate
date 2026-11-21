@@ -447,7 +447,7 @@ def test_a_missing_vault_prunes_nothing_it_skips(root: Path) -> None:
     unmounted vault's skipped notes would leave the index."""
     core = root / "core-vault"
     core.mkdir()
-    vault = V.VaultRef(name="core-vault", path=core, skip=V.DEFAULT_SKIP)
+    vault = V.VaultRef(name="core-vault", path=core, skip=V.DEFAULT_SKIP, keys=V.engine_keys.DEFAULT)
     found = [prune.Stale("core-vault", Path("log.md"), root / "folder", skipped=True)]
 
     with pytest.raises(prune.PruneError, match="composed zero notes"):

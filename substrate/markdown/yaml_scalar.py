@@ -102,3 +102,19 @@ def decode(raw: str) -> str:
     if len(raw) >= 2 and raw[0] == raw[-1] == '"':
         return raw[1:-1]
     return raw
+
+
+def read_as_yaml(value: str) -> str | None:
+    """`value`, a frontmatter value as written after `key:` (quotes included, not decoded), as YAML
+    reads that line: without a trailing comment, a tag or an anchor. None when YAML reads no
+    one-line text there."""
+    import yaml
+
+    try:
+        node = yaml.compose(f"k: {value}", Loader=yaml.BaseLoader)
+    except Exception:  # noqa: BLE001 — anything YAML cannot read reads as no text
+        return None
+    if not isinstance(node, yaml.MappingNode) or len(node.value) != 1:
+        return None
+    v = node.value[0][1]
+    return v.value if isinstance(v, yaml.ScalarNode) and "\n" not in v.value else None

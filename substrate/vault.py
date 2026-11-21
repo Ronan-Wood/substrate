@@ -32,11 +32,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NamedTuple
 
-from substrate import quarantine
+from substrate import engine_keys, quarantine
+from substrate.engine_keys import KeyMap
 from substrate.extract.base import doc_id_from, sha256_file  # stdlib-only; no Docling/torch
 from substrate.markdown.reader import (
-    _DOC_ID, _DOMAIN, FrontmatterError, _blocks, _parse_frontmatter, _parse_list, normalized_text,
-    unread_keys,
+    _DOC_ID, _DOMAIN, READ_KEYS, FrontmatterError, _blocks, _parse_frontmatter, _parse_list,
+    _raw_scan, canonical_forms, normalized_text, unread_keys,
 )
 from substrate.models import Kind
 
@@ -137,6 +138,9 @@ class VaultRef:
     # discovery and the prune of one compose cannot work from two readings of it. No default: a
     # VaultRef built without one would carry a list its vault never declared.
     skip: SkipList
+    # Which property each spine field is read from in THIS vault's notes (`[engine_keys]` in its
+    # own manifest, `_declared_keys`). No default, for the reason `skip` has none.
+    keys: KeyMap
 
 
 @dataclass(frozen=True)
@@ -153,6 +157,7 @@ class NoteRef:
     raw_location: str | None = None
     override_version: str | None = None  # from a versioned source's _meta.md
     extra_domains: list[str] = field(default_factory=list)  # merged from _meta.md
+    keys: KeyMap = engine_keys.DEFAULT   # its vault's renames (`VaultRef.keys`)
 
 
 class IdenticalGroup(NamedTuple):
@@ -213,11 +218,12 @@ _BARE_KEY = re.compile(r"[A-Za-z0-9_-]+")
 # outside it, `UNREAD_KEYS` and tables aside, is refused at top level (`unknown_keys`), a key in it
 # is refused inside a table
 # (`misplaced_keys`). `identity.IDENTITY_KEY` is one of them, and a test keeps the two in step.
-# `reference_pins` is the only table, and its keys are the operator's reference names, so no table
-# has a fixed schema to hold unknown keys against.
+# `reference_pins` is a table whose keys are the operator's reference names, so it has no fixed
+# schema to hold unknown keys against. `engine_keys` is the one table that has, and it is checked
+# key by key (`_declared_keys`), with a table named like it refused (`_near_table`).
 TOP_LEVEL_KEYS: frozenset[str] = frozenset(
     {"name", "inherits", "reference_domains", "reference_pins", "identity", "skip",
-     "writable_folders", quarantine.CEILING_KEY})
+     "writable_folders", quarantine.CEILING_KEY, engine_keys.TABLE})
 
 # Top-level keys the engine accepts and never reads, so they are not unknown. `guard_state` was
 # retired in 0.2.1 with the promise that a manifest still declaring it composes. Scripta writes the
@@ -376,7 +382,118 @@ def _read_manifest(vault_dir: Path) -> dict:
         raise VaultError(f"{path}: malformed domain tag(s) {bad_domains}.")
     _declared_skip(manifest, path)
     _declared_ceiling(manifest, path)
+    _declared_keys(manifest, path)
     return manifest
+
+
+# What a renamed property may be called: a bare name the reader takes as YAML would, at most 64
+# characters. Not a pattern of the reader's own: a name it would also take, and one an editor
+# keeps as written.
+_PROPERTY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]{0,63}")
+
+
+def _near_table(manifest: dict, path: Path) -> None:
+    """Refuse a top-level table that looks meant as `engine_keys` but is not it: one named like it
+    (`[engine-keys]`, `[Engine_Keys]`, `[engine_key]`), or one of any other name that holds only
+    spine fields with string values (`[spine_keys] class = "substrate_class"`). Tables are left
+    open, so a misnamed one is read by nobody, and every rename in it would be dropped without a
+    word: a call's class under the new name would be unread, and the note indexed as
+    unclassified, retrieved by default. A heuristic: a rename written into a table that also holds
+    other keys is not caught."""
+    want = canonical_forms(engine_keys.TABLE)
+    for key, value in manifest.items():
+        if key in (engine_keys.TABLE, "reference_pins") or not isinstance(value, dict):
+            continue
+        near = bool(canonical_forms(key) & want) or _nearest_key(key, (engine_keys.TABLE,))
+        shaped = bool(value) and all(k in engine_keys.FIELDS and isinstance(v, str)
+                                     for k, v in value.items())
+        if near or shaped:
+            raise VaultError(
+                f"{path}: the table [{_shown(key)[1:-1]}] is not one the manifest defines (did you "
+                f"mean [{engine_keys.TABLE}]?). The engine reads which property each spine field "
+                f"comes from only under [{engine_keys.TABLE}], spelled exactly, and a table of "
+                f"another name is read by nothing; refusing rather than compose this vault's notes "
+                f"under keys its manifest may mean to rename.")
+
+
+def _declared_keys(manifest: dict, path: Path) -> KeyMap:
+    """The renames the parsed manifest at `path` declares under `[engine_keys]`, as a KeyMap;
+    the default reading when it declares none. Anything the engine cannot apply exactly as written
+    refuses, naming it, because a rename misread as none quarantines the vault's notes at best,
+    and at worst reads a call's class from nowhere:
+
+      * the table is not a table, or is named like it (`_near_table`);
+      * a field that is not one of `engine_keys.FIELDS`;
+      * a name that is not a string matching `_PROPERTY`;
+      * a name the engine already reads or writes, or one it would compare with such a key
+        (`reader.canonical_forms`): `status = "Status"`, `class = "title"`, `status = "status"`
+        (a rename to itself is no rename);
+      * two fields renamed to one name, compared the same way.
+    """
+    _near_table(manifest, path)
+    if engine_keys.TABLE not in manifest:
+        return engine_keys.DEFAULT
+    table = manifest[engine_keys.TABLE]
+    if not isinstance(table, dict):
+        raise VaultError(f"{path}: '{engine_keys.TABLE}' must be a table, [{engine_keys.TABLE}], "
+                         f"of field = \"property name\"; it is a {type(table).__name__}.")
+    unknown = [k for k in table if k not in engine_keys.FIELDS]
+    if unknown:
+        near = [(k, n) for k in unknown if (n := _nearest_key(k, engine_keys.FIELDS))]
+        guess = (f" (did you mean {', '.join(f'{n!r} for {_shown(k)}' for k, n in near)}?)"
+                 if near else "")
+        raise VaultError(
+            f"{path}: [{engine_keys.TABLE}] names {', '.join(map(_shown, unknown[:_SHOWN_KEYS]))}"
+            f"{guess}, and the fields a vault may rename are "
+            f"{', '.join(engine_keys.FIELDS)}, spelled exactly. Refusing rather than leave a "
+            f"rename unread.")
+    from substrate.writelog import STAMP_KEYS
+
+    taken = {f: k for k in READ_KEYS | set(STAMP_KEYS) for f in canonical_forms(k)}
+    claimed: dict[str, str] = {}
+    renamed = []
+    for spine_field in engine_keys.FIELDS:
+        if spine_field not in table:
+            continue
+        name = table[spine_field]
+        if not isinstance(name, str) or not _PROPERTY.fullmatch(name):
+            shown = _shown(name) if isinstance(name, str) else type(name).__name__
+            raise VaultError(
+                f"{path}: [{engine_keys.TABLE}] {spine_field} must be a property name: a letter or `_`, "
+                f"then letters, digits, `_` or `-`, at most 64 in all; it is {shown}.")
+        forms = canonical_forms(name)
+        clash = next((taken[f] for f in forms if f in taken), None)
+        if clash is not None:
+            what = ("its own name, which is no rename: leave it out" if clash in
+                    engine_keys.DEFAULT_NAMES[spine_field] else
+                    f"the engine's own key `{clash}`" if clash == name else
+                    f"`{clash}` spelled another way, a key the engine reads or writes itself")
+            raise VaultError(f"{path}: [{engine_keys.TABLE}] {spine_field} = {name!r} is {what}. A "
+                             f"renamed field needs a name of the vault's own.")
+        twice = next((claimed[f] for f in forms if f in claimed), None)
+        if twice is not None:
+            raise VaultError(f"{path}: [{engine_keys.TABLE}] renames {twice} and {spine_field} to "
+                             f"{name!r} (or names compared as one): one property can hold one "
+                             f"field.")
+        claimed.update(dict.fromkeys(forms, spine_field))
+        renamed.append((spine_field, name))
+    return KeyMap(tuple(renamed))
+
+
+def keys_of(vault_dir: Path) -> KeyMap:
+    """The renames in effect for ONE vault's notes, for the write path: its own manifest's
+    `[engine_keys]`, else none. ONLY that table is read (`_own_key`), so a fault elsewhere in the
+    manifest does not change it. A misspelt table is a table, which `_near_table` refuses when it
+    can tell (a name like it, or a table of spine fields alone), so an unknown key that is not a
+    table cannot be it and is left to compose. A manifest that cannot be read
+    or parsed, the table swallowed into another, a table named like it, or one the engine cannot
+    apply makes the renames unknowable, and that raises VaultError."""
+    read = _own_key(vault_dir, engine_keys.TABLE, "which property each spine field is read from",
+                    unknown=False)
+    if read is None:
+        return engine_keys.DEFAULT
+    path, manifest = read
+    return _declared_keys(manifest, path)
 
 
 def _declared_ceiling(manifest: dict, path: Path) -> int | str | None:
@@ -501,12 +618,14 @@ def folder_parts(entry: str) -> tuple[str, ...]:
     return () if entry == "." else tuple(entry.split("/"))
 
 
-def _own_key(vault_dir: Path, key: str, what: str) -> tuple[Path, dict] | None:
+def _own_key(vault_dir: Path, key: str, what: str, *,
+             unknown: bool = True) -> tuple[Path, dict] | None:
     """(manifest path, parsed manifest) for a reader of ONE key, or None when the vault has no
     manifest. Refuses, as VaultError, a manifest that cannot be read or parsed (`what` says what
     that leaves unknown), a `key` swallowed into a table, and an unknown key while `key` is absent
-    (`_unknown_may_be`). The other keys are not validated: a fault elsewhere in the manifest does
-    not change what this key says."""
+    (`_unknown_may_be`) unless `unknown` is off, for a key whose misspelling cannot be one: a
+    table's, which `unknown_keys` never reports. The other keys are not validated: a fault
+    elsewhere in the manifest does not change what this key says."""
     path = vault_dir / MANIFEST
     if not path.is_file():
         return None
@@ -517,7 +636,8 @@ def _own_key(vault_dir: Path, key: str, what: str) -> tuple[Path, dict] | None:
     swallowed = [(k, t) for k, t in misplaced_keys(manifest) if k == key]
     if swallowed:
         raise VaultError(misplaced_refusal(path, swallowed))
-    _unknown_may_be(manifest, path, key, f"{what} is unknown")
+    if unknown:
+        _unknown_may_be(manifest, path, key, f"{what} is unknown")
     return path, manifest
 
 
@@ -575,6 +695,34 @@ def writable_folders(vault_dir: Path, skip: SkipList) -> tuple[tuple[str, ...], 
             f"{path}: 'writable_folders' entries {skipped} (counting from 1) are under a folder "
             f"the vault's skip list skips, so a note written there would never be indexed.")
     return folders
+
+
+def foreign_values(vault_dir: Path) -> dict[str, int]:
+    """For each spine field the vault still reads under the engine's own name, how many of its
+    notes give it a value of their own: one outside the engine's vocabulary, which compose
+    quarantines and `[engine_keys]` would leave to the vault. A field the vault renamed already is
+    left out (a value outside the vocabulary under the new name is a typo, not a reason to rename),
+    and so is a passage's own `class` where its source's `_meta.md` supplies it, which compose
+    reads instead. A field no note gives a value of its own is left out. The notes are those
+    compose discovers in this vault alone (`_discover_notes`); one that cannot be read is not
+    counted.
+
+    For `substrate init`, to say which fields to rename before the first compose. Raises VaultError
+    as compose's discovery does, and when the vault's skip list or renames cannot be known
+    (`skip_list`, `keys_of`)."""
+    from collections import Counter
+
+    vault_dir = vault_dir.expanduser().resolve()
+    keys = keys_of(vault_dir)
+    ref = VaultRef(name=vault_dir.name, path=vault_dir, skip=skip_list(vault_dir), keys=keys)
+    counts: Counter[str] = Counter()
+    for n in _discover_notes(ref):
+        try:
+            front, _ = _parse_frontmatter(_read_capped(n.path))
+        except VaultError:
+            continue
+        counts.update(engine_keys.fixable(front, keys, n.doc_class))
+    return {f: counts[f] for f in engine_keys.FIELDS if counts[f]}
 
 
 def _resolve_inherit(entry: str, project_dir: Path) -> Path:
@@ -704,7 +852,7 @@ def _source_meta(note_path: Path, vault_root: Path) -> dict:
 _SPINE_KEYS: frozenset[str] = frozenset({"doc_type", "status", "confidence", "domains"})
 
 
-def _refuse_skipped_note_with_a_spine(path: Path) -> None:
+def _refuse_skipped_note_with_a_spine(path: Path, keys: KeyMap = engine_keys.DEFAULT) -> None:
     """Refuse a skipped file that declares a spine, rather than dropping it silently.
 
     `path` is a file its vault's skip list names, the default list or a declared one. Doc 2 §4
@@ -724,6 +872,9 @@ def _refuse_skipped_note_with_a_spine(path: Path) -> None:
     An unreadable file is skipped, not refused: it cannot have declared anything, and these paths
     were never opened before this check existed — so a broken symlink or a non-UTF-8 `log.md` must
     not become the reason a whole scope fails to compose.
+
+    The spine keys are the ones the vault's manifest has the engine read (`keys`): once `status` is
+    renamed, a `log.md` with `status: done` declares nothing, and one with the new name does.
     """
     if path.name == SOURCE_META:
         return
@@ -731,9 +882,12 @@ def _refuse_skipped_note_with_a_spine(path: Path) -> None:
         text = _read_capped(path)
     except VaultError:
         return
+    spine_keys = {n for k in _SPINE_KEYS
+                  for n in (keys.reads(k) if k in engine_keys.FIELDS else (k,))}
     front, _ = _parse_frontmatter(text)
-    declared = sorted({k for k in front if k in _SPINE_KEYS}
-                      | {k for k, _ in unread_keys(text) if k in _SPINE_KEYS})
+    declared = sorted({k for k in front if k in spine_keys}
+                      | {k for k, _ in unread_keys(text, READ_KEYS | spine_keys)
+                         if k in spine_keys})
     if not declared:
         return
     raise VaultError(
@@ -755,7 +909,7 @@ def _discover_notes(vault: VaultRef) -> list[NoteRef]:
         if skip.skips_folder(rel_parts):
             continue
         if skip.skips_file(path.name):
-            _refuse_skipped_note_with_a_spine(path)
+            _refuse_skipped_note_with_a_spine(path, vault.keys)
             continue
         meta = _source_meta(path, vault.path)
         notes.append(NoteRef(
@@ -766,6 +920,7 @@ def _discover_notes(vault: VaultRef) -> list[NoteRef]:
             raw=meta.get("raw"), raw_sha256=meta.get("raw_sha256"),
             raw_location=meta.get("raw_location"),
             override_version=meta.get("version"), extra_domains=list(meta.get("domains", [])),
+            keys=vault.keys,
         ))
     return notes
 
@@ -798,14 +953,15 @@ def resolve_vaults(project_vault: Path) -> tuple[VaultRef, ...]:
         if vault_dir in seen_paths:
             return
         manifest_path = vault_dir / MANIFEST
-        skip = DEFAULT_SKIP
+        skip, keys = DEFAULT_SKIP, engine_keys.DEFAULT
         if manifest_path.is_file():
             manifest = _read_manifest(vault_dir)
             skip = _declared_skip(manifest, manifest_path)
+            keys = _declared_keys(manifest, manifest_path)
             for entry in manifest.get("inherits", []):
                 visit(_resolve_inherit(entry, vault_dir), (*chain, vault_dir))
         seen_paths.add(vault_dir)
-        ordered.append(VaultRef(name=vault_dir.name, path=vault_dir, skip=skip))
+        ordered.append(VaultRef(name=vault_dir.name, path=vault_dir, skip=skip, keys=keys))
 
     visit(project_vault, ())
     return tuple(ordered)
@@ -945,7 +1101,9 @@ def resolve_scope(project_vault: Path) -> Scope:
     #     be the same bytes, or both absent: two versions of a standard can hold the same passage
     #     under one name, and leaving one out would drop it from that version, and ingest judges a
     #     passage on its `_meta.md`, so a copy must not wait on a note that fails for a file the
-    #     copy does not share. A copy in an inherited vault is left out for the project's, so a
+    #     copy does not share. Their vaults must read the note alike, too: a copy whose note writes
+    #     a spine field two vaults read from different names (`[engine_keys]`, `_read_with`)
+    #     refuses the scope. A copy in an inherited vault is left out for the project's, so a
     #     search filtered to the inherited vault no longer finds that text.
     #
     # STILL A WHOLE-SCOPE FAULT, so the scope is refused: a doc_id that a note DECLARES and another
@@ -957,7 +1115,9 @@ def resolve_scope(project_vault: Path) -> Scope:
     # A NOTE WHOSE BYTES ARE NOT A NOTE is left out of these checks and listed in `unreadable`,
     # where compose quarantines it. It cannot overwrite another note at index time, because it is
     # never indexed.
-    by_id: dict[str, list[tuple[NoteRef, bool, str, str | None]]] = {}
+    by_id: dict[str, list[tuple[NoteRef, bool, str, str | None, str]]] = {}
+    # Only when a vault renames does a copy's reading depend on its vault (`_read_with`).
+    renaming = any(v.keys.renamed for v in ordered)
     by_text: dict[str, list[NoteRef]] = {}
     bodiless: set[str] = set()
     unreadable: dict[Path, tuple[str, str]] = {}
@@ -985,7 +1145,8 @@ def resolve_scope(project_vault: Path) -> Scope:
         except OSError as e:
             raise VaultError(f"cannot read {n.path}: {e}") from e
         eff = fid if declared else doc_id_from(n.path.stem, sha)
-        by_id.setdefault(eff, []).append((n, declared, sha, _meta_sha(n.path, where[n.path][1])))
+        by_id.setdefault(eff, []).append((n, declared, sha, _meta_sha(n.path, where[n.path][1]),
+                                          _read_with(raw, n.keys) if renaming else ""))
         text = hashlib.sha256(raw.encode("utf-8", "surrogateescape")).hexdigest()
         by_text.setdefault(text, []).append(n)
         if not _has_body(body):
@@ -1064,8 +1225,27 @@ def _first_by_path(where: Mapping[Path, tuple[int, Path]]):
 
 def _composed_alike(n: NoteRef) -> NoteRef:
     """What a note's source adds when compose reads it: its NoteRef, by construction, less where
-    it is."""
-    return replace(n, path=Path(), vault="", tier=0)
+    it is and its vault's renames, which `_read_with` compares on their own."""
+    return replace(n, path=Path(), vault="", tier=0, keys=engine_keys.DEFAULT)
+
+
+def _read_with(raw: str, keys: KeyMap) -> str:
+    """How a vault renaming as `keys` says reads `raw`, a note's text, as far as its renames
+    matter: for each spine field the note's frontmatter writes, under its own names or the vault's
+    new one, in any spelling the engine compares as that key, the field and the name the vault reads
+    it from (None for its own). Two copies of a note stand for each other only when this agrees, so
+    a project that renames `class` and a vault it inherits that renames nothing read a copy alike
+    unless it writes `class`, `document_class` or the new name."""
+    new = {n for _, n in keys.renamed}
+    scan = _raw_scan(raw, READ_KEYS | new)
+    written = {f for k, _ in scan.pairs or () for f in canonical_forms(k)} | {
+        f for k, _ in scan.problems for f in canonical_forms(k)}
+    touched = {}
+    for spine_field in engine_keys.FIELDS:
+        names = (*engine_keys.DEFAULT_NAMES[spine_field], *keys.reads(spine_field))
+        if any(canonical_forms(n) & written for n in names):
+            touched[spine_field] = keys.name_of(spine_field)
+    return json.dumps(touched, sort_keys=True)
 
 
 def _refuse_one_file(a: Path, b: Path, a_root: Path, b_root: Path) -> None:
@@ -1107,12 +1287,13 @@ def _refuse_shared_file(notes: list[NoteRef], roots: Mapping[Path, Path]) -> Non
             _refuse_one_file(other.path, n.path, roots[other.path], roots[n.path])
 
 
-def _refuse_unshared_id(eff: str, claims: list[tuple[NoteRef, bool, str, str | None]],
+def _refuse_unshared_id(eff: str, claims: list[tuple[NoteRef, bool, str, str | None, str]],
                         roots: Mapping[Path, Path]) -> None:
     """Refuse, naming two of the notes, when the notes claiming doc_id `eff` (first by path) are
-    not copies one may stand for: any of them declares it, their bytes differ, or their sources
-    compose them differently. Otherwise return, and the first is indexed for all of them."""
-    (a, a_declared, a_sha, a_meta), *rest = claims
+    not copies one may stand for: any of them declares it, their bytes differ, their sources
+    compose them differently, or their vaults' renames read them differently (`_read_with`).
+    Otherwise return, and the first is indexed for all of them."""
+    (a, a_declared, a_sha, a_meta, a_read), *rest = claims
     _refuse_shared_file([c[0] for c in claims], roots)
     if a_declared or any(c[1] for c in rest):
         b, b_declared, *_ = rest[0] if a_declared else next(c for c in rest if c[1])
@@ -1125,7 +1306,7 @@ def _refuse_unshared_id(eff: str, claims: list[tuple[NoteRef, bool, str, str | N
             "A declared doc_id is the owner's, so the engine does not choose between them. If "
             "one is a copy of the other (a file sync's conflict copy carries the declaration "
             "too), delete or merge it; otherwise give one a doc_id of its own.")
-    for b, _, b_sha, b_meta in rest:
+    for b, _, b_sha, b_meta, b_read in rest:
         if b_sha != a_sha:
             raise VaultError(
                 f"doc_id {eff!r} is derived by two notes whose bytes differ: {a.path} and "
@@ -1138,6 +1319,13 @@ def _refuse_unshared_id(eff: str, claims: list[tuple[NoteRef, bool, str, str | N
                 f"{b.path}, whose sources compose them differently: their `_meta.md` files are "
                 "not the same bytes. Neither can stand for the other, and one would silently "
                 "replace the other at index time. Rename one.")
+        if b_read != a_read:
+            raise VaultError(
+                f"doc_id {eff!r} is derived by two notes with the same bytes, {a.path} and "
+                f"{b.path}, in vaults that read their frontmatter differently: their manifests "
+                f"rename the spine keys differently ([{engine_keys.TABLE}]), and the note writes "
+                "one of them. Neither can stand for the other, and one would silently replace the "
+                "other at index time. Rename one, or rename the keys alike in both vaults.")
 
 
 # The marker each copy's line starts with in compose's output (`Scope.duplicates`).

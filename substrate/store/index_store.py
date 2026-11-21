@@ -562,6 +562,40 @@ class IndexStore:
         return [{"vault": r[0], "path": r[1], "source_path": r[2], "fingerprint": r[3],
                  "reason": r[4], "kind": r[6], "key": r[7]} for r in rows]
 
+    def set_engine_keys(self, rows: list[tuple[str, str]]) -> None:
+        """Replace every `engine_keys` row with `rows`, each (a vault's resolved path, its renames'
+        signature), stamped with the index's version now. Compose calls it beside
+        `set_quarantined`, for the vaults that rename anything."""
+        stamp = self.index_version
+        self.db.execute("BEGIN")
+        try:
+            self.db.execute(schema.ENGINE_KEYS)
+            self.db.execute("DELETE FROM engine_keys")
+            self.db.executemany(
+                "INSERT INTO engine_keys(vault_path, renamed, index_version) VALUES (?,?,?)",
+                [(*r, stamp) for r in rows])
+            self.db.execute("COMMIT")
+        except Exception:
+            self.db.execute("ROLLBACK")
+            raise
+
+    def engine_keys(self) -> dict[str, str]:
+        """The renames' signature each vault was last composed with, by its resolved path. A vault
+        with no row was composed with none, and so was every vault when the file has no table or
+        its rows carry another `index_version`: only an engine from before the table, which reads
+        no renames, leaves either."""
+        try:
+            rows = self.db.execute(
+                "SELECT vault_path, renamed, index_version FROM engine_keys").fetchall()
+        except sqlite3.OperationalError as e:
+            if "no such table" not in str(e):
+                raise
+            return {}
+        now = self.index_version if rows else None
+        if any(r[2] != now for r in rows):
+            return {}
+        return {r[0]: r[1] for r in rows}
+
     def defaulted_by_doc(self) -> dict[str, list[str]]:
         """Each document's `spine_defaults` rows, in `spine.DEFAULTED_FIELDS` order."""
         try:

@@ -74,6 +74,9 @@ WIRE_OBJECTS: dict[str, tuple[str, str, tuple[int, ...], str | None]] = {
     "arms": ("introspect.py", "arms", (0,), None),
     "vector": ("introspect.py", "vector_status", (0,), None),
     "status": ("introspect.py", "status_payload", (0,), "out"),
+    # `status.engine_keys`, and each row of its `renamed`: one per spine field a vault renames.
+    "engine_keys_renamed": ("introspect.py", "engine_keys_block", (0,), None),
+    "engine_keys": ("introspect.py", "engine_keys_block", (1,), None),
     # `status.drift` when the drift could not be checked: two branches.
     "drift_unchecked": ("introspect.py", "status_payload", (1, 2), None),
     "scope_row": ("introspect.py", "scopes_payload", (0,), "row"),

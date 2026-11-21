@@ -140,7 +140,13 @@ def test_every_meta_key_the_vault_maps_is_read_by_the_reader() -> None:
     drift that produced the original bug — this pins the intersection so it cannot reopen."""
     import re
     root = Path(__file__).resolve().parent.parent / "substrate"
-    reader_keys = set(re.findall(r'front\.get\("([a-z_]+)"', (root / "markdown/reader.py").read_text()))
+    # A spine field is read through `declared(field)`, under the names `engine_keys` gives it.
+    from substrate.engine_keys import DEFAULT_NAMES
+
+    text = (root / "markdown/reader.py").read_text()
+    reader_keys = set(re.findall(r'front\.get\("([a-z_]+)"', text)) | {
+        name for field in re.findall(r'declared\("([a-z_]+)"\)', text)
+        for name in DEFAULT_NAMES[field]}
     vault_keys = set(re.findall(r'front\.get\("([a-z_]+)"\)', (root / "vault.py").read_text()))
     missing = vault_keys - reader_keys
     assert not missing, (

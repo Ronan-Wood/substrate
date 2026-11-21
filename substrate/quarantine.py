@@ -63,6 +63,8 @@ KINDS: frozenset[str] = frozenset({
     "engine_key_spelled_another_way",  # `Status:`, `doc-type:`, `"class":` (`spine.EXACT_SPELLING`)
     "opening_block_unread",            # a default over a `---` block the reader did not take whole
     "missing_required_field",          # a field the note's class requires is absent
+    "withheld_value_under_renamed_key",  # `status: archived`, `class: conversation` under a key
+                                         # the vault renamed (`engine_keys.GUARD_KIND`)
     "source_meta_unreadable",          # a passage's `_meta.md` could not be read at ingest
     "coverage_loss",                   # A18: ingest would drop the note's content
     "per_note_assertion",              # A22: a per-note assertion failed

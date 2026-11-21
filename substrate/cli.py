@@ -1232,7 +1232,42 @@ def _fingerprint(n, scope) -> str | None:
     from substrate import vault as _vault
 
     return freshness.quarantine_fingerprint(
-        n.path, _vault.source_meta_path(n.path, scope.root(n)))
+        n.path, _vault.source_meta_path(n.path, scope.root(n)), n.keys.signature)
+
+
+def _say_engine_keys(quarantined, scope) -> None:
+    """Under an over-ceiling refusal, when notes failed for a value outside the vocabulary under a
+    spine key a rename would free (`engine_keys.fixable`, the rule `substrate init` counts by):
+    how many, per key, and the `[engine_keys]` lines that would have the engine read the field from
+    another property. Engine key names, counts and manifest paths only."""
+    from substrate import engine_keys
+    from substrate import vault as _vault
+    from substrate.markdown.reader import _parse_frontmatter
+
+    hits = []
+    for n, kind, key, _ in quarantined:
+        if kind != "outside_vocabulary" or key not in engine_keys.FIELD_OF:
+            continue
+        try:
+            front, _ = _parse_frontmatter(_vault._read_capped(n.path))
+        except _vault.VaultError:
+            continue
+        if engine_keys.FIELD_OF[key] in engine_keys.fixable(front, n.keys, n.doc_class):
+            hits.append((n, engine_keys.FIELD_OF[key]))
+    if not hits:
+        return
+    counts = Counter(f for _, f in hits)
+    fields = [f for f in engine_keys.FIELDS if counts[f]]
+    manifests = sorted({str(scope.root(n) / _vault.MANIFEST) for n, _ in hits})
+    print(f"\n  {len(hits)} of them hold a value of the vault's own under "
+          + ", ".join(f"`{f}` ({counts[f]})" for f in fields)
+          + ". If the vault uses that property for its own values, have the engine read the "
+            "field from another property: in "
+          + " or ".join(manifests)
+          + f", under [{engine_keys.TABLE}], for example "
+          + ", ".join(engine_keys.example_lines(fields)[1:])
+          + f". The vault's own property is then left alone ({engine_keys.DOCS}).",
+          file=sys.stderr)
 
 
 def cmd_compose(args: argparse.Namespace) -> int:
@@ -1457,7 +1492,7 @@ def _compose(args: argparse.Namespace, report) -> int:
                 override_version=n.override_version,
                 extra_domains=n.extra_domains, vault=n.vault,
                 vault_root=scope.root(n),
-                tier=n.tier,
+                tier=n.tier, keys=n.keys,
             )
         except OutputDirError as e:
             # The index root's fault, not the note's: a link or another user's folder where this
@@ -1533,6 +1568,8 @@ def _compose(args: argparse.Namespace, report) -> int:
                   file=sys.stderr)
         for n, _, _, why in quarantined:
             print(f"    {_quarantine.shown(str(n.path))}: {why}", file=sys.stderr)
+        if decision.refusal == _quarantine.CEILING:
+            _say_engine_keys(quarantined, scope)
         return 3
     # Which note each doc_id is read from: several notes can derive one (`Scope.duplicates`).
     sources = {results[p][0]: p for p in decision.indexed}
@@ -1611,6 +1648,9 @@ def _compose(args: argparse.Namespace, report) -> int:
             (str(n.path), n.vault, scope.relative(n), fingerprints.get(n.path),
              kind, key, why)
             for n, kind, key, why in quarantined if str(n.path.resolve()) not in held_now])
+        # The renames each vault's notes were just read with, for `drift`.
+        store.set_engine_keys([(str(v.path), v.keys.signature)
+                               for v in scope.vaults if v.keys.renamed])
         # The pass's report, only now the record is committed: what was removed, and what is left
         # out, each a record (`compose_report`) with the kind and key and no text from a note.
         for s_ in removed:
@@ -2114,6 +2154,17 @@ def cmd_status(args: argparse.Namespace) -> int:
         if ident["empty"]:
             print(f"  identical: {ident['empty']} note(s) with no body share their bytes with "
                   f"another (each indexed, holding nothing)")
+    # Which spine keys a vault's manifest renames, and how many notes the guard holds: a rename
+    # changes what a note's frontmatter means, so it is said here rather than left to the manifest.
+    ek = payload["engine_keys"]
+    if ek is not None and ek["renamed"] is None:
+        print("  engine keys: UNKNOWN — the scope's vaults could not be resolved (see drift)")
+    elif ek is not None and ek["renamed"]:
+        print("  engine keys renamed: " + " · ".join(
+            f"{_quarantine.shown(r['vault'])}: {r['field']} from "
+            f"`{_quarantine.shown(r['key'])}`" for r in ek["renamed"])
+              + ("" if ek["guarded"] is None else
+                 f"  ·  {ek['guarded']} note(s) held by the guard"))
     v = payload["vectors"]
     if v is None:
         # "Not asked for" and "asked for, could not start" are the SAME None here, and stating the
@@ -3542,6 +3593,7 @@ def cmd_init(args: argparse.Namespace) -> int:
 
     folder = _shell(str(plan.vault))
     print(f"wrote {_shell(str(path))}: scope {plan.name!r}, {plan.source}")
+    _say_foreign_values(plan.vault, path)
     if plan.notes == 0:
         print(f"nothing to index yet: {folder} holds no .md note, and compose refuses a vault "
               f"with none. Add a note, then run:")
@@ -3552,6 +3604,33 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"  substrate compose {folder}")
         print(f"  substrate search --scope {_shell(plan.name)} \"your question\"")
     return 0
+
+
+def _say_foreign_values(vault: Path, manifest: Path) -> None:
+    """After `init` writes the manifest: which spine fields the vault's notes give values of their
+    own (`vault.foreign_values`), which compose would quarantine, and the `[engine_keys]` lines
+    that would have the engine read those fields from other properties. Said, never written:
+    `init` writes `name` alone, and whether `status: done` is the vault's own value or a slip is
+    the owner's to say. Field names, counts and the manifest's path only, never a value from a
+    note. A vault the check cannot read is said so; compose says why."""
+    from substrate import engine_keys
+    from substrate import vault as _vault
+
+    try:
+        found = _vault.foreign_values(vault)
+    except _vault.VaultError as e:
+        print(f"could not check the notes' spine values: {_printable(str(e))}")
+        return
+    if not found:
+        return
+    print("values of the vault's own under the engine's spine keys, which compose quarantines "
+          "(and past the quarantine ceiling, refuses the scope for): "
+          + ", ".join(f"`{f}` in {n} note{'s' if n != 1 else ''}" for f, n in found.items()))
+    print(f"if the vault uses those properties for its own values, have the engine read the "
+          f"fields from other properties: add to {_shell(str(manifest))}")
+    for line in engine_keys.example_lines(found):
+        print(f"  {line}")
+    print(f"  ({engine_keys.DOCS})")
 
 
 def _printable(text: str) -> str:

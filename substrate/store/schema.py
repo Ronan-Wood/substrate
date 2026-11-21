@@ -137,6 +137,10 @@ SCHEMA_VERSION = 11
 #     adds it to a v11 file at the next compose. A file without it reports the list as not kept
 #     (`IndexStore.quarantined`), never as empty. An engine that predates it quarantines nothing:
 #     its compose refuses the scope instead.
+#     2026-11-19, still v11: `engine_keys`, one row per vault the last compose read with renamed
+#     spine keys (`substrate/engine_keys.py`), so `drift` can tell a note that reads differently
+#     with the same bytes. NO BUMP, for the same reason. A file without it, or rows another
+#     engine's compose left behind, were composed with no renames, which is what an absent row says.
 
 # The triggers that keep `vector_generation.n` moving. A reader trusts `n` only while all of them
 # exist: an engine that predates them can rebuild `chunk_vectors` without them and then write
@@ -168,6 +172,15 @@ QUARANTINE = """CREATE TABLE IF NOT EXISTS quarantine(
     kind          TEXT NOT NULL,
     key           TEXT,
     reason        TEXT NOT NULL,
+    index_version TEXT NOT NULL
+);"""
+
+# The renames the last compose read each vault's notes with (schema history above): the vault's
+# resolved path, and `engine_keys.KeyMap.signature`. A vault that renames nothing has no row.
+# `index_version` as on `quarantine`, and for the same reason.
+ENGINE_KEYS = """CREATE TABLE IF NOT EXISTS engine_keys(
+    vault_path    TEXT PRIMARY KEY,
+    renamed       TEXT NOT NULL,
     index_version TEXT NOT NULL
 );"""
 

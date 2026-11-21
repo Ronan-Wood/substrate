@@ -186,7 +186,7 @@ def test_compose_does_not_discover_an_upper_case_md(tmp_path):
     there. Discovery matches `*.md` by case on macOS and Linux alike."""
     (tmp_path / "notes.MD").write_text("Body.\n", "utf-8")
     (tmp_path / "kept.md").write_text("Body two.\n", "utf-8")
-    ref = vault.VaultRef(name="v", path=tmp_path, skip=vault.DEFAULT_SKIP)
+    ref = vault.VaultRef(name="v", path=tmp_path, skip=vault.DEFAULT_SKIP, keys=vault.engine_keys.DEFAULT)
     assert [n.path.name for n in vault._discover_notes(ref)] == ["kept.md"]
 
 

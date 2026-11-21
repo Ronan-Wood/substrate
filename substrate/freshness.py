@@ -123,11 +123,13 @@ def read_bounded(src: Path, cap: int, *, nofollow: bool = False,
         os.close(fd)
 
 
-def quarantine_fingerprint(note: Path, meta: Path | None) -> str | None:
+def quarantine_fingerprint(note: Path, meta: Path | None, keys: str = "") -> str | None:
     """What a quarantined note was judged on, hashed: the note's bytes, its source's `_meta.md`
-    (a passage's class and spine come from there), and the engine's note format
-    (`spine.NOTES_VERSION`, which moves when the vocabulary does). Compose stores it and `drift`
-    compares it, so a note counts as still quarantined only while none of them has changed. None
+    (a passage's class and spine come from there), the engine's note format
+    (`spine.NOTES_VERSION`, which moves when the vocabulary does), and the renames its vault's
+    manifest declares (`keys`, `engine_keys.KeyMap.signature`; none leaves the hash as it was).
+    Compose stores it and `drift` compares it, so a note counts as still quarantined only while
+    none of them has changed. None
     when a file cannot be read or is over the vault's size cap. Every read is bounded by the read
     itself, so a note quarantined for its size (a sparse file of any length) is never read whole,
     by compose or by every `status`; a note still over the cap matches its stored None."""
@@ -135,6 +137,8 @@ def quarantine_fingerprint(note: Path, meta: Path | None) -> str | None:
     from substrate.vault import _MAX_BYTES
 
     h = hashlib.sha256(f"notes-v{NOTES_VERSION}\0".encode())
+    if keys:
+        h.update(f"keys\0{keys}\0".encode())
     try:
         for path in (note, meta):
             data = b"" if path is None else read_bounded(path, _MAX_BYTES)
@@ -145,7 +149,7 @@ def quarantine_fingerprint(note: Path, meta: Path | None) -> str | None:
 
 
 def drift(store, note_paths: list[Path], quarantined: list[dict] | None = None,
-          fingerprint=None) -> dict:
+          fingerprint=None, reread=None) -> dict:
     """Compare the notes on disk against what this index holds.
 
     `note_paths` is the composed scope's note set (`vault.resolve_scope(...).notes`), so "added"
@@ -158,6 +162,10 @@ def drift(store, note_paths: list[Path], quarantined: list[dict] | None = None,
     recomposing would quarantine it again, so it does not make the scope stale. One whose note,
     `_meta.md` or the engine's note format changed since is `added`, because the next compose may
     index it.
+
+    `reread` says of a note's path whether its vault's renames (`[engine_keys]`) are not the ones
+    the index was composed under: such a note reads differently with the same bytes, so it is
+    `changed` without its bytes being compared.
 
     Returns counts plus the paths involved, and `stale` — true if ANY of the three differ.
     """
@@ -185,6 +193,10 @@ def drift(store, note_paths: list[Path], quarantined: list[dict] | None = None,
     checked = 0
     unreadable: list[str] = []
     for path_str in sorted(set(indexed) & set(on_disk)):
+        if reread is not None and reread(on_disk[path_str]):
+            checked += 1
+            changed.append(path_str)
+            continue
         try:
             raw = on_disk[path_str].read_bytes()
         except OSError:

@@ -51,6 +51,30 @@ Every release of the engine, newest first. The format follows
   its JSON. **`substrate help [command]`** prints what `--help` prints.
 - **`search` is the CLI's name for `query`,** as it is the MCP tool's. `query` is the same
   command, with the same flags, output and exit codes.
+- **`[engine_keys]`, a manifest table, has the engine read a spine field from another property,**
+  for a vault whose notes use `status`, `doc_type`, `confidence` or `class` for values of their
+  own (`status: done`, `class: Math 101`). Such a note was quarantined as a value outside the
+  vocabulary, and past the ceiling the scope refused. With `status = "substrate_status"` the
+  engine reads the note's status from `substrate_status`, and the vault's own `status` is left
+  alone. Each field is renamed on its own and none by default, so a vault with no table reads as
+  before. Under the new name the field is judged as before: a value outside the vocabulary is
+  quarantined, no value is mapped or defaulted, and the name is read under exactly that spelling.
+  Each vault's manifest renames for its own notes only, and a source's `_meta.md` is always read
+  under the engine's names. When the old name still holds a value that would withhold or freeze
+  the note under the engine's own name (`archived`, `superseded`, `conversation`,
+  `reference-frozen`), as the engine or YAML reads it, and the note does not declare that value
+  under the new name, the note is quarantined as `withheld_value_under_renamed_key`, and `amend`
+  refuses it, so a call written for the engine is never indexed as a live note because of a
+  rename. A setting the engine cannot apply (a field other than the four, a misnamed table or one
+  holding only spine fields, a name it reads or writes itself, two fields to one name) fails the
+  compose by name. `ingest` and `amend` read and require the spine under the new names.
+  `status` reports the renames and the notes the guard holds under `engine_keys`, and `drift`
+  counts every note of a vault whose renames changed as `changed`. `substrate init` and the
+  over-ceiling refusal name the setting when notes hold values of the vault's own under a spine
+  key, per field and with the lines to add; `init` prints them and writes `name` alone. Two copies
+  of a note under one name in vaults that read its spine keys differently refuse the scope, as
+  copies whose `_meta.md` files differ do. [`docs/configuration.md`](docs/configuration.md) has
+  the rules.
 
 ### Changed
 
@@ -190,7 +214,7 @@ Every release of the engine, newest first. The format follows
     and is quarantined, naming the note, the key as written and the spelling to use, whatever else it
     declares. `Status: archived` is never indexed as live, and `Class: conversation` never as an
     ordinary note. A vault that keeps a `Status` or `Class` property of its own has those notes
-    quarantined; issue #53 decides how such a vault is served. Keys of their own such as Pandoc's
+    quarantined until it renames the field with `[engine_keys]`. Keys of their own such as Pandoc's
     `documentclass`, Marp's `_class` and `doctype` are not taken for spellings, and compose.
     Values are unchanged: they are compared exactly as written.
   - A YAML tag or alias on a key the engine reads, in a block read as YAML, is now refused by

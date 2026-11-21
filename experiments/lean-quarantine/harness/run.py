@@ -77,9 +77,9 @@ class Finding(Exception):
 
 # ---------------------------------------------------------------- the world
 
-# Every way a note fails on its own that the harness writes, each one compose quarantines. `ok`
-# passes. Each body holds a note's number, so two notes are byte-identical only when one is a copy
-# of the other (`Note.copy_of`).
+# The kinds of note the harness writes. Whether one fails is `OUTCOME`'s, by its vault; `ok` passes
+# everywhere. Each body holds a note's number, so two notes are byte-identical only when one is a
+# copy of the other (`Note.copy_of`).
 KINDS = {
     "ok": lambda i: f"# Note {i}\n\nBody zq{i}x.\n",
     "status": lambda i: f"---\nstatus: someday\n---\n\n# Note {i}\n\nBody zq{i}x.\n",
@@ -92,6 +92,33 @@ KINDS = {
 }
 NOT_UTF8 = "not_utf8"
 FAILURES = [*(k for k in KINDS if k != "ok"), NOT_UTF8]
+# Kinds whose outcome is the vault's: in half the cases the project vault renames `RENAMES` in
+# `[engine_keys]`, and the vault it inherits never does. A note of the vault's own values
+# (`foreign`) passes only where its vault renames; one whose old key still says archived and a
+# call (`guarded`) fails only there; a typo or a misspelling under a new name fails only there.
+RENAMED_KINDS = {
+    "foreign": lambda i: f"---\nstatus: done\nclass: Math 101\n---\n\n# Note {i}\n\nBody zq{i}x.\n",
+    "guarded": lambda i: (f"---\nstatus: archived\nclass: conversation\n---\n\n# Note {i}\n\n"
+                          f"Body zq{i}x.\n"),
+    "renamed_typo": lambda i: f"---\ns_status: someday\n---\n\n# Note {i}\n\nBody zq{i}x.\n",
+    "renamed_near": lambda i: f"---\nS_status: archived\n---\n\n# Note {i}\n\nBody zq{i}x.\n",
+    # A spine field no vault renames: two vaults that rename others read it alike.
+    "confident": lambda i: f"---\nconfidence: stated\n---\n\n# Note {i}\n\nBody zq{i}x.\n",
+}
+ALL_KINDS = {**KINDS, **RENAMED_KINDS}
+RENAMES = {"status": "s_status", "doc_type": "s_doc_type", "class": "s_class"}
+# Whether a note of each kind fails: (in a vault that renames nothing, in one renaming `RENAMES`).
+# Renamed, `status`, `doc_type` and `class` are the vault's own, so a value outside the vocabulary
+# there passes, and one the engine withholds (`Status: archived`, `status: superseded`) is held
+# by the guard; `status` stays a key the engine reads for the guard, so a block it cannot read
+# still fails.
+OUTCOME = {
+    "ok": (False, False), "status": (True, False), "doc_type": (True, False),
+    "not_yaml": (True, True), "near_miss": (True, True), "orphan": (True, True),
+    "unversioned": (True, False), "class": (True, False), NOT_UTF8: (True, True),
+    "foreign": (True, False), "guarded": (False, True), "renamed_typo": (False, True),
+    "renamed_near": (False, True), "confident": (False, False),
+}
 # Faults that are not one note's own. Each refuses the scope. The first four `vault.resolve_scope`
 # refuses before any note is read; `planted_folder` (a link where a passing note's ingest folder
 # goes) reaches `quarantine.decide` as a scope fault while compose ingests.
@@ -130,10 +157,30 @@ class World:
     notes: tuple[Note, ...]
     fault: str | None
     decl: str | int     # "absent", "none", or a count
+    renamed: bool = False   # the project manifest renames `RENAMES` at the final compose
+    late: bool = False      # ... and not at the earlier one, so the setting changes between them
 
     @property
     def inherits(self) -> bool:
         return any(n.core for n in self.notes) or self.fault == "missing_vault"
+
+    def renames(self, i: int) -> bool:
+        """Whether note `i`'s vault renames, at the final compose: the project's alone."""
+        return self.renamed and not self.notes[i].core
+
+    def failed(self, i: int) -> bool:
+        return OUTCOME[self.notes[i].kind][self.renames(i)]
+
+    def read_apart(self) -> bool:
+        """Whether two notes of one doc_id are in a vault that renames and one that does not, and
+        write a spine field the one renames (every kind with frontmatter but `confident`), so the
+        two vaults read them differently: no copy can stand for the other, and compose refuses the
+        scope (`vault._read_with`)."""
+        groups: dict[int, set[bool]] = {}
+        for i, n in enumerate(self.notes):
+            if n.kind not in ("ok", NOT_UTF8, "confident"):
+                groups.setdefault(self.ident(i), set()).add(self.renames(i))
+        return any(len(v) == 2 for v in groups.values())
 
     def where(self, i: int) -> tuple[str, str]:
         n = self.notes[i]
@@ -162,24 +209,26 @@ class World:
 
     def plantable(self) -> list[int]:
         """The notes a link at whose ingest folder compose writes through: composed, and passing."""
-        return [i for i, n in enumerate(self.notes) if n.kind == "ok" and self.kept(i)]
+        return [i for i in range(len(self.notes)) if not self.failed(i) and self.kept(i)]
 
     def to_json(self) -> dict:
         ranks = self.ranks()
-        return {"notes": [[i, n.kind != "ok", self.ident(i), ranks[i]]
-                          for i, n in enumerate(self.notes)],
-                "fault": self.fault is not None, "decl": self.decl}
+        return {"notes": [[i, self.failed(i), self.ident(i), ranks[i]]
+                          for i in range(len(self.notes))],
+                "fault": self.fault is not None or self.read_apart(), "decl": self.decl}
 
 
 @st.composite
 def world(draw) -> World:
     fail_rate = draw(st.sampled_from([0.0, 0.2, 0.5, 0.9, 1.0]))
     size = draw(st.integers(1, 24))
+    renamed = draw(st.booleans())
+    kinds = FAILURES + list(RENAMED_KINDS) if renamed else FAILURES
     notes = []
     for _ in range(size):
         failed = draw(st.floats(0, 1)) < fail_rate
         notes.append(Note(core=draw(st.booleans()) and draw(st.booleans()),
-                          kind=draw(st.sampled_from(FAILURES)) if failed else "ok",
+                          kind=draw(st.sampled_from(kinds)) if failed else "ok",
                           prior=draw(st.booleans())))
     # Copies: of a note under a name of their own (each is indexed), or under its name in another
     # folder or vault (one doc_id, so one of them is).
@@ -194,12 +243,13 @@ def world(draw) -> World:
             notes.append(c)
     fault = draw(st.sampled_from([None] * 6 + FAULTS))
     decl = draw(st.sampled_from(["absent", "absent", "none"]) | st.integers(0, 12))
-    w = World(tuple(notes), fault, decl)
+    late = renamed and draw(st.booleans())
+    w = World(tuple(notes), fault, decl, renamed, late)
     if fault == "planted_folder" and not w.plantable():
         # Ingest opens a note's folder only once the note has passed, so a link at a failing
         # note's folder, or at a copy's, is never written through. With no composed note
         # passing, there is nowhere to plant.
-        w = World(w.notes, None, decl)
+        w = World(w.notes, None, decl, renamed, late)
     return w
 
 
@@ -241,7 +291,7 @@ def _write_note(path: Path, i: int, kind: str) -> None:
     if kind == NOT_UTF8:
         path.write_bytes(f"# Note {i}\n\nCaf".encode() + b"\xe9 " + f"zq{i}x.\n".encode())
     else:
-        path.write_text(KINDS[kind](i), "utf-8")
+        path.write_text(ALL_KINDS[kind](i), "utf-8")
 
 
 def _manifest(lay: Layout, w: World, *, final: bool) -> None:
@@ -254,6 +304,9 @@ def _manifest(lay: Layout, w: World, *, final: bool) -> None:
         lines.append(f"{quarantine.CEILING_KEY} = {json.dumps(w.decl)}")
     if final and w.fault == "broken_manifest":
         lines.append("reference_domains = ")
+    if w.renamed and (final or not w.late):
+        lines.append("[engine_keys]")
+        lines.extend(f'{k} = "{v}"' for k, v in RENAMES.items())
     lay.project.mkdir(parents=True, exist_ok=True)
     (lay.project / ".substrate.toml").write_text("\n".join(lines) + "\n", "utf-8")
 
@@ -307,7 +360,10 @@ def python_verdict(w: World, lay: Layout) -> dict:
         lay.core.mkdir(parents=True, exist_ok=True)
         for i, n in enumerate(w.notes):
             if n.prior:
-                _write_note(lay.note(i, n), i, "ok")
+                # A guarded note is good in a vault that does not rename yet: with the rename
+                # added after, the same bytes must leave the index.
+                same = w.late and n.kind == "guarded" and n.copy_of is None
+                _write_note(lay.note(i, n), i, n.kind if same else "ok")
         if _compose(lay)[0] != 0:
             raise HarnessBug("the earlier compose, of good notes only, refused")
         before = _index_of(lay, w)
@@ -461,9 +517,23 @@ def _last_copy():
     V._first_by_path = first_by_path
 
 
+def _read_alike():
+    """Two vaults always read a copy alike, whatever they rename: a copy is left out for a note
+    its own vault would read differently."""
+    V._read_with = lambda raw, keys: ""
+
+
+def _no_guard():
+    """The guard is off: a note whose renamed field's old name still marks it archived or a call
+    is indexed as a live note."""
+    from substrate.markdown import ingest
+
+    ingest.guard = lambda *a, **k: None
+
+
 MUTANTS = {"keep-stale": _keep_stale, "ceiling-ge": _ceiling_ge, "no-default": _no_default,
            "faults-ignored": _faults_ignored, "allow-empty": _allow_empty,
-           "last-copy": _last_copy}
+           "last-copy": _last_copy, "no-guard": _no_guard, "read-alike": _read_alike}
 
 SETTINGS = dict(deadline=None, database=None, derandomize=True,
                 suppress_health_check=list(HealthCheck), print_blob=True)
@@ -486,14 +556,20 @@ def main() -> int:
     @given(world())
     def agree(w):
         model, code = run_case(w)
-        failed = sum(nt.kind != "ok" for nt in w.notes)
+        failed = sum(w.failed(i) for i in range(len(w.notes)))
+        if w.renamed:
+            also["the project renames" + (", after an earlier compose" if w.late else "")] += 1
+            if any(w.renames(i) and w.notes[i].kind == "guarded" for i in range(len(w.notes))):
+                also["the project renames and holds a guarded note"] += 1
+            if w.read_apart():
+                also["copies two vaults read apart"] += 1
         if model.get("copies"):
             also["model leaves out copies"] += 1
         if "indexed" in model and any(w.notes[i].copy_of is not None and not w.notes[i].same_name
                                       for i in model["indexed"]):
             also["model indexes a copy under a name of its own"] += 1
         if "refuse" in model:
-            n["model refuses: " + ("a scope fault" if w.fault else
+            n["model refuses: " + ("a scope fault" if w.fault or w.read_apart() else
                                    "nothing left to index" if failed == len(w.notes) else
                                    "over the ceiling")] += 1
         else:

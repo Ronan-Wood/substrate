@@ -147,7 +147,8 @@
       "over_size_cap",
       "per_note_assertion",
       "source_meta_unreadable",
-      "superseded_without_link"
+      "superseded_without_link",
+      "withheld_value_under_renamed_key"
     ],
     "keys": [
       "class",
@@ -289,6 +290,15 @@
       "known",
       "note",
       "state"
+    ],
+    "engine_keys": [
+      "guarded",
+      "renamed"
+    ],
+    "engine_keys_renamed": [
+      "field",
+      "key",
+      "vault"
     ],
     "expand": [
       "index_version",
@@ -439,6 +449,7 @@
       "defaulted",
       "documents",
       "drift",
+      "engine_keys",
       "entities",
       "exposed",
       "identical",

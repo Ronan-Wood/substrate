@@ -25,6 +25,11 @@ substrate search --scope field-notes "what did I decide about the garden"
   as you must when the folder name leaves nothing (`笔记`) or another vault has that name.
 - **A folder with no notes yet gets its manifest,** and `init` says compose will refuse it until
   a note is there.
+- **Notes that use `status`, `doc_type`, `confidence` or `class` for values of their own**
+  (`status: done`) are counted per field, and `init` prints the `[engine_keys]` lines that would
+  have the engine read those fields from other properties
+  ([below](#a-vault-that-already-uses-status-or-class)). It does not write them: whether such a
+  value is the vault's own or a slip is yours to say.
 
 `search` is the MCP tool's name too; `substrate query` is the same command.
 
@@ -52,12 +57,13 @@ go = "1.21"
 | `skip` | list of names | the file and folder names compose never indexes in this vault. Without it, the default list below applies |
 | `writable_folders` | list of folder paths | where `ingest` adds a note and `amend` changes one. Without it, any folder compose doesn't skip |
 | `quarantine_ceiling` | whole number, or `"none"` | the most notes compose may quarantine and still index the scope ([below](#when-a-note-fails-quarantine)). Read from the project vault only |
+| `engine_keys` | table, field to property name | which property the engine reads `status`, `doc_type`, `confidence` or `class` from in this vault's notes ([below](#a-vault-that-already-uses-status-or-class)). Each vault's applies to its own notes |
 
 In TOML, every key written after a `[table]` header belongs to that table, so keep every top-level
 key above `[reference_pins]`. Any key listed above, found inside a `[table]`, fails the compose
 with a message naming the key and the table. The engine also checks the shape of `name`, `inherits`,
-`reference_domains`, `reference_pins`, `skip` and `quarantine_ceiling`, and refuses a malformed
-one. The write path checks `writable_folders` the same way.
+`reference_domains`, `reference_pins`, `skip`, `quarantine_ceiling` and `engine_keys`, and
+refuses a malformed one. The write path checks `writable_folders` the same way.
 
 **A key not in the table above fails the compose.** The message names the key and the file, and
 the known key it looks like, if one is close: `skips` gets `skip`. This holds for the manifest of
@@ -66,8 +72,12 @@ every vault in the scope's chain, inherited ones included. Keys are compared exa
 read: `guard_state`, retired in 0.2.1, and `scripta_workspace` and `scripta_workspace_vault`, which
 Scripta writes.
 
-- **A table of any name isn't checked.** `[app]`, `app = {}` and `app.theme = "dark"` all
-  compose, so keep another tool's settings under a table of its own. A key from the table above
+- **A table of any other name isn't checked.** `[app]`, `app = {}` and `app.theme = "dark"` all
+  compose, so keep another tool's settings under a table of its own. `[engine_keys]` is checked
+  key by key, and a table that looks meant as it fails: one named like it (`[engine-keys]`,
+  `[Engine_Keys]`, `[engine_key]`), or one of any name holding only `status`, `doc_type`,
+  `confidence` or `class` with text values (`[kanban] status = "Done"`). Add another key to such a
+  table of a tool's own, or rename it. A key from the table above
   still fails inside one, as misplaced, so a tool's own `name` needs another. An array of tables,
   `[[app]]`, is an array, and fails like any other value. Because a table isn't checked, a
   misspelt table header such as `[reference_pin]`, or a misspelt key written below a header, is
@@ -187,7 +197,8 @@ domains: [storage]
   stable across renames.
 - `confidence` is optional. Without it, a note is stored as `unjudged`.
 - A note written through the `ingest` or `amend` tool must declare `status`, `doc_type` and
-  `confidence`. The defaults apply only to notes already in a vault.
+  `confidence`, under the names the vault's `[engine_keys]` gives them. The defaults apply only to
+  notes already in a vault.
 - A note that replaces another declares `supersedes: <doc_id>`, and the replaced note takes
   `status: superseded` and `superseded_by: <doc_id>`, as the two `engine-boundary` notes in the
   demo vault do.
@@ -220,8 +231,8 @@ character that renders as nothing removed, letter case folded, and each run of `
 spaces made one `_`, where a capital after a lower-case letter may count as a word break or not.
 So `DOC TYPE`, `DocType`, `docType` and `sTATUS` are spellings of engine keys, while `doctype`,
 Pandoc's `documentclass` and Marp's `_class` are keys of their own and compose. **A vault that keeps a `Status` or `Class` property of
-its own has those notes refused**, even beside a real `status`. Engine issue #53 decides how such
-a vault is served.
+its own has those notes refused**, even beside a real `status`, until it renames the field
+([below](#a-vault-that-already-uses-status-or-class)).
 
 **A plain key** is one YAML reads as a key. Either it is wrapped in one pair of matching quotes,
 or it doesn't start with a YAML indicator character (`?` `:` `,` `[` `]` `{` `}` `#` `&` `*` `!`
@@ -271,9 +282,9 @@ missing from the index.
 
 | what fails | what compose does |
 |---|---|
-| one note: frontmatter it cannot read, a value outside the vocabulary, an engine key spelled another way, `superseded` with no `superseded_by`, a class policy refusal (`missing required field(s) ['version']`), a note that is not UTF-8 or is over the 64 MiB cap, an A18 or A22 per-note assertion | quarantines the note |
+| one note: frontmatter it cannot read, a value outside the vocabulary, an engine key spelled another way, `superseded` with no `superseded_by`, a class policy refusal (`missing required field(s) ['version']`), a note that is not UTF-8 or is over the 64 MiB cap, an A18 or A22 per-note assertion, a renamed field's old name holding a value the engine withholds or freezes ([below](#a-vault-that-already-uses-status-or-class)) | quarantines the note |
 | the scope: a `doc_id` one note declares and another has, one derived `doc_id` from two notes whose bytes differ, one file compose finds twice under one name (a vault inside the vault that inherits it, or a hard link of the same name), a declared vault that is not there, a manifest it cannot read or a key it doesn't define (whatever `quarantine_ceiling` says), a skipped file that declares a spine, a `_meta.md` the vault layer cannot read, a note the filesystem refuses to read, a link or another user's folder where a note's ingest folder goes | refuses the whole scope, as before |
-| more notes than the ceiling | refuses the whole scope, saying how many failed and what the ceiling is |
+| more notes than the ceiling | refuses the whole scope, saying how many failed and what the ceiling is, and, when notes hold values of the vault's own under a spine key, which keys and how many, with the `[engine_keys]` lines that would rename them |
 | every note the scope discovered | refuses the whole scope, whatever the ceiling (`"none"` included), so the earlier index stays |
 
 **The ceiling.** Without `quarantine_ceiling`, it is the larger of 10 notes and 1% of the scope's
@@ -337,6 +348,59 @@ It is read from the vault as it stands, as `drift` is, and is null in agent mode
 `amend` writes the `doc_id` a note derives into its frontmatter. Amending either note of a pair
 that shares a derived `doc_id` therefore makes it a declared `doc_id` the other note has, and the
 next compose refuses until one is deleted or renamed.
+
+### A vault that already uses `status` or `class`
+
+Many vaults use `status`, `doc_type`, `confidence` or `class` for values of their own, such as
+`status: done` or `class: Math 101`. The engine quarantines each such note as a value outside its
+vocabulary, and past the ceiling it refuses the scope. `[engine_keys]` has the engine read the
+field from another property instead. A vault whose tasks say `status: done` writes:
+
+```toml
+[engine_keys]                       # below every top-level key
+status = "substrate_status"
+```
+
+```markdown
+---
+status: done                        # the vault's own: the engine leaves it alone
+substrate_status: archived          # optional: the note's status for the engine
+---
+```
+
+The note composes. Without `substrate_status` it is `active`, as an undeclared status is, and
+`substrate status` counts it as defaulted.
+
+- **Each field is renamed on its own, and nothing by default.** A vault with no `[engine_keys]`
+  reads every field under its own name. Renaming `class` stops both `class` and `document_class`
+  being read.
+- **The new name is the engine's key.** A value outside the vocabulary under it is quarantined,
+  so `substrate_status: archvied` is caught. No value is mapped and none falls back to a default.
+  It is read under exactly that spelling: `Substrate_Status` fails, as `Status` does.
+- **The guard.** When the old name, in any spelling (`status`, `Class`, `"class"`), holds a value
+  that would leave the note out of default retrieval or keep it from being edited under the
+  engine's own name (`archived`, `superseded`, `conversation`, `reference-frozen`), the note is
+  quarantined as `withheld_value_under_renamed_key`, unless the note declares the same value
+  under the new name. So a call written for the engine before the rename is never indexed as a
+  live note, and `amend` refuses it. The value is compared as the engine reads it and as YAML
+  does, so `class: conversation # a call` is held too. Any other value (`status: active`,
+  `class: note`) is the vault's own. A passage's own `class` is not judged where its source's
+  `_meta.md` supplies one: compose reads that class instead.
+- **Each vault's manifest renames for its own notes.** An inherited vault is read by its own
+  manifest, or under the engine's names when it has none. A source's `_meta.md` is always read
+  under the engine's names.
+- **A setting the engine cannot apply fails the compose**: a table named like `[engine_keys]`, or
+  of another name holding only spine fields (`[spine_keys]`), a field other than the four, a name
+  that is not a letter or `_` followed by letters, digits, `_` or `-` (64 at most), a name the
+  engine reads or writes itself or a spelling of one (`Status`, `title`, `written_by`), a field
+  renamed to its own name, and two fields renamed to one name.
+- **Copies in two vaults** (one name, the same bytes; [above](#identical-notes)) stand for each
+  other only when both vaults read them alike: when the note writes a spine field the two vaults
+  read from different names, compose refuses the scope, naming the renames. A note writing only
+  fields neither renames is left out as any copy is.
+- **Changing the setting** changes how notes read without changing their bytes. `status` reports
+  every note of that vault under `drift.changed` until the next compose, and the renames and how
+  many notes the guard holds under `engine_keys`.
 
 ## The engine's folder: `~/.substrate`
 

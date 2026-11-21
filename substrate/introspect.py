@@ -70,13 +70,48 @@ def vector_status(store, stack) -> dict | None:
     return {"model": key, "stored": n, "chunks": total, "complete": complete, "note": note}
 
 
+def engine_keys_block(vaults, held: list[dict] | None) -> dict:
+    """`status.engine_keys`: the renames each vault's manifest declares (`[engine_keys]`), one row
+    per renamed field, or None when the scope's vaults could not be resolved; and how many notes
+    the last compose quarantined for the guard (`engine_keys.GUARD_KIND`: a withheld or frozen
+    value under an old name; one whose value there cannot be read is `frontmatter_unreadable`,
+    listed under `quarantined` like any other), None when this index
+    keeps no quarantine record. Engine field names, vault names and the names the operator's own
+    manifest gives, never a value from a note."""
+    from substrate import engine_keys
+
+    renamed = None
+    if vaults is not None:
+        renamed = []
+        for v in vaults:
+            for f, name in v.keys.renamed:
+                renamed.append({"vault": v.name, "field": f, "key": name})
+    return {"renamed": renamed,
+            "guarded": None if held is None else sum(
+                1 for q in held if _quarantine.checked(q.get("kind"), None)[0]
+                == engine_keys.GUARD_KIND)}
+
+
 def _fingerprints(scope):
     """A note's `freshness.quarantine_fingerprint`, over the same inputs compose judged it on: the
-    note and its source's `_meta.md`, found inside the note's own vault."""
-    roots = {v.name: v.path for v in scope.vaults}
-    vault_of = {n.path: n.vault for n in scope.notes}
-    return lambda path: freshness.quarantine_fingerprint(
-        path, _vault.source_meta_path(path, roots.get(vault_of.get(path, ""), path.parent)))
+    note, its source's `_meta.md`, found inside the note's own vault, and that vault's renames."""
+    by_path = {n.path: n for n in scope.notes}
+
+    def fingerprint(path):
+        n = by_path.get(path)
+        root, keys = (path.parent, "") if n is None else (scope.root(n), n.keys.signature)
+        return freshness.quarantine_fingerprint(path, _vault.source_meta_path(path, root), keys)
+
+    return fingerprint
+
+
+def _reread(store, scope):
+    """Whether a note's vault is read with other renames than the index was composed with
+    (`IndexStore.engine_keys`): its reading changed with its bytes unchanged."""
+    recorded = store.engine_keys()
+    moved = {n.path for n in scope.notes
+             if recorded.get(str(scope.root(n)), "") != n.keys.signature}
+    return lambda path: path in moved
 
 
 def _shown_quarantine(q: dict) -> dict:
@@ -217,11 +252,16 @@ def status_payload(store, entry, *, stack, registry: str | None = None,
         # stands in for it — how old the published copy is.
         out["drift"] = {"error": "not checked — this server answers from a published snapshot "
                                  "and cannot read the vault it was built from."}
+        # The renames are the vault's manifest's, which this process does not read, and the
+        # quarantine record is not in a snapshot.
+        out["engine_keys"] = None
         return out
+    out["engine_keys"] = engine_keys_block(None, held)
     try:
         scope = _vault.resolve_scope(entry.vault)
+        out["engine_keys"] = engine_keys_block(scope.vaults, held)
         out["drift"] = freshness.drift(store, [n.path for n in scope.notes], held,
-                                       _fingerprints(scope))
+                                       _fingerprints(scope), _reread(store, scope))
         out["identical"] = identical_report(scope, ((q["vault"], q["path"]) for q in held or []))
     except _vault.VaultError as e:
         # A scope that cannot be RESOLVED cannot be drift-checked — the vault is gone, a manifest

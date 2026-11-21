@@ -148,9 +148,10 @@ def _declared_doc_type(note) -> str | None:
     """The doc_type `compose` would store for this note: its own declaration, else the `_meta.md`
     override its source supplies. Mirrors `markdown.ingest` (`if override and doc.doc_type is None`)
     rather than re-deriving the rule — a second precedence order here would disagree with the index
-    about which notes are digests, on the one axis this whole check is keyed to."""
+    about which notes are digests, on the one axis this whole check is keyed to. Read under the
+    name its vault's manifest has the engine read doc_type from (`NoteRef.keys`)."""
     front, _ = _parse_frontmatter(_read_capped(note.path))
-    return front.get("doc_type") or note.override_doc_type or None
+    return front.get(note.keys.reads("doc_type")[0]) or note.override_doc_type or None
 
 
 def audit(scope: Scope) -> dict:

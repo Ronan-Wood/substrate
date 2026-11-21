@@ -23,12 +23,12 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from substrate import classes, spine
+from substrate import classes, engine_keys, spine
 from substrate.quarantine import tag
 from substrate.chunk.chunker import chunk
 from substrate.extract.base import doc_id_for, doc_id_from  # stdlib-only; no Docling/torch pulled in
 from substrate.markdown.emit import emit, frontmatter
-from substrate.markdown import reader
+from substrate.markdown import reader, yaml_scalar
 from substrate.markdown.reader import content_coverage, read_markdown, uncovered_content_blocks
 from substrate.models import Document, Kind, SourceOrigin
 
@@ -136,13 +136,9 @@ def _meta_path_for(note_path: Path, vault_root: Path | None) -> Path | None:
     return _vault.source_meta_path(note_path, vault_root)
 
 
-# Each engine key's forms (`reader.canonical_forms`), for the spelling check in `_judge_opening`.
-_ENGINE_FORMS: dict[str, str] = {f: k for k in spine.EXACT_SPELLING for f in reader.canonical_forms(k)}
-
-
 def _judge_opening(doc: Document, src: Path, opening: reader.OpeningBlock,
                    defaulted: tuple[str, ...], vault_root: Path | None, *,
-                   why: str | None = None) -> None:
+                   why: str | None = None, keys: engine_keys.KeyMap = engine_keys.DEFAULT) -> None:
     """Refuse a vault note whose opening a default must not stand in for. A passage is judged with
     its `_meta.md`, where its spine is written. Two refusals, both for MISTAKES a person or an
     editor makes; neither is a defence against a key disguised on purpose, since whoever can
@@ -159,20 +155,25 @@ def _judge_opening(doc: Document, src: Path, opening: reader.OpeningBlock,
         a byte-order mark before it, a block that never closes, a line YAML would not read as a
         key (`reader.plain_key`). The test is the shape, not the keys a block might hide.
 
-    `why` is the reader's reason the note's own block is body text, when it gave one."""
-    blocks = [(src, opening, why)]
+    `why` is the reader's reason the note's own block is body text, when it gave one. `keys` is
+    the note's vault's renames: the note's own block is judged by the names it says the engine
+    reads (`Substrate_Status` is `substrate_status` spelled another way, and once `status` is
+    renamed, `Status` is the vault's own property), and a `_meta.md`, the engine's own format, by
+    the engine's names."""
+    blocks = [(src, opening, why, keys.spelling)]
     meta_path = _meta_path_for(src, vault_root)
     if meta_path is not None:
         from substrate import vault as _vault
 
         try:
-            blocks.append((meta_path, reader.opening_block(_vault._read_capped(meta_path)), None))
+            blocks.append((meta_path, reader.opening_block(_vault._read_capped(meta_path)), None,
+                           engine_keys.DEFAULT.spelling))
         except _vault.VaultError as e:
             raise tag(ValueError(str(e)), "source_meta_unreadable") from e
 
-    for path, block, _ in blocks:
+    for path, block, _, spelling in blocks:
         for key, forms in block.keys:
-            exact = next((_ENGINE_FORMS[f] for f in forms if f in _ENGINE_FORMS), None)
+            exact, engine_key = next((spelling[f] for f in forms if f in spelling), (None, None))
             if exact is None or key == exact:
                 continue
             raise tag(spine.SpineError(
@@ -181,9 +182,9 @@ def _judge_opening(doc: Document, src: Path, opening: reader.OpeningBlock,
                 f"Write `{exact}:` if this is the note's {exact}. If it is a property of the "
                 "vault's own, it cannot share that name with an engine key; refusing rather "
                 "than indexing the note as if it had declared none."
-            ), "engine_key_spelled_another_way", exact)
+            ), "engine_key_spelled_another_way", engine_key)
     if defaulted:
-        for path, block, reason in blocks:
+        for path, block, reason, _ in blocks:
             reason = block.why or reason
             if block.opens and not block.whole:
                 raise tag(spine.SpineError(
@@ -195,6 +196,71 @@ def _judge_opening(doc: Document, src: Path, opening: reader.OpeningBlock,
                     "on defaults over a block that may say otherwise. If the `---` is a "
                     "horizontal rule, start the file with something else."
                 ), "opening_block_unread")
+
+
+def guard(doc_id: str, pairs: list[tuple[str, str]], opening: reader.OpeningBlock,
+          keys: engine_keys.KeyMap, *, doc_class: str | None = None) -> None:
+    """Refuse a note whose vault renamed a field while the note still holds, under the field's old
+    name, a value that would withhold or freeze it under that name (`engine_keys.GUARDED`), unless
+    the note declares that same value under the new name. `pairs` are the frontmatter's, each value
+    as written, duplicates kept, so a decoy written after it hides nothing. A value is compared as
+    the engine reads it and as YAML (and so Obsidian) reads the line, so `class: conversation # a
+    call` is held too and `class: "conversation #1"` is not. A class the source's `_meta.md`
+    supplies (`doc_class`) is what the engine reads whatever the note says, before a rename and
+    after, so the note's own `class` is not judged. Any key the engine would
+    compare with the old name counts (`reader.canonical_forms`: `Class`, `"class"`). A key of that
+    kind whose value the reader left out cannot be compared, and refuses too: it may hold one."""
+    declared = {k: yaml_scalar.decode(v) for k, v in pairs}
+    for name, olds, held in keys.guarded():
+        if name == "class" and doc_class:
+            continue
+        new = keys.name_of(name)
+        forms = {f: o for o in olds for f in reader.canonical_forms(o)}
+        compared = set()
+        for key, written in pairs:
+            old = next((forms[f] for f in reader.canonical_forms(key) if f in forms), None)
+            if old is None:
+                continue
+            compared.add(key)
+            readings = (yaml_scalar.decode(written), yaml_scalar.read_as_yaml(written))
+            seen = next((v for v in readings if v in held), None)
+            if seen is not None and declared.get(new) != seen:
+                # Names the engine key and the engine's own value, never the line as written: the
+                # write path returns this to a client, and a comment beside the value is the
+                # note's text.
+                raise tag(spine.SpineError(
+                    f"{doc_id}: its `{old}` holds `{seen}`, which would leave the note out of "
+                    f"default retrieval or keep it from being edited were `{old}` the engine's "
+                    f"key, and the vault's manifest has the engine read {name} from `{new}` "
+                    f"instead ([{engine_keys.TABLE}]). Refusing to index it as a live note "
+                    f"because of the rename. If this is the note's {name}, declare it under the "
+                    f"new name too, `{new}: {seen}`; if it is the vault's own value, give it one "
+                    f"the engine does not withhold or freeze."
+                ), engine_keys.GUARD_KIND, old)
+        for key, key_forms in opening.keys:
+            old = next((forms[f] for f in key_forms if f in forms), None)
+            if old is not None and key not in compared:
+                raise tag(spine.SpineError(
+                    f"{doc_id}: the engine cannot read the value of its `{old}`, so it "
+                    f"cannot tell whether it is one that would withhold or freeze the note were "
+                    f"`{old}` the engine's key, as it was before the vault renamed {name}. "
+                    f"Refusing rather than index it as a live note."
+                ), "frontmatter_unreadable", old)
+
+
+def _renamed_in(e: Exception, keys: engine_keys.KeyMap) -> Exception:
+    """`e`, a refusal of a spine field's value or absence, saying where the field is read from
+    when the vault renamed it: the engine's own name in the message would send a writer to the
+    property the vault keeps for itself. `e` itself when the field is not renamed."""
+    kind, key = getattr(e, "quarantine_kind", ("other", None))
+    name = engine_keys.FIELD_OF.get(key)
+    new = None if name is None else keys.name_of(name)
+    if new is None:
+        return e
+    olds = " or ".join(f"`{o}:`" for o in engine_keys.DEFAULT_NAMES[name])
+    # First, so it survives the cut a reason is kept to (`quarantine.MAX_REASON_CHARS`).
+    return tag(type(e)(f"this vault reads {name} from `{new}` ([{engine_keys.TABLE}]), and "
+                       f"{olds} is the vault's own: {e}"), kind, key)
 
 
 def ingest_markdown(
@@ -217,6 +283,7 @@ def ingest_markdown(
     tier: int | None = None,
     origin: SourceOrigin | None = None,
     before_write: Callable[[Document], None] | None = None,
+    keys: engine_keys.KeyMap = engine_keys.DEFAULT,
 ) -> IngestResult:
     """Ingest one markdown file into `out_dir`. Raises on any refusal; never writes a partial set.
 
@@ -241,6 +308,9 @@ def ingest_markdown(
     function is where the class policy, the spine contract and A18 live, and a parallel
     implementation would be a second place to forget one. See models.SourceOrigin.
 
+    `keys` is the vault's renames (`engine_keys`): which property each spine field is read from,
+    and the guard on the old names. A foreign document's spine is cleared, so it reads none.
+
     `before_write` runs once every gate has passed and before anything is written to `out_dir`.
     `substrate ingest` stores the original there, so a refused file never enters the blob store
     and an accepted one never yields a note whose original failed to store. An exception from it
@@ -255,9 +325,13 @@ def ingest_markdown(
     # Strict on the vault path: a value the reader cannot read under a key it reads refuses the
     # note, naming it. A foreign document's spine is cleared below anyway, and the rest of what it
     # declares is optional, so its unreadable values are only left out.
-    doc, body_md, rstats = read_markdown(src, doc_class=doc_class, strict=origin is None)
+    if origin is not None:
+        keys = engine_keys.DEFAULT
+    doc, body_md, rstats = read_markdown(src, doc_class=doc_class, strict=origin is None,
+                                         keys=keys)
     unread = rstats.pop("frontmatter_unread", None)
     opening = rstats.pop("opening_block")
+    pairs = rstats.pop("frontmatter_pairs")
 
     # Identity moves to the REAL artifact before anything reads it. Done here rather than after
     # the gates because `classes.apply` enforces `source_sha256` as a required field and
@@ -392,7 +466,12 @@ def ingest_markdown(
         doc.title = classes.extract_title(doc) or named
         title_source = title_source or ("filename" if doc.title else None)
 
-    meta = classes.apply(doc)
+    try:
+        meta = classes.apply(doc)
+    except classes.ClassPolicyError as e:
+        if (said := _renamed_in(e, keys)) is e:
+            raise
+        raise said from e
     # Which spine fields this note leaves to the default: read here, after `_meta.md` has filled
     # what it supplies, so an inherited value is not counted as defaulted. Only on the vault path.
     # A foreign document's spine was cleared above and is never its own to declare, so it has no
@@ -403,7 +482,8 @@ def ingest_markdown(
     # about what is wrong than the value check it leads to (`superseded-by:` leaves a superseded
     # note with no link).
     if origin is None:
-        _judge_opening(doc, src, opening, defaulted, vault_root, why=unread)
+        _judge_opening(doc, src, opening, defaulted, vault_root, why=unread, keys=keys)
+        guard(doc.doc_id, pairs, opening, keys, doc_class=doc_class)
     try:
         status = spine.validate_status(doc, require_present=require_status)
         doc_type = spine.validate_doc_type(doc, require_present=require_status)
@@ -420,7 +500,9 @@ def ingest_markdown(
             if meta_path is not None and f"{field} " in str(e):
                 raise tag(spine.SpineError(f"{e} (inherited from {meta_path})"),
                           *getattr(e, "quarantine_kind", ("other", None))) from e
-        raise
+        if (said := _renamed_in(e, keys)) is e:
+            raise
+        raise said from e
 
     # repair=False: markdown carries no glyph artifacts, so PDF-tier hyphen/ligature repair could
     # only mutate clean authored text (measured: 8 words welded on one round-trip).

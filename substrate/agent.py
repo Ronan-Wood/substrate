@@ -701,6 +701,8 @@ def _fill(tmp: Path, excluded: frozenset[str], notes: list[_NoteCopy], meta: dic
         # read. So none reaches the agent, whatever the entry lets in, and its `status` reports
         # the record as not kept (null), never as empty.
         db.execute("DROP TABLE IF EXISTS quarantine")
+        # Each row names a vault by its path on the operator's machine.
+        db.execute("DROP TABLE IF EXISTS engine_keys")
         for doc_id in sorted(excluded):
             store.remove(doc_id)
         # A vector no passage holds is no part of a document here, and its `chunk_id` names the

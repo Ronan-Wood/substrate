@@ -37,10 +37,14 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from substrate.extract.base import doc_id_for  # stdlib-only; no Docling/torch pulled in
 from substrate.markdown import yaml_scalar
 from substrate.models import Block, Document, Kind
+
+if TYPE_CHECKING:
+    from substrate.engine_keys import KeyMap
 
 # The one rule for where frontmatter ends, which `substrate frontmatter check` and `fix` read too:
 # a line of `---` with nothing after it but spaces or tabs, after at least one line of block. A
@@ -232,10 +236,11 @@ def raw_frontmatter(text: str) -> tuple[str, list[tuple[str, str]]] | None:
     return None if scan.pairs is None else (scan.block, scan.pairs)
 
 
-def unread_keys(text: str) -> list[tuple[str, str]]:
+def unread_keys(text: str, read: frozenset[str] | None = None) -> list[tuple[str, str]]:
     """Each frontmatter key YAML reads whose value the reader cannot, and why, naming the line.
-    Empty for a block YAML cannot read either: that declares nothing to anyone."""
-    scan = _raw_scan(text)
+    Empty for a block YAML cannot read either: that declares nothing to anyone. `read` is the keys
+    a block the reader cannot read at all is judged by (`_unreadable`), `READ_KEYS` by default."""
+    scan = _raw_scan(text, READ_KEYS if read is None else read)
     return list(scan.problems) if scan.pairs is not None else []
 
 
@@ -283,14 +288,15 @@ def _shown(text: str, cap: int = 60) -> str:
     return out + ("…" if len(text) > cap else "")
 
 
-def _unreadable(block: str, whole: str) -> _Scan:
+def _unreadable(block: str, whole: str, read: frozenset[str] = READ_KEYS) -> _Scan:
     """No frontmatter, for a `---` block the reader cannot read (`whole` says why): each line in it
-    naming one of `READ_KEYS` is a problem, so strict reading refuses the note rather than read a
-    field it declares as absent; with none, the block is body text."""
+    naming one of `read` (`READ_KEYS`, and any key a vault's manifest has the engine read) is a
+    problem, so strict reading refuses the note rather than read a field it declares as absent;
+    with none, the block is body text."""
     named = []
     for line in block.splitlines():
         km = _KEY_LINE.match(line)
-        if km and km.group(2) in READ_KEYS and km.group(2) not in named:
+        if km and km.group(2) in read and km.group(2) not in named:
             named.append(km.group(2))
     if named:
         return _Scan(None, block=block, problems=tuple(
@@ -299,7 +305,7 @@ def _unreadable(block: str, whole: str) -> _Scan:
                                            f"frontmatter") if ":" in block else None)
 
 
-def _raw_scan(text: str) -> _Scan:
+def _raw_scan(text: str, read: frozenset[str] = READ_KEYS) -> _Scan:
     """The frontmatter's (key, value) pairs, two ways.
 
     A block whose every non-blank line is a first-column `key: value` is read line by line, each
@@ -308,7 +314,8 @@ def _raw_scan(text: str) -> _Scan:
     is exactly the reader it always was.
 
     Any other block (a block list, which Obsidian writes; a nested mapping; a comment; an indented
-    key) is YAML's to read, so it is read by YAML: `_yaml_scan`.
+    key) is YAML's to read, so it is read by YAML: `_yaml_scan`. `read` is the keys a block the
+    reader cannot read is judged by (`_unreadable`).
     """
     m = _FRONTMATTER.match(text)
     if not m:
@@ -320,14 +327,14 @@ def _raw_scan(text: str) -> _Scan:
         line = text[old.end() - 3:].split("\n", 1)[0]
         return _unreadable(old.group(1), f"the `---` block never closes: {_shown(line)!r} only "
                                          f"starts with `---`, and frontmatter ends at a line of "
-                                         f"`---` alone")
+                                         f"`---` alone", read)
     block = m.group(1)
     pairs: list[tuple[str, str]] = []
     for line in block.splitlines():
         if not line.strip():
             continue
         if ":" not in line or line[:1] in " \t":
-            return _yaml_scan(block, m.end())
+            return _yaml_scan(block, m.end(), read)
         k, _, v = line.partition(":")
         pairs.append((k.strip(), v.strip()))
     return _Scan(pairs, m.end(), block, flat=True)
@@ -354,7 +361,7 @@ def _as_written(node, v: str, flow: bool) -> str:
     return "'" + v.replace("'", "''") + "'"
 
 
-def _yaml_scan(block: str, end: int) -> _Scan:
+def _yaml_scan(block: str, end: int, read: frozenset[str] = READ_KEYS) -> _Scan:
     """`block` read by YAML, every scalar as the string written (`BaseLoader` resolves no types).
 
     Each value comes back as the line readers read it: a plain scalar as written, any other through
@@ -368,13 +375,13 @@ def _yaml_scan(block: str, end: int) -> _Scan:
 
     A block YAML does not read as a mapping is body text. When it is not YAML at all (or is past
     `_MAX_YAML_BLOCK`, or holds a break only YAML 1.1 takes) and a line in it names one of
-    `READ_KEYS`, each such key is a problem too, so strict reading refuses the note rather than
+    `read`, each such key is a problem too, so strict reading refuses the note rather than
     read a field it declares as absent.
     """
     import yaml  # here, not at the top: a flat block, which every writer emits, never needs it
 
     def unreadable(why: str) -> _Scan:
-        return _unreadable(block, f"the block between the two `---` lines {why}")
+        return _unreadable(block, f"the block between the two `---` lines {why}", read)
 
     if len(block) > _MAX_YAML_BLOCK:
         return unreadable(f"is over {_MAX_YAML_BLOCK // 1024} KiB")
@@ -458,7 +465,7 @@ def _frontmatter_scan(text: str, strict: bool = False, keys: frozenset[str] = RE
     """(pairs or None, offset where the body starts, the scan). One regex match serves every
     caller. A value the reader cannot read under one of `keys` raises FrontmatterError when
     `strict`."""
-    scan = _raw_scan(text)
+    scan = _raw_scan(text, READ_KEYS | keys)
     if strict:
         for key, why in scan.problems:
             if key in keys:
@@ -754,10 +761,14 @@ def plain_key(key: str) -> bool:
     return key[0] not in _YAML_INDICATORS
 
 
-def opening_block(text: str, scan: _Scan | None = None) -> OpeningBlock:
+def opening_block(text: str, scan: _Scan | None = None, *, read: frozenset[str] = READ_KEYS,
+                  spine: frozenset[str] | None = None) -> OpeningBlock:
     """`text`'s `OpeningBlock`, from the reader's own scan (`scan`, when the caller has it): it
-    reads nothing the reader does not, and each key's `canonical_forms` are computed here, once."""
-    scan = _raw_scan(text) if scan is None else scan
+    reads nothing the reader does not, and each key's `canonical_forms` are computed here, once.
+    `read` and `spine` are the keys the engine reads and the ones deciding a note's spine, class or
+    guard, for a vault whose manifest renames them (`engine_keys.KeyMap`)."""
+    spine = _SPINE_VALUES if spine is None else spine
+    scan = _raw_scan(text, read) if scan is None else scan
     if scan.pairs is None:
         if _EMPTY_BLOCK.match(text):
             return OpeningBlock(opens=True, whole=True, keys=())
@@ -771,7 +782,7 @@ def opening_block(text: str, scan: _Scan | None = None) -> OpeningBlock:
     not_plain = [k for k in flat if not plain_key(k)]
     keys = list(dict.fromkeys(plain))
     whole, why = True, None
-    twice = next((k for k in keys if k in READ_KEYS and flat.count(k) > 1), None)
+    twice = next((k for k in keys if k in read and flat.count(k) > 1), None)
     if twice is not None:
         # The line reader keeps the last value; YAML 1.2 and Obsidian refuse the block. Neither is
         # a reading of what the note says.
@@ -784,8 +795,8 @@ def opening_block(text: str, scan: _Scan | None = None) -> OpeningBlock:
         # (`_SPINE_VALUES`) the value the line reader gave it. So the reader's frontmatter, which
         # is what is indexed, says what YAML's does wherever the spine is concerned. Keys are
         # compared without their quotes, as YAML gives them.
-        y = _yaml_scan(scan.block, scan.end)
-        why = _yaml_disagrees(scan, y, not_plain[0])
+        y = _yaml_scan(scan.block, scan.end, read)
+        why = _yaml_disagrees(scan, y, not_plain[0], read, spine)
         if why is None:
             seen = [k for k, _ in y.pairs] + [k for k, _ in y.problems]
             keys += [k for k in seen if k not in {_unquoted(k) for k in plain}]
@@ -809,7 +820,8 @@ def _spine_value(key: str, value: str) -> object:
     return doc_id_list(text) if key == "supersedes" else text
 
 
-def _yaml_disagrees(scan: _Scan, y: _Scan, first_not_plain: str) -> str | None:
+def _yaml_disagrees(scan: _Scan, y: _Scan, first_not_plain: str, read: frozenset[str],
+                    spine: frozenset[str]) -> str | None:
     """Why YAML's reading `y` of a flat block holding `first_not_plain` is not the line reader's
     (`scan`), or None when they agree as `opening_block` requires."""
     if y.pairs is None:
@@ -820,10 +832,10 @@ def _yaml_disagrees(scan: _Scan, y: _Scan, first_not_plain: str) -> str | None:
         if k not in flat:
             return f"YAML reads `{_shown(k)}` as a key, and the engine's reader does not"
     for k, _ in y.problems:
-        if k in READ_KEYS:
+        if k in read:
             return f"YAML cannot read the value of `{_shown(k)}` the way this block is written"
     for k, v in y.pairs:
-        if k in _SPINE_VALUES and _spine_value(k, flat[k]) != _spine_value(k, v):
+        if k in spine and _spine_value(k, flat[k]) != _spine_value(k, v):
             return (f"`{_shown(k)}` reads as `{_shown(yaml_scalar.decode(flat[k]))}` to the engine "
                     f"and as `{_shown(yaml_scalar.decode(v))}` to YAML")
     return None
@@ -835,7 +847,7 @@ def _unquoted(key: str) -> str:
 
 
 def read_markdown(path: Path, doc_class: str | None = None, *,
-                  strict: bool = True) -> tuple[Document, str, dict]:
+                  strict: bool = True, keys: KeyMap | None = None) -> tuple[Document, str, dict]:
     """Read a markdown file into a canonical Document. Returns (doc, body_md, reader_stats).
 
     body_md (source minus frontmatter) is handed back so the ingest pipeline can run the A18
@@ -843,7 +855,16 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
     Raises ValueError on an over-size file or non-UTF-8 bytes, and its FrontmatterError on a value
     it cannot read under one of `READ_KEYS` unless `strict` is off (cmd_ingest_md turns these into
     a clean FATAL rather than an unhandled traceback).
+
+    `keys` is the note's vault's `engine_keys.KeyMap`: which property each spine field is read
+    from. None reads every field under its own name (`engine_keys.DEFAULT`). The frontmatter's
+    pairs, duplicates kept and each value as written, are in the stats for the guard
+    (`markdown.ingest`), popped there and never reported.
     """
+    from substrate import engine_keys  # here: it imports this module
+
+    keys = engine_keys.DEFAULT if keys is None else keys
+    read = keys.read_keys
     data = path.read_bytes()
     if len(data) > _MAX_MD_BYTES:
         raise tag(ValueError(f"{path} is {len(data)} bytes (> {_MAX_MD_BYTES} cap)"),
@@ -860,8 +881,12 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
 
     # `unread`: why a leading `---` block was read as body text, for ingest to name if the note is
     # then refused for a spine it shows written; popped there, never reported.
-    front, body_md, scan = _read_frontmatter(raw, strict=strict)
+    pairs, end, scan = _frontmatter_scan(raw, strict, read)
+    front, body_md = ({}, raw) if pairs is None else (dict(pairs), raw[end:])
     unread = scan.prose if scan.pairs is None else None
+
+    def declared(field: str) -> str | None:
+        return next((front[n] for n in keys.reads(field) if front.get(n)), None)
     blocks = _blocks(body_md)
     anchors = [b.page for b in blocks if b.page is not None]
 
@@ -897,7 +922,7 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
         # became `reference-frozen`, so 91% of the corpus claimed to be a published edition that
         # will not change. Absence now stays empty and `classes.apply` resolves it to
         # `unclassified` — the reader invents nothing, exactly as it invents no confidence.
-        document_class=(doc_class or front.get("document_class") or front.get("class") or ""),
+        document_class=(doc_class or declared("class") or ""),
         blocks=blocks,
         title=front.get("title"),
         version=front.get("version"),
@@ -909,7 +934,7 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
         raw=(front.get("raw") or None),
         raw_sha256=fraw if _SHA256.fullmatch(fraw) else None,
         raw_location=(front.get("raw_location") or None),
-        status=(front.get("status") or None),
+        status=declared("status"),
         superseded_by=fsup_by if _DOC_ID.fullmatch(fsup_by) else None,
         # List-valued as of v8. `superseded_by` one line up stays scalar, and the asymmetry is the
         # fact rather than an inconsistency: a dead note has exactly one live replacement, a live
@@ -919,7 +944,7 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
         # doc_type (§6a) is carried raw like status; spine.validate_doc_type is the gate that
         # refuses an unknown value, or an absent one on the vault write path. The reader stays a
         # pure parser and does not decide strictness.
-        doc_type=(front.get("doc_type") or None),
+        doc_type=declared("doc_type"),
         # confidence likewise: parsed raw, gated by spine.validate_confidence. Absent stays None
         # here and becomes `unjudged` at the gate — the reader never invents a value, so "the note
         # said nothing" and "the note said unstated" arrive at the gate distinguishable.
@@ -928,7 +953,7 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
         # None to `unstated` too. This comment described the property correctly while the code one
         # layer down discarded it — the reader was never the defect, which is why no reader test
         # could have caught it.
-        confidence=(front.get("confidence") or None),
+        confidence=declared("confidence"),
         extractor="markdown-reader/0.1.0",
         extractor_arm="markdown",
         layout_model="",
@@ -945,6 +970,7 @@ def read_markdown(path: Path, doc_class: str | None = None, *,
         "doc_type": doc.doc_type,
         "frontmatter_unread": unread,
         # Popped by ingest like the line above, never reported.
-        "opening_block": opening_block(raw, scan),
+        "opening_block": opening_block(raw, scan, read=read, spine=keys.spine_keys),
+        "frontmatter_pairs": scan.pairs or [],
     }
     return doc, body_md, stats

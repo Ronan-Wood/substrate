@@ -10,31 +10,23 @@ note is never indexed, that a copy is neither indexed nor quarantined, that exac
 answers for each `doc_id`, and that nothing else is withheld. The differential runs the real
 `substrate compose` on generated vaults and finds no disagreement.
 
-Against this repository's `feat/compose-quarantine` (2026-11-14), on macOS:
+Against this repository's `feat/rename-spine-keys` on `8e95ed8` (2026-11-20), on macOS, with
+copies and renamed spine keys generated together (22 theorems, standard axioms only):
 
 | run | cases | result |
 |---|---|---|
-| `agree` | 2,000 | no disagreement: 351 index every note, 446 quarantine some, 586 refuse for a scope fault, 394 refuse with nothing left to index, 223 refuse over the ceiling |
+| `agree` | 2,000 | no disagreement: 408 index every note, 382 quarantine some, 875 refuse for a scope fault, 189 refuse with nothing left to index, 146 refuse over the ceiling. Of all of them, 238 leave out copies and 245 index a copy under a name of its own; in 932 the project vault renames spine keys (`[engine_keys]`), 396 of them only after an earlier compose, 155 hold a note the guard quarantines, and 145 hold copies two vaults read apart |
 | `agree --mutant keep-stale` | 500 | caught: a quarantined note's earlier version stays indexed |
 | `agree --mutant ceiling-ge` | 500 | caught: the scope is refused at the ceiling rather than above it |
 | `agree --mutant no-default` | 500 | caught: a manifest with no ceiling gets none |
 | `agree --mutant faults-ignored` | 500 | caught: `decide` drops a scope fault found while ingesting |
 | `agree --mutant allow-empty` | 500 | caught: a scope whose every note failed is indexed empty |
-
-Against `feat/identical-notes-compose` (2026-11-19), on macOS, with copies generated:
-
-| run | cases | result |
-|---|---|---|
-| `agree` | 2,000 | no disagreement: 296 index every note, 380 quarantine some, 791 refuse for a scope fault, 342 refuse with nothing left to index, 191 refuse over the ceiling. Of the cases indexed, 219 leave out copies and 185 index a copy under a name of its own |
-| `agree --mutant keep-stale` | 500 | caught |
-| `agree --mutant ceiling-ge` | 500 | caught |
-| `agree --mutant no-default` | 500 | caught |
-| `agree --mutant faults-ignored` | 500 | caught |
-| `agree --mutant allow-empty` | 500 | caught |
 | `agree --mutant last-copy` | 500 | caught: of two notes with one `doc_id`, the last by path is indexed rather than the first |
+| `agree --mutant no-guard` | 500 | caught: a note whose renamed field's old name still says `archived` or `conversation` is indexed live |
+| `agree --mutant read-alike` | 500 | caught: a copy is left out for a note its own vault would read differently |
 
 The non-required `lean` CI job (`.github/workflows/lean.yml`) builds the model, checks its axioms,
-runs 2,000 `agree` cases and requires each of the six planted regressions to be caught.
+runs 2,000 `agree` cases and requires each of the eight planted regressions to be caught.
 
 ## What is proved
 
@@ -87,15 +79,17 @@ one note, and first-by-path order is total on paths.
 project vault and an inherited one, each passing or failing in one of nine ways compose
 quarantines (a status, doc_type or class outside the vocabulary, frontmatter that is not YAML, an
 engine key spelled another way, `superseded` with no link, a class policy refusal, a note that is
-not UTF-8); up to six byte copies of those notes, each under a name of its own or under its
-note's name in another folder (`a/`, before `notes/` by path, or `zz/`, after it) or in the other
-vault; a declared ceiling (none, a count from 0 to 12, or `"none"`); one of seven scope faults (a
-`doc_id` two notes declare, a conflict copy of a note that declares its `doc_id`, one name in two
-folders whose bytes differ and whose `doc_id` fingerprint matches anyway, a missing inherited
-vault, a manifest that does not parse, a ceiling that is not one, a link where a composed passing
-note's ingest folder goes); and, for some notes, an earlier compose that indexed them in a good
-version. All but the link are refused before any note is read; the link reaches `decide` while
-compose ingests.
+not UTF-8), or, in half the cases, a project vault that renames `status`, `doc_type` and `class`
+in `[engine_keys]`, with two more kinds whose outcome is the vault's (values of the vault's own,
+and an old key that still says `archived` and `conversation`); up to six byte copies of those
+notes, each under a name of its own or under its note's name in another folder (`a/`, before
+`notes/` by path, or `zz/`, after it) or in the other vault; a declared ceiling (none, a count
+from 0 to 12, or `"none"`); one of seven scope faults (a `doc_id` two notes declare, a conflict
+copy of a note that declares its `doc_id`, one name in two folders whose bytes differ and whose
+`doc_id` fingerprint matches anyway, a missing inherited vault, a manifest that does not parse, a
+ceiling that is not one, a link where a composed passing note's ingest folder goes); and, for some
+notes, an earlier compose that indexed them in a good version. All but the link are refused
+before any note is read; the link reaches `decide` while compose ingests.
 
 The real compose runs in the harness's process, against a scratch registry and engine home in a
 temporary folder per case. The compiled model reads the same case as JSON. They must agree:
@@ -141,6 +135,12 @@ under `python -O`.
   written, and a refusal there leaves it partly rewritten. That is outside this rule, and the
   `keep-stale` mutant is how it shows: the stale version is indexed, and `assert_composed`
   refuses after the write.
+- **A renamed vault is a case, not a model input.** Whether a note fails depends on its vault's
+  `[engine_keys]`: in a vault that renames, a note of the vault's own values passes and one whose
+  old key still marks it archived or a call fails; elsewhere, the inherited vault included, the
+  reverse. The harness works that out per note and hands the model the bit, so the theorems about
+  failed notes cover it unchanged. Some cases add the rename only after the earlier compose, so a
+  note indexed in a good version, with the same bytes, must leave the index.
 - **A22 and A18 failures are not generated.** Both quarantine their note through the same path;
   `tests/test_compose_quarantine.py` plants each.
 

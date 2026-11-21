@@ -56,7 +56,7 @@ from pathlib import Path
 
 from substrate.vault import (
     MANIFEST, SOURCE_META, SkipList, VaultError, _tier_for, folded,
-    folder_fault, folder_parts, inherited_entries, is_source_meta, skip_list,
+    folder_fault, folder_parts, inherited_entries, is_source_meta, keys_of, skip_list,
     writable_folders,
 )
 from substrate import writelog
@@ -612,6 +612,7 @@ def _validate(
     from substrate.spine import SpineError
 
     dest = _resolve_target(project_vault, folder, filename)
+    keys = _keys(project_vault)
 
     tmp = Path(tempfile.mkdtemp())
     try:
@@ -629,7 +630,7 @@ def _validate(
             # growing, without a flag day that would freeze six scopes unattended. `unstated`
             # satisfies this gate; `unjudged` cannot be declared, so the gate has no bypass.
             result = ingest_markdown(
-                staged, tmp / "out", require_status=True, require_confidence=True
+                staged, tmp / "out", require_status=True, require_confidence=True, keys=keys
             )
         except (ValueError, classes.ClassPolicyError, SpineError, CoverageError) as e:
             raise NoteError(f"{type(e).__name__}: {e}") from e
@@ -994,14 +995,29 @@ def _visible(text: str) -> tuple[str, int, int]:
 _GUARDED = frozenset({"doc_id", "status", "superseded_by", "document_class", "class"})
 
 
-def _spine_of(staged: Path) -> tuple[dict, str]:
-    """The DECLARED spine of a staged note, and its declared `doc_id` line ("" if none).
+def _keys(project_vault: Path):
+    """The project vault's renames (`vault.keys_of`): the names the write path reads the spine
+    from, and the guard on the old ones. A manifest that does not say refuses the write."""
+    try:
+        return keys_of(project_vault.expanduser().resolve())
+    except VaultError as e:
+        raise NoteError(f"{e} Nothing was written.") from e
+
+
+def _spine_of(staged: Path, keys, *, guarded: bool = False) -> tuple[dict, str]:
+    """The DECLARED spine of a staged note, and its declared `doc_id` line ("" if none), read
+    under the names its vault's manifest has the engine read (`keys`).
 
     Parsed, not gated, so the current note's spine can be read even if it would not pass today's
     write gate (most migrated notes declare no confidence). Both sides of a plan go through this one
     function, so a field reported as changed changed in the file, not in how it was read.
+
+    `guarded` applies one gate, for the CURRENT note (the amended one is gated by ingest): a note
+    the guard holds (`markdown.ingest.guard`) raises SpineError, so a note compose leaves out
+    because a renamed key's old name still marks it withheld or frozen is not edited as live.
     """
     from substrate.classes import UNCLASSIFIED_CLASS
+    from substrate.markdown.ingest import guard
     from substrate.markdown.reader import (
         _parse_frontmatter, doc_id_list, normalized_text, read_markdown,
     )
@@ -1009,8 +1025,11 @@ def _spine_of(staged: Path) -> tuple[dict, str]:
     # A field the reader cannot read is left out, so amend can repair such a note, except where a
     # gate below rests on it: those refuse, rather than judge the note as if it declared nothing.
     text = normalized_text(staged.read_bytes())
-    _parse_frontmatter(text, strict=True, keys=_GUARDED)
-    doc, _body, _stats = read_markdown(staged, strict=False)
+    _parse_frontmatter(text, strict=True,
+                       keys=_GUARDED | {*keys.reads("status"), *keys.reads("class")})
+    doc, _body, stats = read_markdown(staged, strict=False, keys=keys)
+    if guarded:
+        guard(doc.doc_id, stats["frontmatter_pairs"], stats["opening_block"], keys)
     front, _ = _parse_frontmatter(text)
     return {
         "doc_id": doc.doc_id,
@@ -1117,7 +1136,7 @@ def _render_diff(base: bytes, content: bytes, rel: str) -> tuple[str, dict, int]
     return diff, hidden, literal
 
 
-def _check_amend(*, target: Path, rel: str, base: bytes, content: bytes,
+def _check_amend(*, target: Path, rel: str, base: bytes, content: bytes, keys,
                  issued: Callable[[bytes], bool] | None = None,
                  author: str | None = None) -> tuple[dict, bytes]:
     """Every gate an amend must pass, against the current bytes `base`. Issues NOTHING.
@@ -1130,7 +1149,10 @@ def _check_amend(*, target: Path, rel: str, base: bytes, content: bytes,
     `issued` is None for a plan. A commit passes whether its token was issued for the bytes to
     write, asked as soon as they are known, so a token that cannot redeem buys no diff or gate;
     and a commit does not diff at all — the plan showed the diff, the binding holds these bytes to
-    it, and a diff against the clock could refuse an approved edit on a slower second run."""
+    it, and a diff against the clock could refuse an approved edit on a slower second run.
+
+    `keys` is the project vault's renames (`_keys`): both sides are read and gated under them, and
+    a current note the guard holds is refused."""
     from substrate import classes
     from substrate.markdown.ingest import CoverageError, ingest_markdown
     from substrate.spine import SpineError
@@ -1147,7 +1169,10 @@ def _check_amend(*, target: Path, rel: str, base: bytes, content: bytes,
         before_path = tmp / "before" / target.name
         before_path.write_bytes(base)
         try:
-            before, before_fid = _spine_of(before_path)
+            before, before_fid = _spine_of(before_path, keys, guarded=True)
+        except SpineError as e:
+            raise NoteError(f"{target} is left out of the index, and is never amended as a live "
+                            f"note: {e}") from e
         except ValueError as e:
             raise NoteError(f"the current note cannot be read as markdown: {e}") from e
 
@@ -1229,11 +1254,11 @@ def _check_amend(*, target: Path, rel: str, base: bytes, content: bytes,
             # The same gates as adding a note, including the stricter confidence gate: an amend has
             # an author present, so a note it touches leaves with a judged confidence.
             result = ingest_markdown(
-                after_path, tmp / "out", require_status=True, require_confidence=True
+                after_path, tmp / "out", require_status=True, require_confidence=True, keys=keys
             )
         except (ValueError, classes.ClassPolicyError, SpineError, CoverageError) as e:
             raise NoteError(f"{type(e).__name__}: {e}") from e
-        after, after_fid = _spine_of(after_path)
+        after, after_fid = _spine_of(after_path, keys)
 
         after_policy = classes.POLICIES.get(after["document_class"])
         if after_policy is not None and after_policy.frozen:
@@ -1571,7 +1596,7 @@ def plan_amend(*, project_vault: Path, path: str, content: bytes, book: PlanBook
     try:
         base = _read_at(dfd, parts[-1], target)
         fields, final = _check_amend(target=target, rel=rel, base=base, content=content,
-                                     author=author)
+                                     author=author, keys=_keys(root))
         # After the gates, so a note amend would refuse anyway is not answered "make it writable".
         _require_writable_note(dfd, parts[-1], target)
         _require_writable_folder(dfd, target)
@@ -1648,7 +1673,7 @@ def commit_amend(
     try:
         previous, written = _commit_at(dfd, parts[-1], target=target, rel=rel, content=content,
                                        confirm_token=confirm_token, book=book, author=author,
-                                       bound_to=bound_to, who=who)
+                                       bound_to=bound_to, who=who, root=root)
     except NoteError:
         book.discard(confirm_token)
         raise
@@ -1723,7 +1748,8 @@ def _replace_at(dfd: int, name: str, target: Path, *, content: bytes, stage: str
 
 def _commit_at(dfd: int, name: str, *, target: Path, rel: str, content: bytes,
                confirm_token: str, book: PlanBook, author: str | None = None,
-               bound_to: str = "", who: writelog.Identity | None = None) -> tuple[str, str]:
+               bound_to: str = "", who: writelog.Identity | None = None,
+               root: Path) -> tuple[str, str]:
     """The write itself, relative to the note's folder descriptor. Returns (replaced sha256,
     written sha256) — the written bytes may carry a pinned doc_id the caller did not send."""
     planned = book.note_of(confirm_token)
@@ -1736,9 +1762,11 @@ def _commit_at(dfd: int, name: str, *, target: Path, rel: str, content: bytes,
     base_sha = _sha(base)
     if not secrets.compare_digest(planned[1], base_sha):
         raise _changed_since_plan(target)
+    # After the token and the compare-and-swap, as every gate is: a note that moved is said first.
+    keys = _keys(root)
 
     fields, content = _check_amend(
-        target=target, rel=rel, base=base, content=content, author=author,
+        target=target, rel=rel, base=base, content=content, author=author, keys=keys,
         issued=lambda final: book.matches(confirm_token,
                                           _amend_binding(target, base_sha, final, bound_to)))
     if not book.redeem(confirm_token, _amend_binding(target, base_sha, content, bound_to)):

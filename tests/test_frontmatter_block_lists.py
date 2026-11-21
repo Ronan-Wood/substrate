@@ -18,7 +18,7 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from ruamel.yaml import YAML
 
-from substrate import cli, notes, scopes
+from substrate import cli, engine_keys, notes, scopes
 from substrate import frontmatter as fm
 from substrate import vault as V
 from substrate.markdown import yaml_scalar
@@ -302,7 +302,7 @@ def test_amend_reads_a_superseded_note_s_spine_beside_a_nested_value(tmp_path):
     superseded and identity gates had nothing to refuse on."""
     p = _note(tmp_path, "---\ndoc_id: real-old-id\nstatus: superseded\nsuperseded_by: new-note\n"
                         "doc_type: reference\nmeta:\n  author: x\n---\n\n# T\n\nbody\n")
-    spine, fid = notes._spine_of(p)
+    spine, fid = notes._spine_of(p, engine_keys.DEFAULT)
     assert (spine["status"], spine["doc_id"], fid) == ("superseded", "real-old-id", "real-old-id")
 
 
@@ -535,14 +535,14 @@ def test_a_flat_line_led_by_a_no_break_space_is_still_flat():
 def test_amend_repairs_a_note_whose_unread_value_no_gate_rests_on(tmp_path):
     p = _note(tmp_path, "---\nstatus: active\ndoc_type: reference\ntitle: |\n  line one\n  line two\n"
                         "---\n\n# T\n\nbody\n")
-    spine, _ = notes._spine_of(p)
+    spine, _ = notes._spine_of(p, engine_keys.DEFAULT)
     assert spine["status"] == "active"
 
 
 def test_amend_refuses_a_note_whose_unread_value_a_gate_rests_on(tmp_path):
     p = _note(tmp_path, "---\nstatus:\n  was: superseded\ndoc_type: reference\n---\n\n# T\n\nbody\n")
     with pytest.raises(FrontmatterError, match="`status`"):
-        notes._spine_of(p)
+        notes._spine_of(p, engine_keys.DEFAULT)
 
 
 def test_the_pin_takes_its_indent_from_a_key_not_a_comment():
