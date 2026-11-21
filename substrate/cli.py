@@ -174,6 +174,18 @@ def _ingest_pdf(args: argparse.Namespace, pdf: Path, models: Path | None) -> int
     except PdfReadError as e:
         print(f"\nFATAL (read): {e}", file=sys.stderr)
         return 2
+    except ImportError as e:
+        # docling's reader, which is an extra. Exit 2, as for any other converter that cannot run:
+        # nothing was read. ImportError, not ModuleNotFoundError: with `convert` but not `convert-ml`
+        # installed, docling reports the missing `docling-parse` as a bare ImportError. The text
+        # layer is the core's, so a module missing there is a fault, as is one of the engine's own.
+        from substrate.extract import convert
+
+        if models is None or convert.engine_import_fault(e):
+            raise
+        print(f"\nFATAL (converter): {convert.needs_extra(convert.PDF, e)} The PDF's own text layer "
+              f"needs nothing installed: run without --docling-models.", file=sys.stderr)
+        return 2
 
     try:
         meta = classes.apply(doc)
@@ -343,11 +355,14 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
     #
     # `importlib.metadata.PackageNotFoundError` subclasses ModuleNotFoundError, so the version
     # lookup at the end of `to_markdown` lands here too. Uncaught, either one printed a traceback
-    # out of a command whose whole contract is a legible 2-vs-3 split.
-    except ModuleNotFoundError as e:
-        print(f"\nFATAL (converter): {spec.token} needs docling, which this environment cannot "
-              f"load — {e}. The markdown and text arms need nothing installed; `--md` reads the "
-              f"file as markdown, or install the converter dependencies and retry.", file=sys.stderr)
+    # out of a command whose whole contract is a legible 2-vs-3 split. ImportError, its base,
+    # because docling reports a missing piece of `convert-ml` (`ocrmac`) as a bare one. One of the
+    # engine's own imports failing is a bug, and keeps its traceback.
+    except ImportError as e:
+        if convert.engine_import_fault(e):
+            raise
+        print(f"\nFATAL (converter): {convert.needs_extra(spec, e)} The markdown and text arms need "
+              f"nothing installed; `--md` reads the file as markdown.", file=sys.stderr)
         return 2
     except ValueError as e:
         # `InputFormat(spec.docling_format)` on a docling build that does not name this format —

@@ -107,3 +107,25 @@ def test_dependabot_covers_this_tree_at_the_root() -> None:
     config = yaml.safe_load((ROOT / ".github" / "dependabot.yml").read_text())
     covered = {(u["package-ecosystem"], u["directory"]) for u in config["updates"]}
     assert covered == {("github-actions", "/"), ("uv", "/")}
+
+
+def _runs(workflow: str, job: str) -> str:
+    return "\n".join(step.get("run", "") for step in _workflow(workflow)["jobs"][job]["steps"])
+
+
+def test_the_engine_check_installs_the_core_and_nothing_else() -> None:
+    """The required check is the core job: what the lock holds for the core, no extra, no package
+    named by hand, and every skip named."""
+    runs = _runs("tests.yml", "engine")
+    assert "uv export --frozen --no-dev --no-emit-project -o" in runs
+    assert "--extra" not in runs and "--all-extras" not in runs and "uv sync" not in runs
+    installs = [line for line in runs.splitlines() if "uv pip install" in line]
+    assert installs and all("--require-hashes -r" in line for line in installs), installs
+    assert "tools/check-skips.py" in runs and "tests/core-job-skips.txt" in runs
+    assert (ROOT / "tests" / "core-job-skips.txt").is_file()
+
+
+def test_engine_docling_runs_both_extras_with_no_skip() -> None:
+    runs = _runs("docling.yml", "docling")
+    assert "--extra convert --extra convert-ml" in runs
+    assert "! grep -q '<skipped'" in runs

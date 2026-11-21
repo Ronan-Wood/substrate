@@ -99,6 +99,37 @@ class FormatSpec:
     def doc_class_default(self) -> str:
         return "declared (--doc-class required)" if self.arm == "pdf" else "absence → unclassified"
 
+    @property
+    def docling_extra(self) -> str | None:
+        """The engine extra docling needs to read this format, or None where docling never reads it.
+
+        `convert-ml` for a format docling reads with its models (a PDF or an image, when a models
+        folder is named), `convert` for docling's other readers. Without a models folder a PDF or an
+        image needs no extra at all: pdfium reads the text layer, and Apple's recognizer
+        (`bin/extract-apple`, a binary the bundle build compiles) reads a scan.
+        """
+        if self.arm in ("markdown", "text"):
+            return None
+        return "convert-ml" if self.uses_models else "convert"
+
+
+def needs_extra(spec: FormatSpec, error: Exception) -> str:
+    """The refusal for a docling that will not import: the format, the extra, and how to install it.
+
+    It says the extra could not load, not that it is absent: a `convert` install whose reader breaks
+    on import is the same refusal, and `uv sync` repairs it as it installs one. `--inexact`, because
+    a plain `uv sync` removes every extra it is not named, and would take the other one with it.
+    """
+    extra = spec.docling_extra
+    return (f"{spec.token} needs the engine's [{extra}] extra, and it could not be loaded here "
+            f"— {str(error).rstrip('.')}. From a clone, `uv sync --inexact --extra {extra}` "
+            f"installs it.")
+
+
+def engine_import_fault(error: ImportError) -> bool:
+    """Whether the import that failed is the engine's own: a bug to show, not an extra to name."""
+    return (error.name or "").partition(".")[0] == "substrate"
+
 
 PDF = FormatSpec(
     "pdf", (".pdf",), "pdf", "pdf", True, None,
@@ -498,7 +529,13 @@ def to_markdown(src: Path, spec: FormatSpec, *, models: Path | None = None, log=
     conv = DocumentConverter(allowed_formats=[fmt], format_options=options)
     try:
         result = conv.convert(str(src))
-    except Exception as e:  # noqa: BLE001 — every docling failure mode becomes one refusal
+    except ImportError:
+        # The converter, not the file: docling raises a bare ImportError for a piece of its own it
+        # imports only when a pipeline first runs (`ocrmac`, `docling-parse`), and with `convert`
+        # but not `convert-ml` installed that is how an image read with models fails. The caller
+        # names the extra and exits 2; a refusal here would blame the file.
+        raise
+    except Exception as e:  # noqa: BLE001 — every other docling failure becomes one refusal
         raise ConversionRefused(
             f"{spec.token}: docling could not convert {src.name} — {e}"
         ) from e
@@ -522,7 +559,7 @@ def to_markdown(src: Path, spec: FormatSpec, *, models: Path | None = None, log=
     except Exception:  # noqa: BLE001 — a page count is provenance, never a gate
         pages = None
 
-    from importlib.metadata import version as pkg_version
+    from substrate.extract.docling_arm import docling_version
 
     stats = {
         "converted_chars": len(md),
@@ -543,7 +580,7 @@ def to_markdown(src: Path, spec: FormatSpec, *, models: Path | None = None, log=
     if probe.error:
         stats["raw_coverage_probe_error"] = probe.error
 
-    return Conversion(markdown=md, pages=pages, extractor=f"docling {pkg_version('docling')}",
+    return Conversion(markdown=md, pages=pages, extractor=f"docling {docling_version()}",
                       stats=stats, arm=f"docling-{spec.token}")
 
 

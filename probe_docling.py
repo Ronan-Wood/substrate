@@ -40,7 +40,7 @@ if _chosen:
         sys.exit(f"probe_docling: {_e}")
     configure(MODELS)
 
-from importlib.metadata import version as _pkg_version  # noqa: E402
+from substrate.extract.docling_arm import docling_version  # noqa: E402
 
 from docling.datamodel.base_models import InputFormat  # noqa: E402
 from docling.datamodel.pipeline_options import PdfPipelineOptions  # noqa: E402
@@ -177,7 +177,7 @@ def main() -> None:
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"docling {_pkg_version('docling')}  models={MODELS}")
+    print(f"docling {docling_version()}  models={MODELS}")
     print(f"reading {pdf.name} pages {start}-{end}")
 
     res = probe(pdf, (start, end), out)

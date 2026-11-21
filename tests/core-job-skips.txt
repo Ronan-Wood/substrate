@@ -1,0 +1,33 @@
+# The tests the required `engine` check skips, each with its reason. That job runs on Ubuntu with
+# the core alone, and `tools/check-skips.py` fails it on a skip not named here, or on a named test
+# that ran. Every one of them runs in `engine docling` (macOS, both extras), which allows no skip.
+# Measured 2026-11-20 against the runner's setup: Python 3.14 from the system, a non-root user, ext4.
+
+# An extra: Pillow and docling arrive with `convert`, docling-parse with `convert-ml`.
+tests.test_pdf_readers::test_a_scan_in_an_engine_without_the_recognizer_blames_the_engine
+tests.test_pdf_readers::test_a_scan_the_recognizer_could_not_read_names_the_pages
+tests.test_pdf_readers::test_scanned_pages_take_the_recognizers_reading
+tests.test_pdf_readers::test_an_image_with_models_is_read_on_the_cpu_not_metal
+tests.test_engine_interpreter_signing::test_this_interpreter_draws_the_check_page
+
+# macOS: Finder's Locked flag, F_FULLFSYNC, BSD find and xattr(1), a case-insensitive volume.
+tests.test_amend::test_a_finder_locked_note_is_refused_at_plan_not_at_the_rename
+tests.test_engine_interpreter_pin::test_full_sync_falls_back_only_where_the_filesystem_does_not_take_it[ENOTSUP]
+tests.test_engine_interpreter_pin::test_full_sync_falls_back_only_where_the_filesystem_does_not_take_it[EINVAL]
+tests.test_engine_interpreter_pin::test_full_sync_falls_back_only_where_the_filesystem_does_not_take_it[ENOSYS]
+tests.test_engine_interpreter_pin::test_full_sync_falls_back_only_where_the_filesystem_does_not_take_it[EIO]
+tests.test_slim_bundled_engine::test_check_refuses_an_unslimmed_tree_and_names_what_is_left
+tests.test_slim_bundled_engine::test_check_passes_a_slimmed_tree
+tests.test_slim_bundled_engine::test_check_refuses_a_code_signature_in_extended_attributes[com.apple.cs.CodeDirectory]
+tests.test_slim_bundled_engine::test_check_refuses_a_code_signature_in_extended_attributes[com.apple.cs.CodeRequirements]
+tests.test_slim_bundled_engine::test_check_refuses_a_code_signature_in_extended_attributes[com.apple.cs.CodeSignature]
+tests.test_slim_bundled_engine::test_check_ignores_other_extended_attributes
+tests.test_manifest_writable::test_an_existing_folder_named_in_another_case_is_refused
+tests.test_manifest_writable::test_a_project_vault_holding_an_inherited_vault_takes_no_write[Core-core]
+
+# The interpreters the bundle build checks: the pinned install, and a uv-managed 3.14 (the runner's
+# is the system's).
+tests.test_engine_interpreter_pin::test_the_real_store_passes_every_step_the_build_runs
+tests.test_engine_interpreter_pin::test_the_checked_in_pin_matches_the_installed_interpreter
+tests.test_bundled_engine_runtime::test_a_venv_beside_the_build_is_never_the_interpreter[cwd]
+tests.test_bundled_engine_runtime::test_a_venv_beside_the_build_is_never_the_interpreter[VIRTUAL_ENV]

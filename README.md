@@ -22,9 +22,9 @@ and the engine also runs on its own.
 - **Search reports what it used.** Lexical search (SQLite FTS5) works with nothing else installed.
   Vector search, HyDE and reranking run against local models. Each result states which of those
   arms ran, and the engine refuses to give an answer that looks complete but isn't.
-- **Ingestion** reads Markdown with the standard library. PDFs, Office files, HTML, EPUB and images
-  go through docling and Apple's on-device recognizer. `substrate formats` lists every format it
-  accepts and every format it refuses.
+- **Ingestion** reads Markdown with the standard library and a PDF's text layer with pdfium. Office
+  files, HTML, EPUB and images go through docling, an optional extra, and Apple's on-device
+  recognizer. `substrate formats` lists every format it accepts and every format it refuses.
 
 ## Status
 
@@ -49,8 +49,23 @@ cd substrate
 uv sync
 ```
 
-The first sync is slow: OpenCV builds from source, because every prebuilt macOS wheel bundles a
-GPL FFmpeg (`pyproject.toml` explains why).
+That is the core: Markdown, text and a PDF's text layer, composition, the index and search, from
+three packages. Document conversion is in two extras:
+
+| extra | adds |
+|---|---|
+| `convert` | docling's readers for Office files, HTML, CSV, WebVTT, AsciiDoc, LaTeX, email and EPUB, without torch |
+| `convert-ml` | `convert`, plus docling's PDF layout and table models, image OCR, torch and OpenCV |
+
+```sh
+uv sync --extra convert --extra convert-ml
+```
+
+A plain `uv sync` afterwards removes them again. The first sync with both is slow: OpenCV builds
+from source with FFmpeg off, as Scripta's bundled engine ships it, because every prebuilt macOS
+wheel bundles a GPL FFmpeg (`pyproject.toml` explains why). A `pip` or `uv tool` install of
+`convert-ml` takes PyPI's prebuilt `opencv-python-headless` instead, which this project does not
+redistribute.
 
 ## Quickstart: the demo vaults in 30 seconds
 

@@ -433,7 +433,7 @@ def test_a_real_deployment_of_this_repo_verifies_immediately() -> None:
     assert (engine / "substrate" / "cli.py").is_file()
 
     assert _verify(home / ".substrate" / "engine.json").returncode == 0, "a fresh deploy must verify"
-    assert "UV sync --frozen --quiet" in _calls(home), (
+    assert "UV sync --frozen --extra convert --extra convert-ml --quiet" in _calls(home), (
         "the environment must be built at deploy time, not by the first engine start")
 
 

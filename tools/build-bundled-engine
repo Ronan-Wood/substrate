@@ -283,7 +283,11 @@ pin_tool --relocate "$STAGE/runtime" "$PY_ROOT"
 
 cp "$REPO/pyproject.toml" "$REPO/uv.lock" "$STAGE/"
 
-say "resolving dependencies (--no-dev, precompiled)"
+say "resolving dependencies (both extras, --no-dev, precompiled)"
+# BOTH EXTRAS, BY NAME: the core alone reads Markdown, text and a PDF's text layer, and Scripta's
+# Library converts every other format. Named rather than `--all-extras`, so an extra added later for
+# something else does not ship inside the app unasked.
+#
 # --no-dev is not a tidiness flag. `uv sync --frozen` installs the dev group, which is how
 # ipykernel, jedi, debugpy and zmq — 200 MB of editor tooling — were sitting in the deployed engine.
 #
@@ -291,7 +295,7 @@ say "resolving dependencies (--no-dev, precompiled)"
 # `import docling` would write thousands of files into the bundle. Compiling them HERE puts them
 # inside the seal instead of breaking it.
 ( cd "$STAGE" && "$UV" venv .venv --relocatable --python ./runtime/bin/python3.14 --quiet \
-    && "$UV" sync --frozen --no-dev --compile-bytecode --quiet ) \
+    && "$UV" sync --frozen --no-dev --extra convert --extra convert-ml --compile-bytecode --quiet ) \
   || die "could not build the environment in $STAGE"
 
 # THE LINE THAT MAKES IT PORTABLE, and it is not what `--relocatable` does. That flag relativizes

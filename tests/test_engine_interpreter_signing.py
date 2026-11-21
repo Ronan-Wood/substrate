@@ -112,7 +112,8 @@ def test_a_check_that_breaks_exits_2_not_1(monkeypatch: pytest.MonkeyPatch, caps
     assert "the check itself failed" in capsys.readouterr().err
 
 
-@pytest.mark.skipif(importlib.util.find_spec("docling") is None, reason="docling is not installed")
+@pytest.mark.skipif(importlib.util.find_spec("docling_parse") is None,
+                    reason="docling-parse is not installed (the convert-ml extra)")
 def test_this_interpreter_draws_the_check_page() -> None:
     # The dev interpreter is not under the hardened runtime, so this proves the check's own path —
     # pdfium writes the page, docling's default backend draws it — against the docling that is locked.

@@ -38,15 +38,27 @@ jobs:
           persist-credentials: false
       - run: echo "PYTHONPATH=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
-      # NOT `uv sync`. The engine's full dependency set is torch, docling and an OpenCV built from
-      # source — gigabytes, and twenty minutes of compiling, for a suite that touches none of it.
-      # Measured 2026-09-16: a few packages run the whole suite in seconds from a small environment.
-      # A test that needs more than this should say so by failing here.
+        with:
+          # The uv that exports the lock and checks its hashes, pinned as in `engine docling`.
+          version: "0.12.2"
+      # THE CORE AND NOTHING ELSE: the three packages `pyproject.toml` declares, exactly as the lock
+      # holds them, hashes checked. Neither extra, so a module that imports docling, torch or OpenCV
+      # where the core can reach it fails here. `engine docling` runs the suite with both extras.
       - run: uv venv --python 3.14
       # The `test` group (pytest, and the frontmatter tests' hypothesis and ruamel.yaml) exactly as
-      # the lock holds it, hashes checked, so this job and the one below run the same versions.
+      # the lock holds it, so this job and the one below run the same versions.
       - run: |
+          uv export --frozen --no-dev --no-emit-project -o "$RUNNER_TEMP/core.txt"
           uv export --frozen --only-group test --no-emit-project -o "$RUNNER_TEMP/test-group.txt"
-          uv pip install --require-hashes -r "$RUNNER_TEMP/test-group.txt"
-      - run: uv pip install pypdfium2 pillow numpy pyyaml
-      - run: uv run --no-sync python -m pytest tests -q
+          uv pip install --require-hashes -r "$RUNNER_TEMP/core.txt" -r "$RUNNER_TEMP/test-group.txt"
+      # Fails the job if an extra's package is here, which would let its tests pass on what the core
+      # does not have.
+      - run: >-
+          uv run --no-sync python -c "import importlib.util as u;
+          found = [m for m in ('docling', 'torch', 'transformers', 'cv2', 'ocrmac', 'PIL')
+          if u.find_spec(m)]; assert not found, f'not core: {found}'"
+      - run: >-
+          uv run --no-sync python -m pytest tests -q -rsx --junitxml "$RUNNER_TEMP/junit.xml"
+      # EVERY SKIP IS NAMED. The list holds the tests that need an extra or another platform, each
+      # with its reason; a skip it does not name, or a named test that ran, fails the job.
+      - run: uv run --no-sync python tools/check-skips.py "$RUNNER_TEMP/junit.xml" tests/core-job-skips.txt

@@ -17,6 +17,18 @@ from substrate.models import LABEL_MAP, Block, Document, Kind
 BATCH_PAGES = 100
 
 
+def docling_version() -> str:
+    """The installed docling's version, for the `extractor` string `docling <version>`.
+
+    Read from `docling-slim`, which holds the code. `docling` is a meta-package of the same version
+    that the engine's extras do not install, so asking for it raised `PackageNotFoundError` on an
+    engine that converts perfectly well.
+    """
+    from importlib.metadata import version
+
+    return version("docling-slim")
+
+
 def cpu_accelerator():
     """CPU, NOT THE GPU DOCLING PICKS BY ITSELF — for every pipeline that loads the layout model.
 
@@ -109,8 +121,6 @@ class DoclingExtractor:
     def extract(
         self, pdf: Path, doc_class: str, *, pages: tuple[int, int] | None = None, log=print
     ) -> Document:
-        from importlib.metadata import version as pkg_version
-
         total = _page_count(pdf)
         first, last = pages or (1, total)
         last = min(last, total)
@@ -163,7 +173,7 @@ class DoclingExtractor:
             total_pages=total,
             pages_processed=last - first + 1,
             seconds=time.monotonic() - t0,
-            extractor=f"docling {pkg_version('docling')}",
+            extractor=f"docling {docling_version()}",
             extractor_arm=self.name,
             layout_model="docling-layout-heron",
         )

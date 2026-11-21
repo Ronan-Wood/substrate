@@ -78,6 +78,13 @@ Every release of the engine, newest first. The format follows
 
 ### Changed
 
+- **Document conversion is two optional extras.** The engine's own dependencies are `pypdfium2`,
+  `pyyaml` and `numpy`, which read Markdown, text and a PDF's text layer; `numpy` was imported
+  before and arrived only through docling. `convert` adds docling's readers for Office files, HTML,
+  CSV, WebVTT, AsciiDoc, LaTeX, email and EPUB, without torch. `convert-ml` adds docling's PDF layout
+  and table models, image OCR, torch, `ocrmac` and OpenCV. A plain `uv sync` installs the core; run
+  `uv sync --extra convert --extra convert-ml` for everything. A format whose extra is missing is
+  refused with exit 2, naming the extra. The bundled engine has both.
 - **`substrate --help` says what the engine does and the three commands a new vault needs,** and
   every command it lists has a description. `ingest-md`, `verify`, `rechunk`, `index`, `eval`,
   `review` and `refresh-record` are left out of the listing; each still runs, and

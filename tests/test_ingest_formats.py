@@ -721,6 +721,81 @@ def test_a_converter_that_cannot_run_exits_2_rather_than_tracebacking() -> None:
         convert.to_markdown = real
 
 
+def test_a_missing_extra_is_named_by_the_refusal() -> None:
+    """The extras are optional now, so a docling that will not import is an ordinary install, and
+    the refusal says which extra the format needs. The models PDF reader used to reach this as a
+    traceback: nothing caught it there, because docling was always installed."""
+    import argparse
+
+    from substrate import cli
+    from substrate.extract import docling_arm
+
+    root = _tmp()
+    src = root / "review.docx"
+    src.write_bytes(b"PK\x03\x04 pretend")
+    args = argparse.Namespace(out=str(root / "ing"), doc_class=None)
+
+    # No docling at all; and `convert` without `convert-ml`, where docling reports the missing piece
+    # as a bare ImportError. Both messages are docling's own, measured in a `convert`-only install.
+    no_docling = ModuleNotFoundError("No module named 'docling'")
+    no_parse = ImportError("The 'docling-parse' package is required to parse PDF files")
+    no_ocrmac = ImportError("ocrmac is not correctly installed")
+    image = root / "scan.png"
+    image.write_bytes(b"\x89PNG pretend")
+
+    def raising(exc):
+        def boom(*_a, **_k):
+            raise exc
+        return boom
+
+    real_convert, real_extract, real_configure = (convert.to_markdown,
+                                                  docling_arm.DoclingExtractor.extract, cli.configure)
+    try:
+        cli.configure = lambda *_a, **_k: {}  # it would point this process's HF caches at `root`
+        pdf_args = argparse.Namespace(out=str(root / "pdf"), doc_class="reference-frozen",
+                                      pages=None, batch=1)
+        convert.to_markdown = raising(no_docling)
+        rc, err = _captured(lambda: cli._ingest_converted(args, src, convert.spec_for(src), None))
+        assert rc == 2 and "[convert] extra" in err and "uv sync --inexact --extra convert" in err, err
+
+        for exc in (no_docling, no_ocrmac):
+            convert.to_markdown = raising(exc)
+            rc, err = _captured(lambda: cli._ingest_converted(args, image, convert.spec_for(image),
+                                                              root))
+            assert rc == 2 and "[convert-ml] extra" in err and "uv sync --inexact --extra convert-ml" in err, err
+
+        for exc in (no_docling, no_parse):
+            docling_arm.DoclingExtractor.extract = raising(exc)
+            rc, err = _captured(lambda: cli._ingest_pdf(pdf_args, root / "scan.pdf", root))
+            assert rc == 2 and "[convert-ml] extra" in err and "without --docling-models" in err, err
+            assert "Traceback" not in err
+
+        # The engine's own import failing is a bug, not a missing extra: it keeps its traceback.
+        ours = ImportError("cannot import name 'configure' from 'substrate.paths'", name="substrate.paths")
+        convert.to_markdown = raising(ours)
+        docling_arm.DoclingExtractor.extract = raising(ours)
+        for run in (lambda: cli._ingest_converted(args, src, convert.spec_for(src), None),
+                    lambda: cli._ingest_pdf(pdf_args, root / "scan.pdf", root)):
+            try:
+                _captured(run)
+            except ImportError as e:
+                assert e is ours
+            else:
+                raise AssertionError("the engine's own ImportError was refused as a missing extra")
+    finally:
+        convert.to_markdown = real_convert
+        docling_arm.DoclingExtractor.extract = real_extract
+        cli.configure = real_configure
+
+
+def test_the_extra_docling_needs_for_each_format() -> None:
+    assert convert.MARKDOWN.docling_extra is None and convert.TEXT.docling_extra is None
+    assert convert.PDF.docling_extra == "convert-ml"
+    tiers = {s.token: s.docling_extra for s in convert.ACCEPTED if s.arm == "docling"}
+    assert tiers.pop("image") == "convert-ml"
+    assert set(tiers.values()) == {"convert"}, tiers
+
+
 # ---------------------------------------------------------------- title fallback
 
 def test_title_falls_back_to_the_filename_only_when_there_is_no_heading() -> None:
@@ -759,6 +834,9 @@ def test_docling_roundtrip_docx() -> None:
                 valid=True)
     conv = convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None)
     assert "Quarterly Substrate Review" in conv.markdown
+    from importlib.metadata import version
+
+    assert conv.extractor == f"docling {version('docling-slim')}"
     assert conv.stats["raw_coverage"] == 1.0
     assert conv.stats["raw_coverage_probe"] == "ooxml-w"
     assert conv.stats["docling_status"].endswith("SUCCESS")
@@ -796,6 +874,33 @@ def test_docling_roundtrip_email_with_a_received_date_past_int64() -> None:
         b"<html><body><p>The engine ingested six scopes without a refusal.</p></body></html>\r\n")
     conv = convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None)
     assert "six scopes" in conv.markdown and "without a refusal." in conv.markdown
+
+
+def test_a_missing_piece_of_docling_is_the_converters_fault_not_the_files() -> None:
+    """docling imports `ocrmac` and `docling-parse` only when a pipeline first runs, and reports
+    them missing as a bare ImportError from `convert`. Refusing that as the FILE's fault (exit 3)
+    told an operator with `convert` but not `convert-ml` that their image was unsafe to index."""
+    if not DOCLING_TESTS:
+        return
+    from docling.document_converter import DocumentConverter
+
+    src = _docx(_tmp() / "review.docx", ["Quarterly Substrate Review"], valid=True)
+    real = DocumentConverter.convert
+
+    def missing(*_a, **_k):
+        raise ImportError("ocrmac is not correctly installed")
+
+    DocumentConverter.convert = missing
+    try:
+        convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None)
+    except convert.ConversionRefused as e:
+        raise AssertionError(f"a missing converter piece was refused as the file's fault: {e}") from e
+    except ImportError as e:
+        assert "ocrmac" in str(e)
+    else:
+        raise AssertionError("the conversion succeeded with its converter missing")
+    finally:
+        DocumentConverter.convert = real
 
 
 def test_docling_refuses_a_file_whose_bytes_disagree_with_its_extension() -> None:

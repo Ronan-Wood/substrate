@@ -110,7 +110,7 @@ packages in Scripta 0.3.5's bundled engine, through docling and torch. The core 
 
 | id | item | status |
 |---|---|---|
-| [#25](https://github.com/Ronan-Wood/substrate/issues/25) | **Phase 1.** Two extras: `[convert]` (docling-slim's torch-free format readers, the same readers the engine runs today) and `[convert-ml]` (layout and table models, OCR, granite-docling). `numpy` becomes a declared core dependency. `[convert-ml]` always runs in a JSON-lines stdio worker process. CI gains core-only jobs that prove the core runs with nothing else installed. Ten design decisions (D1–D10) are open; the issue lists them with a recommendation each. | `needs-decision` |
+| [#25](https://github.com/Ronan-Wood/substrate/issues/25) | **Phase 1.** Two extras: `[convert]` (docling-slim's torch-free format readers, the same readers the engine runs today) and `[convert-ml]` (layout and table models, OCR, granite-docling). `numpy` becomes a declared core dependency. `[convert-ml]` always runs in a JSON-lines stdio worker process. CI gains core-only jobs that prove the core runs with nothing else installed. Decided: D1–D10, as the issue records them. Four pull requests: the extras with a core-only `engine` job, a `[convert]` job, the worker, a conversion cache. The Linux `[convert-ml]` job waits for [#27](https://github.com/Ronan-Wood/substrate/issues/27). | planned |
 | [#26](https://github.com/Ronan-Wood/substrate/issues/26) | **Phase 2.** Publish `substrate-engine` to PyPI (the name `substrate` belongs to another project). The commands keep their names. Needs a build system, `[project.scripts]`, Trusted Publishing from a tag-gated job, and a decision on pure versus per-platform wheels, which [#30](https://github.com/Ronan-Wood/substrate/issues/30) and D4 drive. Documented install: `uv tool install --python 3.14 'substrate-engine[convert]'`. | `needs-decision`, after [#25](https://github.com/Ronan-Wood/substrate/issues/25) and [#21](https://github.com/Ronan-Wood/substrate/issues/21)–[#24](https://github.com/Ronan-Wood/substrate/issues/24) |
 
 Later converter phases, not filed yet: a conversion benchmark and reader bake-off (which also picks
@@ -121,7 +121,7 @@ extras.
 
 | id | item | status |
 |---|---|---|
-| [#27](https://github.com/Ronan-Wood/substrate/issues/27) | A CI job that installs the full locked environment on Ubuntu (`uv sync --frozen`) and runs the whole suite, with only named macOS-only tests allowed to skip. It needs torch pinned to its CPU build on Linux and OpenCV built from source as on macOS. Today's Linux job installs a handful of packages. | planned |
+| [#27](https://github.com/Ronan-Wood/substrate/issues/27) | A CI job that installs the full locked environment on Ubuntu (`uv sync --frozen --extra convert --extra convert-ml`) and runs the whole suite, with only named macOS-only tests allowed to skip. It needs torch pinned to its CPU build on Linux and OpenCV built from source as on macOS. It is also the Linux `[convert-ml]` job [#25](https://github.com/Ronan-Wood/substrate/issues/25) defers. Today's Linux job installs the locked core alone. | planned |
 
 ## 4. Retrieval
 

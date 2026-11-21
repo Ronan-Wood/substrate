@@ -14,13 +14,15 @@ describes.
 ```sh
 git clone https://github.com/Ronan-Wood/substrate
 cd substrate
-uv sync
+uv sync --extra convert --extra convert-ml
 ```
 
-`uv sync` installs the locked environment, Python 3.14 included. The first run is slow, because
-OpenCV builds from source. The README's
-[quickstart](README.md#quickstart-the-demo-vaults-in-30-seconds) runs the engine against the demo
-vaults, with its registry and index in `.demo/` rather than in your `~/.substrate`.
+This installs the locked environment with both conversion extras, Python 3.14 included. The first
+run is slow, because OpenCV builds from source. The required `engine` check runs the suite with the
+core alone, so a test that needs an extra must be named in `tests/core-job-skips.txt` (it says
+how). The README's [quickstart](README.md#quickstart-the-demo-vaults-in-30-seconds) runs the
+engine against the demo vaults, with its registry and index in `.demo/` rather than in your
+`~/.substrate`.
 
 ## Check a change
 
@@ -37,8 +39,8 @@ uv run python -m pytest tests -q
 
 | check | runs | required |
 |---|---|---|
-| `engine` (`tests` workflow, Ubuntu) | every push to `main` and every PR | **yes** |
-| `engine docling` (macOS, the locked environment minus OpenCV, no skips allowed) | PRs, unless they change only Markdown at the root, `docs/`, `experiments/`, the licence or the other CI files | no |
+| `engine` (`tests` workflow, Ubuntu, the core alone, every skip named in `tests/core-job-skips.txt`) | every push to `main` and every PR | **yes** |
+| `engine docling` (macOS, both extras from the lock minus OpenCV, no skips allowed) | PRs, unless they change only Markdown at the root, `docs/`, `experiments/`, the licence or the other CI files | no |
 | `lean` (Ubuntu, the models of the [verified paths](#verified-paths) against the real code) | PRs that touch `substrate/`, `pyproject.toml`, `uv.lock`, a model or its workflow | no |
 | `codeql python` (`code scanning` workflow) | pushes to `main`, PRs, and weekly | no |
 

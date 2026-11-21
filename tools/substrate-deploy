@@ -174,8 +174,9 @@ STAGE=
 
 # Primed HERE, where someone is watching. Otherwise the first DEBUG Scripta to spawn this engine
 # would build the environment itself, and a failure there (the network, a wheel) would read as an
-# engine that would not start.
-( cd "$ENGINE" && "$UV" sync --frozen --quiet ) || die "could not build the environment in $ENGINE"
+# engine that would not start. Both extras, as the bundled engine has them.
+( cd "$ENGINE" && "$UV" sync --frozen --extra convert --extra convert-ml --quiet ) \
+  || die "could not build the environment in $ENGINE"
 
 # Manifest first, record second, both atomic. Both torn states fail CLOSED: a new manifest under
 # the old record mismatches the recorded signature, and a new record over the old manifest

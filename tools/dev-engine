@@ -184,8 +184,10 @@ def cmd_start(args: argparse.Namespace) -> int:
 
     # IN THE FOREGROUND, and its status checked: a sync killed half way leaves an environment the
     # next build trips over, so a failed one stops here rather than serving it.
-    print(f"dev-engine: uv sync --frozen --project {tree}", file=sys.stderr)
-    if subprocess.run(["uv", "sync", "--frozen", "--project", str(tree)]).returncode != 0:
+    # Both extras, as the app's own engine has them: a plain sync is exact, and would remove them.
+    sync = ["uv", "sync", "--frozen", "--extra", "convert", "--extra", "convert-ml", "--project", str(tree)]
+    print(f"dev-engine: {' '.join(sync)}", file=sys.stderr)
+    if subprocess.run(sync).returncode != 0:
         die("`uv sync` failed; nothing was started")
     python = tree / ".venv" / "bin" / "python"
     if not python.is_file():
