@@ -261,35 +261,61 @@ class Conversion:
 #
 # Independent of DOCLING, which is the axis that matters: the failure being hunted is Docling
 # dropping a slide, a sheet or a section, and a reading that does not go through Docling sees that.
+# Two share a library with Docling's reader, `ooxml-x` (openpyxl) and `html` (BeautifulSoup), so
+# they catch text read and then not rendered, and not the library misreading the file.
 # The OOXML probes take the text NODES only (`w:t`, `a:t`, shared strings) rather than stripping
 # all tags, because a field instruction (`HYPERLINK "…"`) and a tracked deletion (`w:delText`) are
 # markup that Docling correctly omits — counting them would report loss on a faithful conversion.
 # ---------------------------------------------------------------------------
 
 _XML_TEXT = {"ooxml-w": r"<w:t\b[^>]*>(.*?)</w:t>", "ooxml-p": r"<a:t\b[^>]*>(.*?)</a:t>"}
-# Comments are stripped FIRST and by their own rule: `<!-- see foo > bar -->` closes at the `>`
-# INSIDE it under any `<[^>]*>` pattern, leaving `bar -->` behind as probe "words" that a faithful
-# conversion never contains — the instrument refusing the document, which is the failure this
-# section has already shipped once.
-_COMMENT = re.compile(r"<!--.*?-->", re.S)
-# `head` joins script/style, and it is not a nicety: `<head><title>X</title>` repeats the page's
-# own H1 in a region Docling correctly treats as metadata rather than body. Counting it made the
-# probe demand the title TWICE in the markdown, and a correct conversion of a four-line page was
-# refused at 0.9231 with `Missing: ['Boundary', 'Principle']` — a false refusal caused entirely by
-# the measuring instrument. The multiset diff is what exposed it; a presence test would have hidden
-# it until a page whose head held content the body did not.
-#
-# `title` joins them for the half that fix missed: HTML5 makes `</head>` OPTIONAL, so on a page that
-# omits it this pattern's `head` branch cannot match at all and the title walks straight back into
-# the probe text — the same false refusal, reached by a page that is perfectly legal. `</title>` is
-# mandatory in every HTML version, so the title branch holds exactly where the head branch does not.
-_SCRIPT = re.compile(r"<(script|style|head|title)\b.*?</\1\s*>", re.I | re.S)
-# A quoted attribute value may CONTAIN `>` (`<a title="a>b">`), and `<[^>]*>` stops at the first one,
-# leaving `b">` as a token no conversion contains. So the quoted spans are matched as spans; the
-# loose sweep after it is for markup the strict pattern cannot close (an unterminated quote), where
-# a leftover `<p title=` is markup residue for the same reason and stripping it is still right.
-_TAG = re.compile(r"<[^>'\"]*(?:(?:\"[^\"]*\"|'[^']*')[^>'\"]*)*>", re.S)
-_TAG_LOOSE = re.compile(r"<[^>]*>", re.S)
+
+
+def _html_text(src: Path) -> str:
+    """A page's text, parsed as Docling's HTML reader parses it, less what is not content.
+
+    THE PROBE READS THE SOURCE. From Docling it takes two things only: the parser call
+    (`BeautifulSoup(raw, "html.parser")` on the file's bytes, in `docling/backend/html_backend.py`)
+    and the removal of what is never content (script, noscript, style, a template that declares no
+    shadow root, an element with a `hidden` attribute, and the string types `_html_reading` leaves
+    out). Nothing Docling decides after that is copied: not `soup.body or soup`, not furniture
+    before the first heading, not `_is_invisible_tag`, not its repair of the tree. So wherever probe
+    and reader differ on anything but `<title>` text, the probe holds MORE, and the difference is a
+    refusal, never a pass; copying one more of Docling's choices to stop a refusal would hide the
+    loss it reports.
+    """
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(src.read_bytes(), "html.parser")
+    for tag in soup(["script", "noscript", "style", "template"]):
+        if tag.decomposed:
+            continue
+        if tag.name == "template" and str(tag.get("shadowrootmode", "")).lower() in {"open", "closed"}:
+            continue
+        tag.decompose()
+    for tag in soup(hidden=True):
+        tag.decompose()
+    return _html_reading(soup)
+
+
+def _html_reading(soup) -> str:
+    """The text of the whole soup but every `<title>`, the probe's one exclusion.
+
+    A browser shows a title as page text nowhere, and the markdown does not carry the document's:
+    counting it asked for a page's H1 twice, and a correct page was refused at 0.9231. The exposure
+    is that title text is never checked, so its loss goes unseen; an unclosed `<title>` takes the
+    rest of the page with it, for the probe as for Docling and a browser. Comments, CDATA, a
+    doctype, a declaration or a processing instruction are not text, as Docling's walk does not
+    take them; the rest are joined with a space.
+    """
+    from bs4.element import NavigableString, PreformattedString
+
+    for title in soup("title"):
+        title.decompose()
+    return " ".join(str(s) for s in soup.descendants
+                    if isinstance(s, NavigableString) and not isinstance(s, PreformattedString))
+
+
 # A cue's timing line is any line holding `-->`, which is WebVTT's own test, so it is a substring
 # check in `_vtt_text` rather than a branch here.
 _VTT_SKIP = re.compile(r"^(WEBVTT|NOTE\b|STYLE$|REGION$|\d+$)")
@@ -328,7 +354,7 @@ def _zip_text(src: Path, members: str, pattern: str) -> str:
 
 
 def _xlsx_text(src: Path) -> str:
-    """Cell VALUES via openpyxl — the one probe that shares a library with Docling's backend.
+    """Cell VALUES via openpyxl.
 
     Stated rather than hidden: this cannot catch openpyxl misreading the workbook. It catches what
     it is here for — Docling reading the workbook and then not RENDERING a sheet or a row into the
@@ -367,9 +393,7 @@ def _read_probe(src: Path, spec: FormatSpec) -> str | None:
     if spec.probe == "ooxml-x":
         return _xlsx_text(src)
     if spec.probe == "html":
-        raw = src.read_text("utf-8", errors="replace")
-        stripped = _TAG_LOOSE.sub(" ", _TAG.sub(" ", _SCRIPT.sub(" ", _COMMENT.sub(" ", raw))))
-        return _html.unescape(stripped)
+        return _html_text(src)
     if spec.probe == "vtt":
         return _vtt_text(src)
     if spec.probe == "text":

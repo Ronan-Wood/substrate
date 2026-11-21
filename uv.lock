@@ -2102,9 +2102,11 @@ dependencies = [
 
 [package.optional-dependencies]
 convert = [
+    { name = "beautifulsoup4" },
     { name = "docling-slim", extra = ["format-email", "format-html", "format-latex", "format-office", "format-web"] },
 ]
 convert-ml = [
+    { name = "beautifulsoup4" },
     { name = "docling-slim", extra = ["convert-core", "format-email", "format-html", "format-latex", "format-office", "format-pdf", "format-web", "models-local"] },
     { name = "ocrmac", marker = "sys_platform == 'darwin'" },
     { name = "opencv-python-headless" },
@@ -2123,6 +2125,7 @@ test = [
 
 [package.metadata]
 requires-dist = [
+    { name = "beautifulsoup4", marker = "extra == 'convert'", specifier = ">=4.15.0,<5" },
     { name = "docling-slim", extras = ["convert-core", "models-local", "format-pdf"], marker = "extra == 'convert-ml'", specifier = ">=2.148,<2.149" },
     { name = "docling-slim", extras = ["format-office", "format-html", "format-email", "format-latex", "format-web"], marker = "extra == 'convert'", specifier = ">=2.148,<2.149" },
     { name = "numpy", specifier = ">=2.5.1,<3" },

@@ -22,6 +22,10 @@ dependencies = [
 # models and RapidOCR. Upper-bounded, because a pip install reads these ranges and not `uv.lock`.
 convert = [
     "docling-slim[format-office,format-html,format-email,format-latex,format-web]>=2.148,<2.149",
+    # The HTML coverage probe (`_html_text` in `substrate/extract/convert.py`) parses a page with
+    # BeautifulSoup, as docling's HTML reader does. Imported directly, so declared here rather than
+    # left to docling-slim's `format-html`.
+    "beautifulsoup4>=4.15.0,<5",
 ]
 # docling's PDF layout and table models, and image OCR. Everything `convert` has, plus torch.
 convert-ml = [

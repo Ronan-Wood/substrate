@@ -25,7 +25,7 @@ LOCK = tomllib.loads((ROOT / "uv.lock").read_text("utf-8"))
 # The core's import names, and the distribution that provides each.
 CORE = {"pypdfium2": "pypdfium2", "yaml": "pyyaml", "numpy": "numpy"}
 # What the extras provide that the engine imports itself.
-EXTRAS = {"docling", "docling_core", "openpyxl"}
+EXTRAS = {"docling", "docling_core", "openpyxl", "bs4"}
 # What `convert` must not install: the model stack, which is `convert-ml`'s.
 MODEL_STACK = {"torch", "torchvision", "transformers", "opencv-python-headless", "ocrmac"}
 

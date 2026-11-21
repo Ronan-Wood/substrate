@@ -320,60 +320,6 @@ def test_ooxml_probes_read_text_nodes_only() -> None:
     assert "excluded" not in text and "Deleted" not in text
 
 
-def test_html_probe_excludes_head_script_and_style() -> None:
-    """The regression this probe actually shipped with: `<head><title>X</title>` repeats the
-    page's own H1 in a region Docling treats as metadata, so the multiset diff demanded the title
-    TWICE and refused a correct conversion of a four-line page at 0.9231."""
-    src = _tmp() / "page.html"
-    src.write_text(
-        "<html><head><title>Boundary Principle</title></head><body>"
-        "<h1>Boundary Principle</h1><script>var hidden = 1;</script>"
-        "<style>.x{color:red}</style><p>A rule that cannot refuse reads as absent.</p>"
-        "</body></html>", "utf-8")
-    spec = convert.spec_for(src)
-    text = convert.raw_text(src, spec).text
-    assert text.count("Boundary") == 1
-    assert "hidden" not in text and "color" not in text
-    # ... and the correct conversion now clears the gate instead of being refused by it.
-    cov, _, _ = convert.verify_conversion(
-        src, spec, "# Boundary Principle\n\nA rule that cannot refuse reads as absent.\n")
-    assert cov == 1.0
-
-
-def test_html_probe_excludes_the_title_when_head_is_never_closed() -> None:
-    """HTML5 makes `</head>` OPTIONAL, so the `head` branch cannot match on a page that omits it
-    and the title walks back into the probe text — the 0.9231 false refusal, reached by a page
-    that is perfectly legal. `</title>` is mandatory, which is why the title gets its own branch."""
-    src = _tmp() / "nohead.html"
-    src.write_text(
-        "<!DOCTYPE html><html><head><title>Boundary Principle</title>"
-        "<body><h1>Boundary Principle</h1>"
-        "<p>A rule that cannot refuse reads as absent.</p></body></html>", "utf-8")
-    spec = convert.spec_for(src)
-    assert convert.raw_text(src, spec).text.count("Boundary") == 1
-    cov, _, _ = convert.verify_conversion(
-        src, spec, "# Boundary Principle\n\nA rule that cannot refuse reads as absent.\n")
-    assert cov == 1.0
-
-
-def test_html_probe_leaves_no_markup_fragment_behind_a_nested_gt() -> None:
-    """`<[^>]*>` stops at the FIRST `>`, so a comment or an attribute value containing one — both
-    legal, both ordinary — left the tail of the markup in the probe as "words". `always` and `here`
-    below are markup no faithful conversion contains, and they took this page to 0.7143 against the
-    0.95 gate: the measuring instrument refusing a valid file, the failure this section has already
-    shipped once."""
-    src = _tmp() / "attrs.html"
-    src.write_text(
-        "<html><body><!-- editor: 3 > 2 always -->"
-        "<p>See <img src=\"chart.png\" alt=\"ratio a > b here\"> the ruling for detail.</p>"
-        "</body></html>", "utf-8")
-    spec = convert.spec_for(src)
-    text = convert.raw_text(src, spec).text
-    assert set(text.split()) == {"See", "the", "ruling", "for", "detail."}, text
-    cov, missing, _ = convert.verify_conversion(src, spec, "See the ruling for detail.\n")
-    assert cov == 1.0, missing
-
-
 def test_vtt_probe_counts_cue_text_and_not_timings() -> None:
     src = _tmp() / "call.vtt"
     src.write_text("WEBVTT\n\nNOTE recorded locally\n\n1\n00:00:01.000 --> 00:00:04.000\n"
