@@ -1160,6 +1160,16 @@ def test_a_list_item_spaced_from_its_dash_wraps_without_blocking_gc(tmp_path):
     assert set(life.gc_plan(reg).remove) == {c}
 
 
+def test_non_printable_is_pyyamls_set_written_in_ascii():
+    """CodeQL reads an astral character in a pattern as U+FFFD, so the class compiled from one
+    looked like two overlapping ranges. Written in escapes it is still PyYAML's own set."""
+    import yaml.reader
+
+    assert life._NON_PRINTABLE.pattern.isascii()
+    every = "".join(map(chr, range(0x110000)))
+    assert life._NON_PRINTABLE.findall(every) == yaml.reader.Reader.NON_PRINTABLE.findall(every)
+
+
 @pytest.mark.parametrize("front, key", [
     ("raw: Call #3.m4a\nraw_location: {d}\nraw_sha256: {c}", "raw_sha256"),
     ("source_path: {d}/Call #3.pdf\nsource_sha256: {c}", "source_sha256"),

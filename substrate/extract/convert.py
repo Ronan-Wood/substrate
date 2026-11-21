@@ -259,7 +259,9 @@ _SCRIPT = re.compile(r"<(script|style|head|title)\b.*?</\1\s*>", re.I | re.S)
 # a leftover `<p title=` is markup residue for the same reason and stripping it is still right.
 _TAG = re.compile(r"<[^>'\"]*(?:(?:\"[^\"]*\"|'[^']*')[^>'\"]*)*>", re.S)
 _TAG_LOOSE = re.compile(r"<[^>]*>", re.S)
-_VTT_SKIP = re.compile(r"^(WEBVTT|NOTE\b|STYLE$|REGION$|\d+$|.*-->.*)")
+# A cue's timing line is any line holding `-->`, which is WebVTT's own test, so it is a substring
+# check in `_vtt_text` rather than a branch here.
+_VTT_SKIP = re.compile(r"^(WEBVTT|NOTE\b|STYLE$|REGION$|\d+$)")
 
 
 @dataclass(frozen=True)
@@ -322,7 +324,7 @@ def _xlsx_text(src: Path) -> str:
 def _vtt_text(src: Path) -> str:
     return "\n".join(
         ln for ln in src.read_text("utf-8", errors="replace").splitlines()
-        if ln.strip() and not _VTT_SKIP.match(ln.strip())
+        if ln.strip() and "-->" not in ln and not _VTT_SKIP.match(ln.strip())
     )
 
 
