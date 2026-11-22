@@ -23,6 +23,27 @@ import pytest
 
 from substrate.extract import convert
 
+
+def _an_empty_comment_closes_itself() -> bool:
+    """Whether this interpreter's `html.parser`, which BeautifulSoup and so Docling parse with, ends
+    `<!-->` where it stands, as HTML5 and a browser do.
+
+    CPython 3.14.7 does. 3.14.0 to 3.14.6 open a comment there that runs to the next `-->`, so the
+    text between is read as comment by the probe and by Docling alike. Asked of the parser rather
+    than of the version, so the expectation is this interpreter's whatever it is.
+    """
+    from html.parser import HTMLParser
+
+    text: list[str] = []
+    parser = HTMLParser()
+    parser.handle_data = text.append
+    parser.feed("<!-->shown-->")
+    parser.close()
+    return "".join(text).startswith("shown")
+
+
+EMPTY_COMMENT_CLOSES = _an_empty_comment_closes_itself()
+
 # The `regex probe:` line over each page is what the regex probe read of it: `the same`, `no
 # measurement`, or the words it added (+) and dropped (-).
 CASES = {
@@ -68,7 +89,8 @@ CASES = {
         '<p>kept</p><script>a</script b="open><p>gone</p><script>c</script>',
         ["kept"]),
     # `--!>` closes a comment, and `<!-->` and `<!--->` are whole empty ones. The regex probe ran
-    # each to the next `-->` and dropped the text before it.
+    # each to the next `-->` and dropped the text before it. So does `html.parser` before CPython
+    # 3.14.7, for the two empty ones: there `shown -->` is comment to the probe and to Docling.
     # regex probe: - 'shown', '-->'
     "comment-bang-close": (
         "<p>kept<!-- note --!> shown --> end</p>",
@@ -76,11 +98,11 @@ CASES = {
     # regex probe: - 'shown', '-->'
     "comment-empty": (
         "<p>kept<!--> shown --> end</p>",
-        ["kept", "shown", "-->", "end"]),
+        ["kept", "shown", "-->", "end"] if EMPTY_COMMENT_CLOSES else ["kept", "end"]),
     # regex probe: - 'shown', '-->'
     "comment-empty-dash": (
         "<p>kept<!---> shown --> end</p>",
-        ["kept", "shown", "-->", "end"]),
+        ["kept", "shown", "-->", "end"] if EMPTY_COMMENT_CLOSES else ["kept", "end"]),
     # A comment, script, title or noscript that never closes runs to the end of the file.
     # regex probe: + 'kept<!--', 'never', 'closed'; - 'kept'
     "comment-unclosed": (
