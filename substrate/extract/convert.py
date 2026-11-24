@@ -1,6 +1,6 @@
 """Any source document → markdown text. The arm that widens ingestion past PDF.
 
-The restriction to PDF was ours, not Docling's: `docling_arm._converter` names
+The restriction to PDF was ours, not Docling's: `worker._converter` names
 `format_options={InputFormat.PDF: ...}` and Docling refuses everything it was not handed
 options for. This module names the rest — and, more importantly, names what it will NOT
 accept and why, because a format that imports but cannot convert is worse than one that is

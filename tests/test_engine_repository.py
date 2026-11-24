@@ -8,6 +8,8 @@ never behind a path filter, since a required check that never reports blocks eve
 
 from __future__ import annotations
 
+import ast
+import importlib
 import importlib.util
 import re
 from pathlib import Path
@@ -185,3 +187,87 @@ def test_the_convert_job_skips_nothing_the_core_job_runs() -> None:
     convert, core = (tool.expected(ROOT / "tests" / f) for f in ("convert-job-skips.txt",
                                                                  "core-job-skips.txt"))
     assert convert <= core, convert - core
+
+
+# `python … -c "…"` or `'…'`, and `python … - <<EOF` heredocs, any interpreter name and flags.
+_INLINE = re.compile(r"""python[\d.]*(?:\s+-[^c\s]\S*(?:\s+[^-\s]\S*)?)*?\s+-c\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')""",
+                     re.S)
+_HEREDOC = re.compile(r"""python[\d.]*[^\n]*?\s-\s*<<-?\s*['"]?(\w+)['"]?[^\n]*\n(.*?)\n\s*\1\s*$""",
+                      re.S | re.M)
+# The engine named as Python names it: what is left of a step once the forms above are taken out
+# must not say this, or Python the scan cannot read imports the engine unchecked.
+_ENGINE = re.compile(r"(?:\b(?:import|from)\s+|-m\s+)substrate\b|\bsubstrate\.\w")
+
+
+def _inline_python(run: str):
+    for double, single in _INLINE.findall(run):
+        # Inside double quotes the shell drops a backslash-newline and undoes these escapes.
+        yield re.sub(r'\\([\\"$`])', r"\1", double.replace("\\\n", "")) if double else single
+    for _tag, body in _HEREDOC.findall(run):
+        yield body
+
+
+def _engine_imports(run: str) -> tuple[list[str], list[str]]:
+    """The engine modules one `run:` step's Python imports, and what is wrong: a module that will
+    not import, a name it lacks, Python that will not parse, or the engine named anywhere the scan
+    cannot read. Fails closed: what it cannot read is a problem, never a pass."""
+    found, problems = [], []
+    if hit := _ENGINE.search(_HEREDOC.sub(" ", _INLINE.sub(" ", run))):
+        problems.append(f"names the engine where this test cannot read it: {hit.group(0)!r}")
+    for code in _inline_python(run):
+        try:
+            tree = ast.parse(code)
+        except SyntaxError as e:
+            problems.append(f"Python this test cannot parse ({e.msg}): {code[:60]!r}")
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("substrate"):
+                names = [(node.module, a.name) for a in node.names]
+            elif isinstance(node, ast.Import):
+                names = [(a.name, None) for a in node.names if a.name.startswith("substrate")]
+            else:
+                continue
+            for module, name in names:
+                found.append(module)
+                try:
+                    loaded = importlib.import_module(module)
+                except ImportError as e:
+                    problems.append(f"{module} ({e})")
+                    continue
+                # A name can be a submodule, which only a package has.
+                if name is not None and not hasattr(loaded, name) and not (
+                        hasattr(loaded, "__path__") and importlib.util.find_spec(f"{module}.{name}")):
+                    problems.append(f"{module}.{name}")
+    return found, problems
+
+
+def test_every_engine_name_a_workflow_step_imports_exists() -> None:
+    """A step's inline Python is outside the suite: `docling_version` moved out of `docling_arm`,
+    every test passed, and `engine docling` failed on its import check. Imported rather than read:
+    `test_dependency_tiers` holds every engine module importable with the core alone, so this
+    runs in `engine` with nothing else."""
+    found, problems = [], []
+    for path in sorted(WORKFLOWS.glob("*.y*ml")):
+        for job, spec in _workflow(path.name)["jobs"].items():
+            for i, step in enumerate(spec.get("steps", [])):
+                imports, wrong = _engine_imports(step.get("run") or "")
+                found += [f"{path.name}: {m}" for m in imports]
+                problems += [f"{path.name} {job} step {i}: {w}" for w in wrong]
+    # The scan must see the step it exists for, or a pattern that matches nothing passes.
+    assert any(f.startswith("docling.yml: substrate.extract") for f in found), found
+    assert not problems, problems
+
+
+def test_the_workflow_scan_fails_closed() -> None:
+    ok = 'uv run --no-sync python -c "import os;\\\n from substrate.extract.convert import docling_version"'
+    assert _engine_imports(ok) == (["substrate.extract.convert"], [])
+    assert _engine_imports("python - <<'EOF'\nfrom substrate import cli\nEOF\n")[1] == []
+    assert _engine_imports('python -c "from substrate.extract.convert import nope"')[1] == [
+        "substrate.extract.convert.nope"]
+    assert "cannot parse" in _engine_imports('python -c "from substrate import ("')[1][0]
+    for unread in ('python -Bc "from substrate import cli"', "python <<EOF\nimport substrate\nEOF",
+                   "uv run python -m substrate.cli version"):
+        assert "cannot read" in _engine_imports(unread)[1][0], unread
+    for none in ('uv run --no-sync python tools/check-skips.py "$RUNNER_TEMP/junit.xml" x.txt',
+                 "uv run --no-sync python -m pytest tests -q", "ruff check substrate/ tests/"):
+        assert _engine_imports(none) == ([], []), none

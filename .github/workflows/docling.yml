@@ -73,7 +73,7 @@ jobs:
       # Fails the job if docling cannot import, rather than letting its tests skip green.
       - run: >-
           uv run --no-sync python -c "import docling.document_converter, torch;
-          from substrate.extract.docling_arm import docling_version;
+          from substrate.extract.convert import docling_version;
           print('docling', docling_version(), 'torch', torch.__version__,
           'mps', torch.backends.mps.is_available())"
       # The interpreter pin's tests on uv's real output need it AT THE PIN'S PATH: uv writes its
