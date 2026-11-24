@@ -15,7 +15,7 @@ vault(s) ──compose──▶ ingest tree ──reconcile──▶ index (SQLi
 | stage | what happens | where |
 |---|---|---|
 | **Compose** | Reads the project vault's `.substrate.toml`, resolves `inherits`, and collects every note across the vaults. A missing inherited vault is a hard failure, never a silently narrower scope. | `substrate/vault.py` |
-| **Ingest** | Each note becomes an output directory holding its Markdown, its chunks and its spine. Markdown is read with the standard library. Other formats go through `extract/` (docling, the PDF text layer, Apple's on-device recognizer). | `substrate/markdown/`, `substrate/extract/` |
+| **Ingest** | Each note becomes an output directory holding its Markdown, its chunks and its spine. Markdown is read with the standard library. Other formats go through `extract/` (docling, the PDF text layer, Apple's on-device recognizer). Docling runs in a worker process the engine starts per file and kills when it hangs or crashes (`extract/worker.py`, `extract/worker_client.py`); the coverage gate runs in the engine. | `substrate/markdown/`, `substrate/extract/` |
 | **Chunk** | Units are packed into passages, with a policy per document class, and section-level outline records are built alongside them. | `substrate/chunk/`, `substrate/classes.py` |
 | **Check** | Per-note assertions (content coverage, spine validity) plus the scope-level ones that `compose` prints: A-compose and A20 to A23. A failure is classified rather than skipped. | `substrate/checks.py`, `substrate/spine.py` |
 | **Index** | `reconcile` brings the SQLite index into step with the ingest tree: FTS5 with section-weighted bm25, plus a `chunk_vectors` table. The schema is versioned, and a version change means a drop and rebuild. | `substrate/store/` |

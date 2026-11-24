@@ -27,7 +27,6 @@ import json
 import os
 import sys
 import tempfile
-import time
 import zipfile
 from pathlib import Path
 
@@ -642,7 +641,8 @@ def test_a_converter_that_cannot_run_exits_2_rather_than_tracebacking() -> None:
     real = convert.to_markdown
     try:
         for exc, expect in ((ModuleNotFoundError("No module named 'docling'"), "docling"),
-                            (ValueError("'vtt' is not a valid InputFormat"), "InputFormat")):
+                            (convert.ConverterUnsupported("'vtt' is not a valid InputFormat"),
+                             "InputFormat")):
             convert.to_markdown = raiser(exc)
             rc, err = _captured(lambda: cli._ingest_converted(args, src, spec, None))
             assert rc == 2, (rc, err)          # an INPUT/environment problem, not a gate
@@ -679,10 +679,8 @@ def test_a_missing_extra_is_named_by_the_refusal() -> None:
             raise exc
         return boom
 
-    real_convert, real_extract, real_configure = (convert.to_markdown,
-                                                  docling_arm.DoclingExtractor.extract, cli.configure)
+    real_convert, real_extract = convert.to_markdown, docling_arm.DoclingExtractor.extract
     try:
-        cli.configure = lambda *_a, **_k: {}  # it would point this process's HF caches at `root`
         pdf_args = argparse.Namespace(out=str(root / "pdf"), doc_class="reference-frozen",
                                       pages=None, batch=1)
         convert.to_markdown = raising(no_docling)
@@ -716,7 +714,6 @@ def test_a_missing_extra_is_named_by_the_refusal() -> None:
     finally:
         convert.to_markdown = real_convert
         docling_arm.DoclingExtractor.extract = real_extract
-        cli.configure = real_configure
 
 
 def test_the_extra_docling_needs_for_each_format() -> None:
@@ -900,18 +897,15 @@ def test_docling_roundtrip_epub() -> None:
 def test_docling_roundtrip_html_is_not_slowed_by_deep_nesting() -> None:
     """Docling's HTML reader runs a `p:has(...)` selector over every page, and soupsieve before 4.0
     took time polynomial in the nesting depth (GHSA-mmhr-3c5m-f64f): this 6 KB page took 9 to 42
-    seconds to convert on soupsieve 2.9, and 0.4 on 4.0.1. The first conversion warms Docling up."""
+    seconds to convert on soupsieve 2.9, and 0.4 on 4.0.1. Timed as the worker times docling's
+    conversion, so the worker's start, which is the docling import, is not counted."""
     if not DOCLING_TESTS:
         return
-    warm = _tmp() / "warm.html"
-    warm.write_text("<html><body><p>Warm</p></body></html>", "utf-8")
-    convert.to_markdown(warm, convert.spec_for(warm), log=lambda *_: None)
     src = _tmp() / "nested.html"
     src.write_text("<html><body><p>Quarterly review</p>" + "<p>" * 2000 + "deep text</body></html>",
                    "utf-8")
-    t0 = time.perf_counter()
     conv = convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None)
-    assert time.perf_counter() - t0 < 3.0
+    assert conv.stats["converted_seconds"] < 3.0, conv.stats
     assert "deep text" in conv.markdown and conv.stats["raw_coverage"] == 1.0
 
 
@@ -939,6 +933,8 @@ def test_a_missing_piece_of_docling_is_the_converters_fault_not_the_files() -> N
         return
     from docling.document_converter import DocumentConverter
 
+    from substrate.extract import worker
+
     src = _docx(_tmp() / "review.docx", ["Quarterly Substrate Review"], valid=True)
     real = DocumentConverter.convert
 
@@ -947,15 +943,10 @@ def test_a_missing_piece_of_docling_is_the_converters_fault_not_the_files() -> N
 
     DocumentConverter.convert = missing
     try:
-        convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None)
-    except convert.ConversionRefused as e:
-        raise AssertionError(f"a missing converter piece was refused as the file's fault: {e}") from e
-    except ImportError as e:
-        assert "ocrmac" in str(e)
-    else:
-        raise AssertionError("the conversion succeeded with its converter missing")
+        reply = worker.convert_document({"id": 1, "format": "docx", "path": str(src)})
     finally:
         DocumentConverter.convert = real
+    assert reply["type"] == "needs_extra" and "ocrmac" in reply["error"], reply
 
 
 def test_docling_refuses_a_file_whose_bytes_disagree_with_its_extension() -> None:
@@ -984,3 +975,109 @@ if __name__ == "__main__":
             print(f"  FAIL  {name}: {type(e).__name__}: {e}")
     print(f"\n{'ALL PASS' if not fails else f'{fails} FAILED'}")
     sys.exit(1 if fails else 0)
+
+
+def _epub(src: Path) -> Path:
+    opf = ('<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
+           'unique-identifier="id"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/">'
+           '<dc:identifier id="id">review</dc:identifier><dc:title>Review</dc:title>'
+           '<dc:language>en</dc:language></metadata><manifest><item id="c1" href="c1.xhtml" '
+           'media-type="application/xhtml+xml"/></manifest><spine><itemref idref="c1"/></spine>'
+           '</package>')
+    with zipfile.ZipFile(src, "w") as z:
+        z.writestr("mimetype", "application/epub+zip")
+        z.writestr("META-INF/container.xml",
+                   '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:'
+                   'opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/c.opf" '
+                   'media-type="application/oebps-package+xml"/></rootfiles></container>')
+        z.writestr("OEBPS/c.opf", opf)
+        z.writestr("OEBPS/c1.xhtml",
+                   '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>'
+                   'Review</title></head><body><h1>Quarterly Substrate Review</h1><p>Six scopes '
+                   'ingested without a refusal.</p></body></html>')
+    return src
+
+
+def test_the_engine_process_never_imports_docling_for_any_format() -> None:
+    """D2: every conversion runs in the worker. A fresh interpreter ingests one file of each
+    `convert` format through `cli.main`; after each, none of docling, torch, transformers, OpenCV or
+    ocrmac is in its `sys.modules`, and nothing was written under its home folder's caches."""
+    if not DOCLING_TESTS:
+        return
+    import json
+    import os
+    import subprocess
+
+    import openpyxl
+    import pptx
+
+    root = _tmp()
+    sources = [_docx(root / "review.docx", ["Quarterly Substrate Review"], valid=True)]
+    deck = pptx.Presentation()
+    slide = deck.slides.add_slide(deck.slide_layouts[1])
+    slide.shapes.title.text = "Quarterly Substrate Review"
+    slide.placeholders[1].text = "Six scopes ingested without a refusal"
+    deck.save(root / "review.pptx")
+    book = openpyxl.Workbook()
+    book.active.append(["scope", "harbour"])
+    book.save(root / "scopes.xlsx")
+    texts = {"review.html": "<html><body><h1>Quarterly Substrate Review</h1>"
+                            "<p>Six scopes ingested without a refusal.</p></body></html>",
+             "scopes.csv": "scope,notes\nharbour,140\n",
+             "call.vtt": "WEBVTT\n\n00:00.000 --> 00:02.000\nThe engine ingested six scopes.\n",
+             "review.adoc": "= Quarterly Substrate Review\n\nSix scopes ingested.\n",
+             "review.tex": "\\documentclass{article}\\begin{document}Six scopes.\\end{document}\n",
+             "review.eml": "From: a@example.com\nTo: b@example.com\nSubject: Review\n\nSix scopes.\n"}
+    for name, text in texts.items():
+        (root / name).write_text(text, "utf-8")
+    sources += [root / "review.pptx", root / "scopes.xlsx", *(root / n for n in texts),
+                _epub(root / "review.epub")]
+    probe = (
+        "import json, sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})\n"
+        "from substrate import cli\n"
+        "OUTSIDE = ('docling', 'docling_core', 'docling_parse', 'docling_ibm_models', 'torch', "
+        "'torchvision', 'transformers', 'cv2', 'ocrmac')\n"
+        "report = []\n"
+        "for i, path in enumerate(sys.argv[1:]):\n"
+        "    rc = cli.main(['ingest', path, '--out', f'{path}.out'])\n"
+        "    loaded = sorted({m.split('.')[0] for m in sys.modules} & set(OUTSIDE))\n"
+        "    report.append([path, rc, loaded])\n"
+        "print('REPORT ' + json.dumps(report))\n")
+    home = root / "home"
+    home.mkdir()
+    env = {"PATH": os.environ.get("PATH", ""), "HOME": str(home), "HF_HUB_OFFLINE": "1"}
+    run = subprocess.run([sys.executable, "-c", probe, *map(str, sources)], capture_output=True,
+                         text=True, timeout=900, env=env)
+    line = next((x for x in run.stdout.splitlines() if x.startswith("REPORT ")), None)
+    assert line is not None, run.stderr[-4000:]
+    report = json.loads(line.removeprefix("REPORT "))
+    assert len(report) == 10, report
+    assert all(rc == 0 for _p, rc, _l in report), [(p, rc) for p, rc, _l in report if rc]
+    assert all(not loaded for _p, _rc, loaded in report), report
+    assert not (home / ".cache").exists(), list((home / ".cache").rglob("*"))
+
+
+def test_docling_failing_while_it_renders_a_document_is_a_refusal_not_a_fault() -> None:
+    """An exception after `convert()` returned is docling's answer about this file, every time: a
+    refusal, never a crashed worker to retry and quarantine."""
+    if not DOCLING_TESTS:
+        return
+    from docling.datamodel.base_models import ConversionStatus
+    from docling.document_converter import DocumentConverter
+
+    from substrate.extract import worker
+
+    class Document:
+        def export_to_markdown(self):
+            raise RuntimeError("a table it cannot render")
+
+    src = _docx(_tmp() / "review.docx", ["Quarterly Substrate Review"], valid=True)
+    real = DocumentConverter.convert
+    DocumentConverter.convert = lambda *_a, **_k: type(
+        "R", (), {"status": ConversionStatus.SUCCESS, "document": Document()})()
+    try:
+        reply = worker.convert_document({"id": 1, "format": "docx", "path": str(src)})
+    finally:
+        DocumentConverter.convert = real
+    assert reply["type"] == "refused" and "a table it cannot render" in reply["reason"], reply

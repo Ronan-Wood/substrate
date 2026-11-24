@@ -12,7 +12,8 @@ Exit codes, and the split is the point: **2 is an INPUT problem** (no such file,
 engine will not attempt, bytes it cannot decode) and **3 is a GATE** (the class policy, the spine
 contract, A18 coverage, or a conversion whose faithfulness could not be established). A 2 says
 "give me a different file"; a 3 says "this file is not safe to index and here is what is wrong
-with it".
+with it". A quarantined file and one that changed during its ingest are 3s. An ingest stopped by
+Ctrl-C, SIGTERM or SIGHUP while it converts exits 128 plus the signal.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ from substrate import blobs, classes, identity, private, prune, refresh, render,
 from substrate import freshness
 from substrate import quarantine as _quarantine
 from substrate.checks import document_checks, partition_check_failures
-from substrate.paths import ModelsFolderError, configure, internal_cache_footprint, models_folder
+from substrate.paths import ModelsFolderError, internal_cache_footprint, models_folder
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -136,17 +137,37 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                   f"and relaxing that is a separate decision. Choose one of "
                   f"{sorted(classes.DECLARABLE_CLASSES)}.", file=sys.stderr)
             return 2
-        return _ingest_pdf(args, src, models)
+        if models is None:
+            return _ingest_pdf(args, src, models)
+        return _converting(lambda: _ingest_pdf(args, src, models))
     if spec.arm in ("markdown", "text"):
         return _ingest_markdown_file(args, src, spec)
-    return _ingest_converted(args, src, spec, models)
+    return _converting(lambda: _ingest_converted(args, src, spec, models))
+
+
+def _converting(run) -> int:
+    """Run an ingest that starts a conversion worker. Ctrl-C, SIGTERM and SIGHUP while it converts
+    kill the worker's process group (`convert.through_worker`) and exit 128 + the signal, as a
+    shell reports it; nothing has been written by then. Once the conversion is done they act as
+    they always have."""
+    import signal
+
+    from substrate.extract import worker_client
+
+    try:
+        return run()
+    except worker_client.Interrupted as e:
+        print(f"\nFATAL (interrupted): {signal.Signals(e.signum).name}; the conversion was stopped "
+              "and nothing was written.", file=sys.stderr)
+        return 128 + e.signum
+    except worker_client.WorkerUnavailable as e:
+        print(f"\nFATAL (converter): {e}", file=sys.stderr)
+        return 2
 
 
 def _ingest_pdf(args: argparse.Namespace, pdf: Path, models: Path | None) -> int:
-    # Before any import below can reach docling: HuggingFace reads its cache env at import time.
-    if models is not None:
-        configure(models)
     from substrate.chunk.chunker import chunk
+    from substrate.extract import convert
     from substrate.extract.pdftext_arm import PdfReadError, TextLayerExtractor
     from substrate.markdown.emit import emit, frontmatter
 
@@ -162,7 +183,8 @@ def _ingest_pdf(args: argparse.Namespace, pdf: Path, models: Path | None) -> int
     if models is not None:
         from substrate.extract.docling_arm import DoclingExtractor
 
-        extractor = DoclingExtractor(models, batch_pages=args.batch)
+        extractor = DoclingExtractor(models, batch_pages=args.batch, quarantine=blobs.root,
+                                     retry_quarantined=getattr(args, "retry_quarantined", False))
         print(f"reader    : docling, with the models in {models}")
     else:
         extractor = TextLayerExtractor()
@@ -174,13 +196,23 @@ def _ingest_pdf(args: argparse.Namespace, pdf: Path, models: Path | None) -> int
     except PdfReadError as e:
         print(f"\nFATAL (read): {e}", file=sys.stderr)
         return 2
+    except convert.ConversionRefused as e:
+        print(f"\nFATAL (conversion): {e}", file=sys.stderr)
+        return 3
+    except convert.Quarantined as e:
+        print(f"\nFATAL (quarantined): {e}", file=sys.stderr)
+        return 3
+    except convert.FileChanged as e:
+        print(f"\nFATAL (changed): {e}", file=sys.stderr)
+        return 3
+    except convert.ConverterUnsupported as e:
+        print(f"\nFATAL (converter): {e}", file=sys.stderr)
+        return 2
     except ImportError as e:
         # docling's reader, which is an extra. Exit 2, as for any other converter that cannot run:
-        # nothing was read. ImportError, not ModuleNotFoundError: with `convert` but not `convert-ml`
-        # installed, docling reports the missing `docling-parse` as a bare ImportError. The text
-        # layer is the core's, so a module missing there is a fault, as is one of the engine's own.
-        from substrate.extract import convert
-
+        # nothing was read. `ConverterMissing`: the extra is not installed (`need_extra`), or the
+        # worker could not load a piece of it, such as `docling-parse` in a `convert`-only install.
+        # The text layer is the core's, so a module missing there is a fault, as is the engine's own.
         if models is None or convert.engine_import_fault(e):
             raise
         print(f"\nFATAL (converter): {convert.needs_extra(convert.PDF, e)} The PDF's own text layer "
@@ -333,7 +365,7 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
     """
     from substrate.extract import convert
     from substrate.extract.apple_arm import AppleReaderUnavailable
-    from substrate.extract.base import doc_id_for, sha256_file
+    from substrate.extract.base import doc_id_from
     from substrate.markdown.ingest import (CoverageError, OutputDirError, UnretrievableError,
                                            ingest_markdown)
     from substrate.models import SourceOrigin
@@ -341,9 +373,16 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
 
     out = Path(args.out).expanduser()
     try:
-        conv = convert.to_markdown(src, spec, models=models)
+        conv = convert.to_markdown(src, spec, models=models, quarantine=blobs.root,
+                                   retry_quarantined=getattr(args, "retry_quarantined", False))
     except convert.ConversionRefused as e:
         print(f"\nFATAL (conversion): {e}", file=sys.stderr)
+        return 3
+    except convert.Quarantined as e:
+        print(f"\nFATAL (quarantined): {e}", file=sys.stderr)
+        return 3
+    except convert.FileChanged as e:
+        print(f"\nFATAL (changed): {e}", file=sys.stderr)
         return 3
     except AppleReaderUnavailable as e:
         # Said as `formats` says it, naming another reader only where one would work.
@@ -355,21 +394,20 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
     # not installed in this venv" is an exit-2 refusal today, so "docling itself is not installed"
     # cannot be a 3 — a 3 says "this file is not safe to index", and nothing was read.
     #
-    # `importlib.metadata.PackageNotFoundError` subclasses ModuleNotFoundError, so the version
-    # lookup at the end of `to_markdown` lands here too. Uncaught, either one printed a traceback
-    # out of a command whose whole contract is a legible 2-vs-3 split. ImportError, its base,
-    # because docling reports a missing piece of `convert-ml` (`ocrmac`) as a bare one. One of the
-    # engine's own imports failing is a bug, and keeps its traceback.
+    # `ConverterMissing` is an ImportError: the extra is not installed, or the worker could not load
+    # a piece of docling (`ocrmac` in a `convert`-only install). Uncaught, it printed a traceback out
+    # of a command whose whole contract is a legible 2-vs-3 split. One of the engine's own imports
+    # failing is a bug, and keeps its traceback.
     except ImportError as e:
         if convert.engine_import_fault(e):
             raise
         print(f"\nFATAL (converter): {convert.needs_extra(spec, e)} The markdown and text arms need "
               f"nothing installed; `--md` reads the file as markdown.", file=sys.stderr)
         return 2
-    except ValueError as e:
-        # `InputFormat(spec.docling_format)` on a docling build that does not name this format —
-        # the format table and the installed docling disagreeing, which an upgrade can cause and
-        # which is neither a bad file nor a failed gate.
+    except convert.ConverterUnsupported as e:
+        # The worker's docling does not name this format — the format table and the installed
+        # docling disagreeing, which an upgrade can cause and which is neither a bad file nor a
+        # failed gate.
         print(f"\nFATAL (converter): this docling build cannot be asked for {spec.token} — {e}. "
               f"The format table and the installed docling disagree; `substrate formats` lists "
               f"what this build was verified against.", file=sys.stderr)
@@ -378,8 +416,8 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
     origin = SourceOrigin(
         source_format=spec.token,
         path=str(src),
-        sha256=sha256_file(src),
-        doc_id=doc_id_for(src),
+        sha256=conv.source_sha256,
+        doc_id=doc_id_from(src.stem, conv.source_sha256),
         extractor=conv.extractor,
         extractor_arm=conv.arm,
         pages=conv.pages,
@@ -2391,7 +2429,10 @@ def cmd_blobs(args: argparse.Namespace) -> int:
     try:
         store = blobs.root()
         if args.blobs_cmd == "status":
+            from substrate.extract import conversion_quarantine
+
             st = life.status(args.registry, store)
+            st["quarantine"] = conversion_quarantine.listing(store)
             if args.json:
                 print(json.dumps(st, indent=2))
                 return 0
@@ -2406,6 +2447,11 @@ def cmd_blobs(args: argparse.Namespace) -> int:
             print(f"only copy   : {st['only_copy']} stored original(s) no longer where a note last "
                   "saw them — this store is their only local copy")
             print(f"read        : {len(st['vaults'])} vault(s) registered in {st['registry']}")
+            print(f"conversion quarantine: {len(st['quarantine'])} file(s)"
+                  + ("  (`substrate ingest --retry-quarantined` tries one again)"
+                     if st["quarantine"] else ""))
+            for row in st["quarantine"]:
+                print(f"  {row['checksum'][:12]}…  {row['format']}  {row['fault']}  {row['at']}")
             for c in st["still_held"]:
                 print(f"STILL HELD  : {c} was forgotten but is still stored; `substrate blobs "
                       "forget` it again", file=sys.stderr)
@@ -3004,6 +3050,9 @@ def main(argv: list[str] | None = None) -> int:
     ing.add_argument("--out", required=True)
     ing.add_argument("--pages", default=None, help="e.g. 1-40 (PDF only)")
     ing.add_argument("--batch", type=int, default=100, help="(PDF only, with --docling-models)")
+    ing.add_argument("--retry-quarantined", action="store_true",
+                     help="convert a file again that an earlier ingest quarantined, after the "
+                          "converter hung, crashed or answered garbage on it twice")
     ing.add_argument("--docling-models", default=None, metavar="DIR",
                      help="a folder holding docling's layout and table models. Optional: without it, "
                           "or when the folder is not there, a PDF is read from its own text layer and "

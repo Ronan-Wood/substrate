@@ -133,7 +133,7 @@ def test_a_converted_document_stores_the_original_not_its_markdown(tmp_path, mon
     docx = tmp_path / "report.docx"
     docx.write_bytes(b"PK\x03\x04 not really a docx, but these are the original's bytes")
     monkeypatch.setattr(convert, "to_markdown", lambda src, spec, **kw: convert.Conversion(
-        markdown=NOTE, pages=1, extractor="test-converter", arm="test"))
+        markdown=NOTE, pages=1, extractor="test-converter", arm="test", source_sha256=_sha(src)))
     rc, out, err = _ingest(str(docx), "--out", str(tmp_path / "out"))
     assert rc == 0, err
     assert {c for c in blobs.held()} == {_sha(docx)}

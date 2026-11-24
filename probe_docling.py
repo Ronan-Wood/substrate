@@ -16,16 +16,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from substrate.paths import configure, internal_cache_footprint, models_folder  # noqa: E402
+from substrate.paths import internal_cache_footprint, model_env, models_folder  # noqa: E402
 
-# Read before the full parser exists, because configure() MUST run before docling is imported — HF
-# reads its cache env at import time.
+# Read before the full parser exists, because model_env() MUST be in the environment before docling
+# is imported — HF reads its cache env at import time.
 # NOT required here, and NOT the place that reports a bad one: `--help` has to reach the real parser
 # below, and a folder that is not a models folder deserves argparse's own error rather than a
 # traceback out of module scope.
@@ -38,9 +39,9 @@ if _chosen:
         MODELS = models_folder(_chosen)
     except ValueError as _e:
         sys.exit(f"probe_docling: {_e}")
-    configure(MODELS)
+    os.environ.update(model_env(MODELS))
 
-from substrate.extract.docling_arm import docling_version  # noqa: E402
+from substrate.extract.convert import docling_version  # noqa: E402
 
 from docling.datamodel.base_models import InputFormat  # noqa: E402
 from docling.datamodel.pipeline_options import PdfPipelineOptions  # noqa: E402

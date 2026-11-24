@@ -8,7 +8,7 @@ they are.
 
 | aspect | here |
 |---|---|
-| layout | `<root>/sha256/<ab>/<checksum>`, one fan-out level. `<root>/tmp/` stages writes; `<root>/tombstones/<checksum>` records a `forget`; `<root>/.lock` serializes writers |
+| layout | `<root>/sha256/<ab>/<checksum>`, one fan-out level. `<root>/tmp/` stages writes; `<root>/tombstones/<checksum>` records a `forget`; `<root>/.lock` serializes writers; `<root>/convert/quarantine/<checksum>.json` records a file the conversion worker failed on twice (`extract.conversion_quarantine`) |
 | key | SHA-256 of the original's bytes, the same value a derived note declares as `source_sha256` |
 | contents | bytes only. Name, media type and origin live in the note's frontmatter |
 | privacy | every directory 0700, every blob 0400, created explicitly (`~/.substrate` is 0755, so nothing is inherited); every store entry owned by this user and carrying no extended ACL, since an inherited ACE grants what the mode bits deny |
@@ -51,7 +51,7 @@ _BLOB_MODE = 0o400
 # `tmp/` that any project folder may have, is what makes an existing folder a store.
 MARKER = ".substrate-blob-store"
 LEDGER = "vaults.seen"
-_LAYOUT = frozenset({"sha256", "tmp", "tombstones", ".lock", MARKER, LEDGER})
+_LAYOUT = frozenset({"sha256", "tmp", "tombstones", "convert", ".lock", MARKER, LEDGER})
 # What Finder writes into any folder it shows. Neither makes a folder someone else's, and refusing
 # over one would stop every ingest the first time the operator looked inside the store.
 _FINDER = frozenset({".DS_Store", ".localized", "Icon\r"})

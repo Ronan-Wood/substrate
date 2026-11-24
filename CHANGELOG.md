@@ -90,6 +90,13 @@ Every release of the engine, newest first. The format follows
   macOS nothing else reads one. For a scanned page there is none, since docling's PDF reader runs no
   OCR. Both named the flag alone, which never reads a scanned page and reads an image only on macOS
   with `convert-ml`. The bundled engine has the reader, so nothing changes there.
+- **Docling converts in a worker process, never in the engine's own.** `substrate ingest` starts
+  one per converted file and kills its process group when it hangs, crashes or answers something
+  the engine cannot trust; a second fault quarantines the file, which `ingest` then refuses with
+  exit 3 until `--retry-quarantined` or a new docling. `substrate blobs status` lists the
+  quarantined files. The coverage gate still runs in the engine. A file that changes during its
+  ingest is refused with exit 3, and Ctrl-C, SIGTERM or SIGHUP stops the worker and exits 128 plus
+  the signal. The worker is not a sandbox: [`SECURITY.md`](SECURITY.md) says what it is.
 - **`substrate formats` lists a format whose extra is not installed as `REFUSED`,** in the same four
   columns, naming the extra and how to install it, and the PDF and image notes name only the readers
   the engine has. With both extras and Apple's reader, as the bundled engine has them, the listing is

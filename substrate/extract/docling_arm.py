@@ -4,10 +4,15 @@ Measured 2026-07-21 on DDIA (673pp): a single convert() call costs 10.80 s/page,
 100-page batch costs 0.22 s/page at identical work density (10.2 vs 9.8 items/page). That
 is a ~46x penalty from state accumulation, not a slow accelerator. So batching is structural
 here, not an optimization, and one converter is reused across batches to amortize model load.
+
+Docling runs in the conversion worker (`worker.extract_pdf`), which builds the converter once and
+answers each batch with its items. This side never imports docling: it turns the items into
+blocks and assembles the document, so furniture, heading inference and the PDF gates stay here.
 """
 
 from __future__ import annotations
 
+import stat
 import time
 from pathlib import Path
 
@@ -15,165 +20,121 @@ from substrate.extract.assemble import assemble
 from substrate.models import LABEL_MAP, Block, Document, Kind
 
 BATCH_PAGES = 100
-
-
-def docling_version() -> str:
-    """The installed docling's version, for the `extractor` string `docling <version>`.
-
-    Read from `docling-slim`, which holds the code. `docling` is a meta-package of the same version
-    that the engine's extras do not install, so asking for it raised `PackageNotFoundError` on an
-    engine that converts perfectly well.
-    """
-    from importlib.metadata import version
-
-    return version("docling-slim")
-
-
-def cpu_accelerator():
-    """CPU, NOT THE GPU DOCLING PICKS BY ITSELF — for every pipeline that loads the layout model.
-
-    Measured 2026-09-16 on docling 2.126.0: its automatic device is Metal, and the layout model there
-    dies with "Cannot convert a MPS Tensor to float64 dtype as the MPS framework doesn't support
-    float64" — every PDF, before a single block is read. The same document converts on CPU in 12.1 s.
-    An accelerator that refuses the whole document is not an accelerator. The image pipeline in
-    `convert.to_markdown` runs the same layout model and died the same way until it took this too.
-    """
-    from docling.datamodel.accelerator_options import AcceleratorDevice, AcceleratorOptions
-
-    return AcceleratorOptions(device=AcceleratorDevice.CPU)
-
-
-def _converter(models: Path):
-    from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
-    from docling.document_converter import DocumentConverter, PdfFormatOption
-
-    opts = PdfPipelineOptions(artifacts_path=str(models))
-    opts.do_ocr = False  # both reference inputs carry real text layers
-    opts.do_table_structure = True
-    opts.accelerator_options = cpu_accelerator()
-    return DocumentConverter(
-        format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)}
-    )
-
-
-def _content_layers():
-    """Include FURNITURE: we adjudicate those labels ourselves rather than let them vanish."""
-    try:
-        from docling_core.types.doc.labels import ContentLayer
-    except ImportError:
-        try:
-            from docling_core.types.doc import ContentLayer
-        except ImportError:
-            return None
-    return set(ContentLayer)
-
-
-def _iter(doc):
-    layers = _content_layers()
-    if layers is not None:
-        try:
-            yield from doc.iterate_items(included_content_layers=layers)
-            return
-        except TypeError:
-            pass
-    yield from doc.iterate_items()
+# Items, and their text, across all of a document's batches. A batch is bounded by its frame; the
+# number of batches comes from the PDF's own page count, so the whole needs bounds of its own.
+MAX_DOCUMENT_ITEMS = 1_000_000
+# Characters, which can cost four bytes each in memory.
+MAX_DOCUMENT_TEXT = 64 * 1024 * 1024
 
 
 def _page_count(pdf: Path) -> int:
-    from docling_core.types.doc import DoclingDocument  # noqa: F401  (ensures deps loaded)
     import pypdfium2 as pdfium
 
     with pdfium.PdfDocument(str(pdf)) as d:
         return len(d)
 
 
-def _text_of(item, doc) -> tuple[str, str | None]:
-    """Return (text, code_language). Tables render as markdown; everything else is text."""
-    label = str(getattr(item, "label", "")).lower()
-    if "table" in label:
-        for attempt in (lambda: item.export_to_markdown(doc), lambda: item.export_to_markdown()):
-            try:
-                return attempt(), None
-            except Exception:
-                continue
-        return (getattr(item, "text", "") or ""), None
-    text = (getattr(item, "text", "") or "").strip()
-    lang = getattr(item, "code_language", None)
-    return text, (str(lang) if lang else None)
+def _block(n: int, item: dict) -> Block:
+    kind = LABEL_MAP.get(item["label"], Kind.TEXT)
+    return Block(
+        id=f"b{n:06d}",
+        kind=kind,
+        text=item["text"],
+        page=item["page"],
+        label=item["label"],
+        level=None,  # docling reports 1 for everything; inferred later
+        lang=item["lang"],
+        height=item["height"],
+        left=item["left"],
+        furniture_claimed=("FURNITURE" in item["layer"] or kind is Kind.FURNITURE),
+    )
 
 
 class DoclingExtractor:
     name = "docling"
 
-    def __init__(self, models: Path, batch_pages: int = BATCH_PAGES):
-        """`models` is a folder `paths.models_folder` has checked; `paths.configure` must have run."""
+    def __init__(self, models: Path, batch_pages: int = BATCH_PAGES, *, quarantine=None,
+                 retry_quarantined: bool = False):
+        """`models` is a folder `paths.models_folder` has checked."""
         self.models = models
         self.batch_pages = batch_pages
-        self._conv = None
-
-    @property
-    def converter(self):
-        if self._conv is None:
-            self._conv = _converter(self.models)
-        return self._conv
+        self.quarantine = quarantine
+        self.retry_quarantined = retry_quarantined
 
     def extract(
         self, pdf: Path, doc_class: str, *, pages: tuple[int, int] | None = None, log=print
     ) -> Document:
-        total = _page_count(pdf)
+        """Raises ConverterMissing, ConverterUnsupported, ConversionRefused, Quarantined or
+        FileChanged (`convert`), and `worker_client.WorkerUnavailable` or `Interrupted`."""
+        from substrate.extract import convert, worker_client
+        from substrate.extract.base import sha256_file
+
+        convert.need_extra(convert.PDF)
+        real = pdf.resolve()
+        checksum = sha256_file(real)
+        total = _page_count(real)
         first, last = pages or (1, total)
         last = min(last, total)
+        batches = [(start, min(start + self.batch_pages - 1, last))
+                   for start in range(first, last + 1, self.batch_pages)]
+        budget = sum(worker_client.pdf_batch_deadline(b - a + 1) for a, b in batches)
 
-        blocks: list[Block] = []
-        n = 0
+        def work(worker):
+            items: list[dict] = []
+            text = 0
+            for start, end in batches:
+                bt = time.monotonic()
+                reply = worker.request(
+                    {"type": "extract_pdf", "path": str(real), "first": start, "last": end},
+                    worker_client.pdf_batch_deadline(end - start + 1),
+                    ("items", "refused", "needs_extra", "unsupported"))
+                if reply["type"] != "items":
+                    return reply
+                items += reply["items"]
+                text += sum(len(item["text"]) for item in reply["items"])
+                if len(items) > MAX_DOCUMENT_ITEMS or text > MAX_DOCUMENT_TEXT:
+                    return {"type": "refused", "reason": f"docling read more than "
+                            f"{MAX_DOCUMENT_ITEMS} items or {MAX_DOCUMENT_TEXT} characters from it, "
+                            "more than the engine assembles"}
+                log(f"  pages {start:>4}-{end:<4} {time.monotonic() - bt:6.1f}s  "
+                    f"({len(items)} blocks so far)")
+            return {"type": "items", "items": items}
+
         t0 = time.monotonic()
 
-        for start in range(first, last + 1, self.batch_pages):
-            end = min(start + self.batch_pages - 1, last)
-            bt = time.monotonic()
-            result = self.converter.convert(str(pdf), page_range=(start, end))
-            for item, _lvl in _iter(result.document):
-                label = str(getattr(item, "label", "")).lower().split(".")[-1]
-                text, lang = _text_of(item, result.document)
-                if not text:
-                    continue
-                prov = getattr(item, "prov", None)
-                page = getattr(prov[0], "page_no", None) if prov else None
-                height = left = None
-                if prov and getattr(prov[0], "bbox", None):
-                    bb = prov[0].bbox
-                    height, left = round(abs(bb.t - bb.b), 1), round(bb.l, 1)
-                layer = str(getattr(item, "content_layer", "")).upper()
-                kind = LABEL_MAP.get(label, Kind.TEXT)
-                n += 1
-                blocks.append(
-                    Block(
-                        id=f"b{n:06d}",
-                        kind=kind,
-                        text=text,
-                        page=page,
-                        label=label,
-                        level=None,  # docling reports 1 for everything; inferred later
-                        lang=lang,
-                        height=height,
-                        left=left,
-                        furniture_claimed=("FURNITURE" in layer or kind is Kind.FURNITURE),
-                    )
+        def accept(reply, docling):
+            blocks = [_block(n, item) for n, item in enumerate(reply["items"], 1)]
+            # `assemble` hashes `pdf`, so it must still be the file the worker read: the same
+            # resolved path, and a regular file, which a FIFO or a device in its place is not.
+            try:
+                same = pdf.resolve() == real and stat.S_ISREG(real.stat().st_mode)
+            except OSError:
+                same = False
+            if not same:
+                raise convert.changed(pdf)
+            try:
+                doc = assemble(
+                    pdf,
+                    doc_class,
+                    blocks,
+                    total_pages=total,
+                    pages_processed=last - first + 1,
+                    seconds=time.monotonic() - t0,
+                    extractor=f"docling {docling}",
+                    extractor_arm=self.name,
+                    layout_model="docling-layout-heron",
                 )
-            log(
-                f"  pages {start:>4}-{end:<4} {time.monotonic() - bt:6.1f}s  "
-                f"({len(blocks)} blocks so far)"
-            )
+            except OSError:
+                # `assemble` reads the file to hash it: one gone or unreadable is the change rule's.
+                if convert.unchanged(real, checksum):
+                    raise
+                raise convert.changed(pdf) from None
+            # `assemble` hashed the file again, and that hash is `unchanged`'s rule: bytes alone.
+            if doc.source_sha256 != checksum:
+                raise convert.changed(pdf)
+            return doc
 
-        return assemble(
-            pdf,
-            doc_class,
-            blocks,
-            total_pages=total,
-            pages_processed=last - first + 1,
-            seconds=time.monotonic() - t0,
-            extractor=f"docling {docling_version()}",
-            extractor_arm=self.name,
-            layout_model="docling-layout-heron",
-        )
+        return convert.through_worker(
+            pdf, convert.PDF, real=real, checksum=checksum, models=self.models,
+            budget=budget, work=work, accept=accept, quarantine=self.quarantine,
+            retry_quarantined=self.retry_quarantined, log=log)

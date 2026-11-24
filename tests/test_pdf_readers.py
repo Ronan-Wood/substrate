@@ -252,10 +252,12 @@ def test_an_image_with_models_is_read_on_the_cpu_not_metal(tmp_path, monkeypatch
     """The image pipeline runs the same layout model as the PDF arm, so it takes the same CPU pin.
 
     Without it docling picks Metal and the layout model dies on float64 before any page is read
-    (`docling_arm.cpu_accelerator`). The converter is replaced, so no model is loaded — but docling
-    itself must be importable, and CI's engine job installs none, so there it skips.
+    (`worker.cpu_accelerator`). The worker's handler runs in this process with the converter
+    replaced, so no model is loaded — but docling itself must be importable, and CI's engine job
+    installs none, so there it skips.
     """
     pytest.importorskip("docling")
+    from substrate.extract import worker
     import docling.document_converter as dc
     from docling.datamodel.accelerator_options import AcceleratorDevice
     from docling.datamodel.base_models import InputFormat
@@ -270,11 +272,11 @@ def test_an_image_with_models_is_read_on_the_cpu_not_metal(tmp_path, monkeypatch
             raise RuntimeError("not loaded")
 
     monkeypatch.setattr(dc, "DocumentConverter", Captured)
-    monkeypatch.setattr(paths, "configure", lambda models: {})
+    monkeypatch.setenv("DOCLING_ARTIFACTS_PATH", str(tmp_path))
     src = tmp_path / "sign.png"
     src.write_bytes(b"")
-    with pytest.raises(convert.ConversionRefused, match="not loaded"):
-        convert.to_markdown(src, convert.spec_for(src), models=tmp_path, **QUIET)
+    reply = worker.convert_document({"id": 1, "format": "image", "path": str(src)})
+    assert reply["type"] == "refused" and "not loaded" in reply["reason"], reply
     assert seen[InputFormat.IMAGE].pipeline_options.accelerator_options.device == AcceleratorDevice.CPU
 
 

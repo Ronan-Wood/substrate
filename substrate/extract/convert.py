@@ -47,8 +47,10 @@ decision nobody has taken.
 
 from __future__ import annotations
 
+import contextlib
 import html as _html
 import re
+import signal
 import sys
 import time
 import zipfile
@@ -82,6 +84,27 @@ class UnsupportedFormat(RuntimeError):
 
 class ConversionRefused(RuntimeError):
     """The conversion ran and its result is not trustworthy. A GATE — refuse, do not index."""
+
+
+class ConverterMissing(ImportError):
+    """Docling, or a piece of it, will not load: the converter cannot run here. Not the file's
+    fault, so an INPUT-side refusal (exit 2) naming the extra, never a gate."""
+
+
+class Quarantined(RuntimeError):
+    """The worker hung, crashed or answered garbage on this file twice, or did so on an earlier
+    ingest of the same bytes with the same converter. A GATE (exit 3) naming the way out."""
+
+
+class FileChanged(RuntimeError):
+    """The file's bytes changed, or it went away, between its checksum and the end of its
+    conversion and probe, so the checksum and the conversion may be of different bytes. A GATE
+    (exit 3); never retried, never quarantined."""
+
+
+class ConverterUnsupported(RuntimeError):
+    """The installed docling does not name this format: the format table and the converter
+    disagree, which an upgrade can cause. Neither the file nor a gate: exit 2."""
 
 
 @dataclass(frozen=True)
@@ -298,6 +321,8 @@ class Conversion:
     extractor: str
     stats: dict = field(default_factory=dict)
     arm: str = ""                   # run.json["extractor_arm"]: which reader produced the markdown
+    # The checksum of the bytes that were converted and probed (`unchanged` held throughout).
+    source_sha256: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -551,105 +576,291 @@ def _apple_markdown(src: Path, spec: FormatSpec, *, log=print) -> Conversion:
                       extractor=apple_arm.EXTRACTOR, stats=stats, arm=f"apple-{spec.token}")
 
 
-def to_markdown(src: Path, spec: FormatSpec, *, models: Path | None = None, log=print) -> Conversion:
+def changed(src: Path) -> FileChanged:
+    return FileChanged(
+        f"{src.name} changed or went away while it was being ingested, so its checksum and its "
+        "conversion may be of different bytes. Ingest it again once nothing is writing to it.")
+
+
+def unchanged(src: Path, checksum: str) -> bool:
+    """Whether `src` still holds the bytes `checksum` was taken of, hashed again. The bytes alone
+    decide: a chmod, an extended attribute or a touch is no change, and a file that is gone or
+    cannot be read is one, as is a path that is no longer a regular file (a FIFO would block the
+    read, a device never end it), which is found without reading it. A change made and undone
+    between the two hashes is not seen: someone running as this user can arrange that, and so can
+    a sync client replaying another person's edit and its undo."""
+    import hashlib
+    import os
+    import stat
+
+    try:
+        fd = os.open(src, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
+        digest = hashlib.sha256()
+        while block := os.read(fd, 1 << 20):
+            digest.update(block)
+        return digest.hexdigest() == checksum
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def printable(text: str) -> str:
+    """Text a converter wrote, made safe for a terminal: a document's own words can reach an error
+    message, and an escape sequence among them would act on the terminal it is printed to. Control
+    characters go, and so do the invisible ones that reorder or hide text (bidi controls, zero
+    widths, line and paragraph separators); each line after the first is indented, so none of it
+    can pass for one of the engine's own `FATAL` or `WARNING` lines."""
+    import unicodedata
+
+    kept = "".join(c for c in text if c in "\n\t" or not (
+        ord(c) < 32 or 127 <= ord(c) < 160 or unicodedata.category(c) in ("Cf", "Zl", "Zp")))
+    return kept.replace("\n", "\n    ")
+
+
+def docling_version() -> str:
+    """The installed docling's version, read from the `docling-slim` distribution, never imported.
+    The engine's, and so the one a conversion is recorded under: a worker must report the same.
+
+    `docling` is a meta-package of the same version that the engine's extras do not install, so
+    asking for it raised `PackageNotFoundError` on an engine that converts perfectly well.
+    """
+    from importlib.metadata import version
+
+    return version("docling-slim")
+
+
+def to_markdown(src: Path, spec: FormatSpec, *, models: Path | None = None, log=print,
+                quarantine=None, retry_quarantined: bool = False) -> Conversion:
     """Convert one non-PDF, non-markdown source to markdown. Raises ConversionRefused.
 
     `models` is the operator's checked docling models folder (`paths.models_folder`), or None. A format
     that uses models is read by Apple's on-device recognizer without one and by docling with one; every
     other format ignores it, because a .docx needs no weights.
 
+    Docling runs in the conversion worker (`worker_client`), never in this process; the gates run
+    here. `quarantine` is a callable returning the blob store root that holds quarantine records,
+    or None for none (`conversion_quarantine`). Also raises ConverterMissing, ConverterUnsupported
+    and `worker_client.WorkerUnavailable` (exit 2), Quarantined and FileChanged (exit 3), and
+    `worker_client.Interrupted` when Ctrl-C, SIGTERM or SIGHUP stops the conversion.
+
     Every refusal names the format, the file and the specific reason. Nothing partial is returned:
     the caller either gets markdown that cleared both gates, or an exception.
     """
+    from substrate.extract.base import sha256_file
+
     if spec.arm != "docling":
         raise ValueError(f"{spec.token} is read by the {spec.arm} arm, not converted")
+    # Read through one resolved path: the checksum is taken once, here, and the same bytes must be
+    # there when the conversion and its probe are done, or a sync client rewriting the file
+    # mid-ingest would give one file's verdict to another's bytes.
+    real = src.resolve()
+    checksum = sha256_file(real)
+    size = real.stat().st_size
     if spec.uses_models and models is None:
-        return _apple_markdown(src, spec, log=log)
-    if spec.uses_models:
-        from substrate.paths import configure
+        try:
+            conv = _apple_markdown(real, spec, log=log)
+        except ConversionRefused:
+            if not unchanged(real, checksum):
+                raise changed(src) from None
+            raise
+        if not unchanged(real, checksum):
+            raise changed(src)
+        conv.source_sha256 = checksum
+        return conv
+    need_extra(spec)
 
-        configure(models)
+    from substrate.extract import worker_client
 
-    from docling.datamodel.base_models import ConversionStatus, InputFormat
-    from docling.document_converter import DocumentConverter
-
-    fmt = InputFormat(spec.docling_format)
-    options: dict = {}
-    if spec.uses_models:
-        from docling.datamodel.pipeline_options import OcrMacOptions, PdfPipelineOptions
-        from docling.document_converter import ImageFormatOption
-
-        from substrate.extract.docling_arm import cpu_accelerator
-
-        opts = PdfPipelineOptions(artifacts_path=str(models))
-        opts.do_ocr = True  # an image has no text layer to prefer; OCR is the only reading
-        # APPLE VISION, NAMED rather than left to docling's automatic choice. Its fallback, RapidOCR,
-        # needs OpenCV, whose macOS wheel carries a GPL FFmpeg; `pyproject.toml` excludes it, and
-        # naming the engine here means a stray reinstall cannot switch engines without a code change.
-        opts.ocr_options = OcrMacOptions()
-        opts.do_table_structure = True
-        opts.accelerator_options = cpu_accelerator()
-        options = {InputFormat.IMAGE: ImageFormatOption(pipeline_options=opts)}
-
-    t0 = time.monotonic()
     log(f"converting: {src.name}  format={spec.token}"
         + ("  (OCR — first run loads models)" if spec.uses_models else ""))
-    conv = DocumentConverter(allowed_formats=[fmt], format_options=options)
+    budget = worker_client.convert_deadline(size)
+
+    def work(worker):
+        return worker.request({"type": "convert", "format": spec.token, "path": str(real)}, budget,
+                              ("converted", "refused", "needs_extra", "unsupported"))
+
+    def accept(reply, docling):
+        md = reply["markdown"]
+        try:
+            gate = verify_conversion(real, spec, md)
+        except ConversionRefused as e:
+            gate = e
+        if not unchanged(real, checksum):
+            raise changed(src)
+        if isinstance(gate, ConversionRefused):
+            raise gate
+        cov, missing, probe = gate
+        stats = {
+            "converted_chars": len(md),
+            "converted_seconds": reply["seconds"],
+            "docling_status": reply["status"],
+            "reader": "docling",
+            "ocr": spec.uses_models,
+            # `null` when nothing could measure it. See raw_text: absent evidence, not a pass.
+            "raw_coverage": cov,
+            # The probe AS IT RAN, not as the table declares it: `ooxml-w` only when it produced a
+            # reading, `unavailable`/`…-failed`/`…-empty` otherwise. Naming the declared probe
+            # beside a null coverage is a run.json that says a gate ran when it did not.
+            "raw_coverage_probe": probe.label,
+            "raw_coverage_missing": missing,
+        }
+        # Written only when the probe actually broke — absence means nothing to explain, the same
+        # way an undeclared class is absent rather than stored as a value that reads like one.
+        if probe.error:
+            stats["raw_coverage_probe_error"] = probe.error
+        return Conversion(markdown=md, pages=reply["pages"], extractor=f"docling {docling}",
+                          stats=stats, arm=f"docling-{spec.token}", source_sha256=checksum)
+
+    return through_worker(src, spec, real=real, checksum=checksum, models=models, budget=budget,
+                          work=work, accept=accept, quarantine=quarantine,
+                          retry_quarantined=retry_quarantined, log=log)
+
+
+def need_extra(spec: FormatSpec) -> None:
+    """Refuse before any worker starts when the extra docling needs for `spec` is not installed.
+    Raises ConverterMissing. The worker refuses a half-installed extra the same way."""
+    extra = spec.docling_extra
+    if extra is not None and extra not in installed_extras():
+        raise ConverterMissing("it is not installed")
+
+
+_SAID = {"hang": "hung", "crash": "crashed", "protocol": "answered with frames it could not trust"}
+
+
+def through_worker(src: Path, spec: FormatSpec, *, real: Path, checksum: str,
+                   models: Path | None, budget: int, work, accept, quarantine,
+                   retry_quarantined: bool, log):
+    """Run `work(worker)` in a fresh worker until `conversion_quarantine.quarantine_decision`
+    stops: once, and once more after a fault. `work` returns the worker's reply; for a
+    `converted` or `items` reply, `accept(reply, docling_version)` runs the gates here, may raise
+    FileChanged or ConversionRefused, and returns what this returns. Otherwise this raises the
+    verdict. A fault or a refusal on a file whose bytes changed is FileChanged. Ctrl-C, SIGTERM
+    and SIGHUP meanwhile raise `worker_client.Interrupted` once the worker's group is dead."""
+    from substrate.extract import conversion_quarantine as q
+    from substrate.extract import convert_frames as frames
+    from substrate.extract import worker_client
+    from substrate.paths import model_env
+
+    docling = docling_version()
+    store = record = None
+    unusable = "no blob store is in use for this ingest"
+    if quarantine is not None:
+        try:
+            store = quarantine()
+        except Exception as e:  # noqa: BLE001 — no store is no record, never a refusal
+            unusable = printable(str(e)).rstrip(".")
+        else:
+            record = q.read(store, checksum)
+    state = q.state(record, fmt=spec.token, models=models is not None, docling=docling)
+    outcomes: list[str] = []
+    faults: list[worker_client.WorkerFault] = []
+    result = None
     try:
-        result = conv.convert(str(src))
-    except ImportError:
-        # The converter, not the file: docling raises a bare ImportError for a piece of its own it
-        # imports only when a pipeline first runs (`ocrmac`, `docling-parse`), and with `convert`
-        # but not `convert-ml` installed that is how an image read with models fails. The caller
-        # names the extra and exits 2; a refusal here would blame the file.
-        raise
-    except Exception as e:  # noqa: BLE001 — every other docling failure becomes one refusal
-        raise ConversionRefused(
-            f"{spec.token}: docling could not convert {src.name} — {e}"
-        ) from e
+        with worker_client.interruptible():
+            while True:
+                decision = q.quarantine_decision(outcomes, state, retry_quarantined)
+                if decision.record == "delete" and store is not None:
+                    # A record that cannot be removed only means the next ingest asks again.
+                    with contextlib.suppress(OSError):
+                        q.remove(store, checksum)
+                note = ""
+                if decision.record == "write":
+                    note = _record(q, store, unusable, checksum, spec, models, docling, faults)
+                if decision.verdict == "blocked":
+                    raise Quarantined(
+                        f"{src.name} is quarantined: the converter "
+                        f"{', then '.join(_SAID[f] for f in record['faults'])} on it "
+                        f"({record['at']}). `substrate ingest --retry-quarantined` tries it again.")
+                if decision.verdict == "quarantined":
+                    tail = printable(faults[-1].stderr).strip()[-2000:]
+                    raise Quarantined(
+                        f"{src.name} is quarantined: the converter {printable(faults[0].said)}, "
+                        f"and in a new worker it {printable(faults[-1].said)}. `substrate ingest "
+                        f"--retry-quarantined` tries it again.{note}"
+                        + (f"\nThe worker's last words:\n    {tail}" if tail else ""))
+                if decision.verdict != "attempt":
+                    return _verdict(decision.verdict, src, spec, result)
+                if faults:
+                    log(f"WARNING (converter): the worker converting {src.name} "
+                        f"{printable(faults[-1].said)}; it was stopped, and a new worker tries "
+                        "once more.")
+                try:
+                    with worker_client.Worker(budget, model_env(models) if models else {},
+                                              loads_models=spec.uses_models) as w:
+                        hello = w.start()
+                        if hello["docling"] != docling:
+                            raise worker_client.WorkerUnavailable(
+                                f"the conversion worker runs docling "
+                                f"{printable(str(hello['docling']))}, not the engine's {docling}")
+                        reply = work(w)
+                        w.finish()
+                except frames.FrameError as e:
+                    # A request this engine cannot put into a frame (a file name that is not
+                    # UTF-8): this file's answer, every time, and never the worker's fault.
+                    result = ConversionRefused(f"{spec.token}: {src.name} cannot be named to the "
+                                               f"converter ({e})")
+                    outcomes.append("refused")
+                    continue
+                except worker_client.WorkerFault as fault:
+                    # A change to the file can be what made the converter fail: then it is the
+                    # change that is reported, and nothing is recorded against these bytes.
+                    if not unchanged(real, checksum):
+                        result = changed(src)
+                        outcomes.append("changed")
+                        continue
+                    faults.append(fault)
+                    outcomes.append(fault.kind)
+                    continue
+                if reply["type"] in ("converted", "items"):
+                    try:
+                        result = accept(reply, docling)
+                    except (FileChanged, ConversionRefused) as e:
+                        result = e
+                        outcomes.append("changed" if isinstance(e, FileChanged) else "refused")
+                        continue
+                    outcomes.append("ok")
+                    continue
+                if reply["type"] == "refused" and not unchanged(real, checksum):
+                    # A converter that could not read the file may not have had its bytes, or any.
+                    result = changed(src)
+                    outcomes.append("changed")
+                    continue
+                result = reply
+                outcomes.append(reply["type"])
+    except KeyboardInterrupt:
+        raise worker_client.Interrupted(signal.SIGINT) from None
 
-    # PARTIAL_SUCCESS is refused with the failures. It is precisely "some of the document is
-    # missing and the rest looks fine", which is the state this engine exists to not produce.
-    if result.status is not ConversionStatus.SUCCESS:
-        raise ConversionRefused(
-            f"{spec.token}: docling returned {result.status} for {src.name} — refusing a "
-            f"conversion that is not whole. Errors: {getattr(result, 'errors', None)}"
-        )
 
-    md = result.document.export_to_markdown()
-    elapsed = round(time.monotonic() - t0, 1)
-    cov, missing, probe = verify_conversion(src, spec, md)
+def _record(q, store, unusable, checksum, spec, models, docling, faults) -> str:
+    """Write the quarantine record. Returns what to add to the refusal when it could not be."""
+    if store is not None:
+        try:
+            q.write(store, checksum, fmt=spec.token, models=models is not None, docling=docling,
+                    faults=[f.kind for f in faults])
+            return ""
+        except Exception as e:  # noqa: BLE001
+            unusable = printable(str(e)).rstrip(".")
+    return f" It could not be recorded ({unusable}), so the next ingest tries it again."
 
-    pages = None
-    try:
-        n = result.document.num_pages()
-        pages = n if n and n > 0 else None
-    except Exception:  # noqa: BLE001 — a page count is provenance, never a gate
-        pages = None
 
-    from substrate.extract.docling_arm import docling_version
-
-    stats = {
-        "converted_chars": len(md),
-        "converted_seconds": elapsed,
-        "docling_status": str(result.status),
-        "reader": "docling",
-        "ocr": spec.uses_models,
-        # `null` when nothing could measure it. See raw_text: absent evidence, not a pass.
-        "raw_coverage": cov,
-        # The probe AS IT RAN, not as the table declares it: `ooxml-w` only when it produced a
-        # reading, `unavailable`/`…-failed`/`…-empty` otherwise. Naming the declared probe beside a
-        # null coverage is a run.json that says a gate ran when it did not.
-        "raw_coverage_probe": probe.label,
-        "raw_coverage_missing": missing,
-    }
-    # Written only when the probe actually broke — absence means nothing to explain, the same way
-    # an undeclared class is absent rather than stored as a value that reads like one.
-    if probe.error:
-        stats["raw_coverage_probe_error"] = probe.error
-
-    return Conversion(markdown=md, pages=pages, extractor=f"docling {docling_version()}",
-                      stats=stats, arm=f"docling-{spec.token}")
+def _verdict(verdict: str, src: Path, spec: FormatSpec, result):
+    if verdict == "converted":
+        return result
+    if isinstance(result, Exception):
+        raise result
+    if verdict == "refused":
+        raise ConversionRefused(f"{spec.token}: {src.name}: {printable(result['reason'])}")
+    if verdict == "needs_extra":
+        raise ConverterMissing(printable(result["error"]))
+    if verdict == "unsupported":
+        raise ConverterUnsupported(printable(result["error"]))
+    raise AssertionError(f"no verdict {verdict!r}")
 
 
 def _pdf_note(extras: frozenset[str], apple: bool) -> str:

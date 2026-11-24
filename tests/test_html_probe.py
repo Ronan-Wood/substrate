@@ -533,28 +533,44 @@ DOCLING = pytest.mark.skipif(
     reason="needs SUBSTRATE_DOCLING_TESTS=1 and Docling")
 
 
+def _coverage_in_one_worker(tmp_path: Path, pages: dict[str, str]) -> dict[str, object]:
+    """Each page converted by the conversion worker and gated here, as `to_markdown` does, but in
+    one worker for all of them: its start, which is the docling import, is paid once."""
+    from substrate.extract import worker_client
+
+    spec = convert.spec_for(Path("page.html"))
+    out: dict[str, object] = {}
+    with worker_client.Worker(worker_client.CONVERT_CEILING_SECONDS * len(pages)) as worker:
+        worker.start()
+        for case, page in pages.items():
+            src = tmp_path / f"{case}.html"
+            src.write_text(page, "utf-8")
+            reply = worker.request(
+                {"type": "convert", "format": "html", "path": str(src)},
+                worker_client.convert_deadline(src.stat().st_size), ("converted", "refused"))
+            if reply["type"] != "converted":
+                out[case] = reply["type"]
+                continue
+            try:
+                out[case] = convert.verify_conversion(src, spec, reply["markdown"])[0]
+            except convert.ConversionRefused:
+                out[case] = "refused"
+        worker.finish()
+    return out
+
+
 @DOCLING
 def test_docling_roundtrip_each_page_clears_the_gate(tmp_path: Path) -> None:
     """The probe asks only for words Docling renders: each page above converts at coverage 1.0."""
-    below = {}
-    for case, (page, _) in CASES.items():
-        src = _page(tmp_path, page)
-        cov = convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None).stats["raw_coverage"]
-        if cov != 1.0:
-            below[case] = cov
+    got = _coverage_in_one_worker(tmp_path, {case: page for case, (page, _) in CASES.items()})
+    below = {case: cov for case, cov in got.items() if cov != 1.0}
     assert not below, below
 
 
 @DOCLING
 def test_docling_roundtrip_refuses_each_page_it_loses_text_from(tmp_path: Path) -> None:
-    passed = {}
-    for case, (page, _) in REFUSED.items():
-        src = _page(tmp_path, page)
-        try:
-            passed[case] = convert.to_markdown(src, convert.spec_for(src),
-                                               log=lambda *_: None).stats["raw_coverage"]
-        except convert.ConversionRefused:
-            pass
+    got = _coverage_in_one_worker(tmp_path, {case: page for case, (page, _) in REFUSED.items()})
+    passed = {case: cov for case, cov in got.items() if cov != "refused"}
     assert not passed, passed
 
 

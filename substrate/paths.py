@@ -10,7 +10,8 @@ Settings passes), and `models_folder` checks it before anything loads.
 This module used to pin the weights to one external drive by name and exit when it was not mounted,
 so every PDF and image import failed on any Mac but the one it was written on.
 
-`configure()` must run BEFORE docling is imported: HuggingFace reads its cache env at import time.
+`model_env()` is the conversion worker's environment, set before docling is imported there:
+HuggingFace reads its cache env at import time.
 """
 
 from __future__ import annotations
@@ -52,8 +53,8 @@ def models_folder(value: str | os.PathLike[str]) -> Path:
     return path.resolve()
 
 
-def configure(models: Path, offline: bool = True) -> dict[str, str]:
-    """Point docling and HuggingFace at the operator's models folder. Returns the env it set.
+def model_env(models: Path, offline: bool = True) -> dict[str, str]:
+    """The environment that points docling and HuggingFace at the operator's models folder.
 
     OFFLINE, so nothing is fetched: the folder holds the weights, or the load fails and says so. The
     HuggingFace cache is named inside the same folder rather than left at its default under the home
@@ -71,8 +72,6 @@ def configure(models: Path, offline: bool = True) -> dict[str, str]:
     }
     if offline:
         env["HF_HUB_OFFLINE"] = "1"
-
-    os.environ.update(env)
     return env
 
 

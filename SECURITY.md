@@ -28,6 +28,15 @@ than to a policy. You will be credited in the advisory unless you ask not to be.
 Out of scope: vulnerabilities in third-party dependencies with no substrate-specific exposure, which
 belong upstream; and findings that require an attacker who already has code execution as your user.
 
+## The conversion worker
+
+Docling converts documents in a separate worker process, never in the engine's own. The boundary
+protects the engine from a converter that hangs, crashes, floods its output or answers garbage: the
+engine kills the worker's process group, retries once, then quarantines the file. It is not a
+sandbox. The worker runs as you, with your files in reach, so a document that gets code to run
+inside docling runs it with your privileges. That belongs upstream with docling; what
+substrate does with the worker's answers is in scope here.
+
 ## Supported versions
 
 The latest release. Fixes go into the next release rather than to older versions.
