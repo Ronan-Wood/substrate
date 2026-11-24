@@ -45,6 +45,17 @@ uv run python -m pytest tests -q
 | `lean` (Ubuntu, the models of the [verified paths](#verified-paths) against the real code) | PRs that touch `substrate/`, `pyproject.toml`, `uv.lock`, a model or its workflow | no |
 | `codeql python` (`code scanning` workflow) | pushes to `main`, PRs, and weekly | no |
 
+## Review
+
+A pull request gets three reviews, and the last one decides.
+
+- **CI** runs the checks in the table above.
+- **CodeRabbit**, a GitHub App, reviews pull requests to `main` automatically, except drafts and
+  Dependabot's, and pauses after five reviewed commits. Its comments are advice: it doesn't request
+  changes, approve or hold a merge, and you can answer a comment, act on it or leave it.
+  [`.coderabbit.yaml`](.coderabbit.yaml) sets what it checks and what it skips.
+- **The maintainer** reads the change and decides whether it lands, whatever CodeRabbit said.
+
 ## Issue labels
 
 | label | means |
