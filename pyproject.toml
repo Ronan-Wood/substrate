@@ -8,12 +8,12 @@ license = "GPL-3.0-or-later"
 # vault needs. Document conversion is in the two extras below, and nothing here may import them.
 dependencies = [
     # The default PDF reader's text layer (`substrate/extract/pdftext_arm.py`).
-    "pypdfium2>=5.15.0,<6",
+    "pypdfium2>=5.15.2,<6",
     # `blobs gc` reads a note's frontmatter as YAML, so a reference spelled in any valid YAML keeps
     # its original; `substrate frontmatter check|fix` and compose's count read it that way too.
-    "pyyaml>=6.0.3,<7",
+    "pyyaml>=6.0.4,<7",
     # The vector matrix (`substrate/store/vector_matrix.py`). It used to arrive only through docling.
-    "numpy>=2.5.1,<3",
+    "numpy>=2.5.5,<3",
 ]
 
 [project.optional-dependencies]
