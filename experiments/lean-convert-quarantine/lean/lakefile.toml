@@ -1,0 +1,9 @@
+name = "convertquarantine"
+defaultTargets = ["convertquarantine"]
+
+[[lean_lib]]
+name = "ConvertQuarantine"
+
+[[lean_exe]]
+name = "convertquarantine"
+root = "Main"

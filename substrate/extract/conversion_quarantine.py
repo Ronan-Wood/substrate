@@ -11,7 +11,8 @@ This is not compose's quarantine (`substrate.quarantine`), which leaves a note o
 withholds one file from one ingest, loudly, and names the way out.
 
 `quarantine_decision` is the rule, as a pure function with no I/O, so a model can drive it
-unchanged. VERIFIED.md lists the Lean model and differential harness as planned.
+unchanged. Its Lean model and differential harness are `experiments/lean-convert-quarantine/`
+(VERIFIED.md).
 
 The RECORD is `<blob store>/convert/quarantine/<source_sha256>.json`: the checksum, the format,
 whether a models folder was named, the docling version, the faults and when. Nothing from the
@@ -64,7 +65,8 @@ def quarantine_decision(outcomes: Sequence[str], record: str, retry_quarantined:
     An answer ends the run with its own verdict, and only a conversion that went through clears the
     record. Faults are retried until RETRIES + 1 of them, then quarantine. A matching record stops
     the file before any attempt unless the operator asked to retry it. Raises ValueError for a
-    sequence no driver should produce: an outcome after an answer, or more faults than allowed.
+    sequence no driver should produce: an outcome after an answer, more attempts than RETRIES + 1
+    (an answer after that many faults included), or any attempt on a file the record blocks.
     """
     if record not in (ABSENT, MATCHING, OTHER):
         raise ValueError(f"unknown record state {record!r}")
@@ -73,17 +75,19 @@ def quarantine_decision(outcomes: Sequence[str], record: str, retry_quarantined:
             raise ValueError(f"unknown outcome {outcome!r}")
         if outcome in ANSWERS and i != len(outcomes) - 1:
             raise ValueError("an outcome after an answer")
+    if len(outcomes) > RETRIES + 1:
+        raise ValueError(f"{len(outcomes)} attempts, past the {RETRIES + 1} allowed")
+    if record == MATCHING and not retry_quarantined:
+        if outcomes:
+            raise ValueError("an attempt on a file its record blocks")
+        return Decision("blocked")
     if not outcomes:
-        if record == MATCHING and not retry_quarantined:
-            return Decision("blocked")
         return Decision("attempt")
     last = outcomes[-1]
     if last in ANSWERS:
         if last == "ok":
             return Decision("converted", "delete" if record != ABSENT else "keep")
         return Decision(_VERDICT[last])
-    if len(outcomes) > RETRIES + 1:
-        raise ValueError(f"{len(outcomes)} faults, past the {RETRIES + 1} allowed")
     if len(outcomes) <= RETRIES:
         return Decision("attempt")
     return Decision("quarantined", "write")
