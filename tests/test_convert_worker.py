@@ -297,6 +297,24 @@ def test_the_decision_refuses_a_sequence_no_driver_produces(outcomes) -> None:
         q.quarantine_decision(outcomes, q.ABSENT, False)
 
 
+@pytest.mark.parametrize(("outcomes", "record", "retry"), [
+    (("hang", "hang", "ok"), q.ABSENT, False),
+    (("hang", "hang", "hang", "ok"), q.ABSENT, False),
+    (("crash", "protocol", "hang", "refused"), q.MATCHING, True),
+    (("crash", "hang", "changed"), q.OTHER, False),
+    (("ok",), q.MATCHING, False),
+    (("hang",), q.MATCHING, False),
+    (("hang", "hang"), q.MATCHING, False),
+])
+def test_the_decision_refuses_an_answer_past_the_retries_and_an_attempt_it_blocks(
+        outcomes, record, retry) -> None:
+    """Two sequences the driver cannot build, since it stops at the first decision that is not
+    `attempt`, were once given a Decision: an answer after RETRIES + 1 faults (the bound was checked
+    only when the last outcome was a fault), and any attempt on a file a matching record blocks."""
+    with pytest.raises(ValueError):
+        q.quarantine_decision(outcomes, record, retry)
+
+
 # ---------------------------------------------------------------- the record
 
 CHECKSUM = "a" * 64
@@ -1039,7 +1057,7 @@ def test_a_worker_running_another_docling_is_refused_before_it_gets_the_file(mon
 
 
 def test_the_record_follows_the_decision_s_record_action(monkeypatch, fast, tmp_path) -> None:
-    """The planned model checks `Decision.record`; the driver must act on it, not on the verdict."""
+    """The Lean model checks `Decision.record`; the driver must act on it, not on the verdict."""
     real = q.quarantine_decision
 
     def decide(outcomes, record, retry):
@@ -1051,6 +1069,94 @@ def test_the_record_follows_the_decision_s_record_action(monkeypatch, fast, tmp_
     with pytest.raises(convert.Quarantined):
         _convert(_source(tmp_path), quarantine=lambda: tmp_path / "store")
     assert q.listing(tmp_path / "store") == []
+
+
+CRASH = "hello(); request(); sys.exit(1)"
+REFUSE = ("hello(); r = request(); "
+          "send({'v': 1, 'type': 'refused', 'id': r['id'], 'reason': 'no'}); bye()")
+
+
+@pytest.mark.parametrize(("scripts", "docling", "retry", "outcomes"), [
+    ((CRASH, OK), None, False, ("crash", "ok")),
+    ((CRASH,), None, False, ("crash", "crash")),
+    ((REFUSE,), None, False, ("refused",)),
+    ((CRASH, REFUSE), "9.9", True, ("crash", "refused")),
+    ((OK,), "9.9", True, ("ok",)),
+    ((OK,), "9.9", False, ()),
+    ((CRASH,), "1.0", False, ("crash", "crash")),
+    ((OK,), "1.0", False, ("ok",)),
+])
+def test_the_driver_asks_the_rule_after_every_attempt_and_obeys_it(monkeypatch, fast, tmp_path,
+                                                                   scripts, docling, retry,
+                                                                   outcomes) -> None:
+    """The Lean model covers `quarantine_decision` alone. This pins `through_worker` to it: the
+    record is read once, the rule is asked before the first attempt and after each one with every
+    outcome so far and that record's state, a worker starts only on `attempt`, the run ends at the
+    first other verdict, and the record on disk is what that decision's record action says."""
+    from substrate.extract.base import sha256_file
+
+    src, store = _source(tmp_path), tmp_path / "store"
+    checksum = sha256_file(src)
+    if docling is not None:
+        q.write(store, checksum, fmt="asciidoc", models=False, docling=docling,
+                faults=["hang", "crash"])
+    before = q.read(store, checksum)
+    real, read = q.quarantine_decision, q.read
+    asked: list[tuple[tuple[str, ...], str, bool, q.Decision]] = []
+    reads: list[str] = []
+
+    def spy_read(where, digest):
+        reads.append(digest)
+        return read(where, digest)
+
+    monkeypatch.setattr(q, "read", spy_read)
+
+    def decide(seen, record, again):
+        if len(asked) > q.RETRIES + 1:
+            raise AssertionError(f"the rule was asked {len(asked) + 1} times: {asked}")
+        d = real(seen, record, again)
+        asked.append((tuple(seen), record, again, d))
+        return d
+
+    monkeypatch.setattr(q, "quarantine_decision", decide)
+    spawned = _fake(monkeypatch, *scripts)
+    with contextlib.suppress(convert.Quarantined, convert.ConversionRefused):
+        _convert(src, quarantine=lambda: store, retry_quarantined=retry)
+    assert reads == [checksum]
+    state = q.state(before, fmt="asciidoc", models=False, docling=convert.docling_version())
+    assert [seen for seen, _, _, _ in asked] == [outcomes[:i] for i in range(len(outcomes) + 1)]
+    assert {(record, again) for _, record, again, _ in asked} == {(state, retry)}
+    assert [d.verdict for *_, d in asked[:-1]] == ["attempt"] * len(outcomes)
+    last = asked[-1][-1]
+    assert last.verdict != "attempt" and len(spawned) == len(outcomes)
+    after = read(store, checksum)
+    action = last.record
+    if action == "write":
+        assert after is not None and after["faults"] == list(outcomes)
+    elif action == "delete":
+        assert after is None
+    else:
+        assert after == before
+
+
+def test_a_conversion_removes_a_record_only_when_the_decision_says_delete(monkeypatch, fast,
+                                                                          tmp_path) -> None:
+    """The other half of the record action: the driver deletes on `delete`, not on `converted`."""
+    from substrate.extract.base import sha256_file
+
+    src, store = _source(tmp_path), tmp_path / "store"
+    q.write(store, sha256_file(src), fmt="asciidoc", models=False, docling="1.0",
+            faults=["hang", "crash"])
+    real = q.quarantine_decision
+
+    def decide(outcomes, record, retry):
+        d = real(outcomes, record, retry)
+        return q.Decision(d.verdict, "keep") if d.verdict == "converted" else d
+
+    monkeypatch.setattr(q, "quarantine_decision", decide)
+    _fake(monkeypatch, OK)
+    assert "harbour" in _convert(src, quarantine=lambda: store).markdown
+    assert q.read(store, sha256_file(src)) is not None
 
 
 def test_the_worker_answers_an_unreturnable_conversion_with_a_refusal() -> None:

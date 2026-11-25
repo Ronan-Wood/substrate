@@ -97,6 +97,11 @@ Every release of the engine, newest first. The format follows
   quarantined files. The coverage gate still runs in the engine. A file that changes during its
   ingest is refused with exit 3, and Ctrl-C, SIGTERM or SIGHUP stops the worker and exits 128 plus
   the signal. The worker is not a sandbox: [`SECURITY.md`](SECURITY.md) says what it is.
+- **The rule that decides when a converted file is retried, quarantined or blocked is proved in
+  Lean** and checked against the code ([`VERIFIED.md`](VERIFIED.md)). Writing the model found
+  that the rule decided two kinds of attempt it never asks for: one after the second fault, and one
+  on a file its record blocks. The engine never made either. The rule now rejects both as an
+  engine bug, so a mistake in the loop that calls it fails loudly rather than being given a verdict.
 - **`substrate formats` lists a format whose extra is not installed as `REFUSED`,** in the same four
   columns, naming the extra and how to install it, and the PDF and image notes name only the readers
   the engine has. With both extras and Apple's reader, as the bundled engine has them, the listing is
