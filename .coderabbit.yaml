@@ -1,50 +1,52 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 #
 # CodeRabbit's automatic first-pass review of a pull request. It is ADVICE, never a gate: the
-# maintainer's review decides (CONTRIBUTING.md, "Review"). Nothing here may make it block a merge,
-# so `reviews.auto_approvals` (which requests changes) and `reviews.fail_commit_status` (which
-# fails the `CodeRabbit` check) stay off, and that check is not a required status check. A line that
-# restates a default is there for a property the maintainer relies on. Nothing in CI checks this
-# file; it was validated by hand against the published schema.
+# maintainer's review decides (CONTRIBUTING.md, "Review"). It reads as much as it can and says what
+# it finds. `reviews.auto_approvals` (which requests changes and approves) and
+# `reviews.fail_commit_status` (which fails the `CodeRabbit` check) stay off, every pre-merge check
+# is a `warning`, and the `CodeRabbit` check is not a required status check. These are settings, not
+# guarantees: a trusted pull request's own copy of this file, or a `--with-config` block in a review
+# command, changes them for one review. A line that restates a default is there for a property the
+# maintainer relies on. Nothing in CI checks this file; it was validated by hand against the
+# published schema.
 
 # One maintainer who reads every comment: plain, short, no encouragement.
-tone_instructions: "Terse. Name the defect and the fix. No praise, no restating the diff."
+tone_instructions: "Terse. Name the defect and the fix. No praise, no restating the diff, no comments on prose style."
 
 reviews:
-  # `quiet`: only the most important feedback. `chill` is the default.
-  profile: quiet
+  # `chill` is the default; `quiet` raised nothing on the first pull requests.
+  profile: chill
 
-  # The summary goes in the walkthrough comment, not into the author's PR description.
+  # The summary goes in the walkthrough comment, not into the author's PR description. The rest of
+  # the walkthrough (changed files, sequence diagrams, review effort, related issues and pull
+  # requests, linked-issue assessment, review status and info) and the prompt for coding agents in
+  # each comment are on, as by default: they are how a large diff is read. `review_details` adds
+  # what was ignored, which guidelines applied and what a tool found, which is how this file is
+  # checked against a review; turn it off once it is.
   high_level_summary_in_walkthrough: true
-  high_level_summary_instructions: "Three sentences at most."
+  review_details: true
 
-  # No decoration and no extras the maintainer would scroll past.
+  # Decoration, and suggestions with no one to act on them: this repository has one maintainer, and
+  # the maintainer's pull requests carry no labels.
   poem: false
   in_progress_fortune: false
-  sequence_diagrams: false
-  estimate_code_review_effort: false
-  changed_files_summary: false
   suggested_labels: false
   suggested_reviewers: false
-  related_issues: false
-  related_prs: false
-  assess_linked_issues: false
-  enable_prompt_for_ai_agents: false
-  review_info: false
-  # A skipped review (a draft, a Dependabot pull request) shows in the `CodeRabbit` check, not in a
-  # comment on each one.
-  review_status: false
 
   # Advice only. A review that errors ends neutral, so it can never hold a merge.
   auto_approvals:
     enabled: false
   fail_commit_status: false
 
-  # Comments, not commits: nothing here pushes to a contributor's branch, which would be unsigned
-  # and unreviewed.
+  # Offered as commands and checkboxes, and run only by someone with write access. Unit tests stay
+  # on: whoever asks chooses between a separate pull request and a commit on the branch, and the
+  # maintainer asks for a separate pull request. The others can add code nobody reviewed to a
+  # contributor's branch. No setting turns off `@coderabbitai local commit`, which commits a change
+  # CodeRabbit proposed in a comment, or continuous autofix: do not confirm either. A separate unit-test
+  # pull request has CI fixes pushed to it by CodeRabbit.
   finishing_touches:
     unit_tests:
-      enabled: false
+      enabled: true
     autofix:
       enabled: false
     fix_ci:
@@ -52,20 +54,46 @@ reviews:
     resolve_merge_conflict:
       enabled: false
 
-  # Each of these adds a row to the walkthrough. CONTRIBUTING.md and the PR template already ask
-  # for the same things.
+  # The title and the description are checked against what CONTRIBUTING.md and the PR template ask;
+  # a pull request that closes an issue is checked against it. All warnings.
   pre_merge_checks:
     title:
-      mode: "off"
+      mode: warning
+      requirements: "Begins with fix, feat, docs, test, chore, ci, refactor, perf or build, then an optional area in parentheses, a colon and a space, as CONTRIBUTING.md's Style section says. After the colon it says what is now true, in one line, not 'update', 'changes' or 'misc'. A trailing (#123) is ignored."
     description:
-      mode: "off"
+      mode: warning
     issue_assessment:
-      mode: "off"
+      mode: warning
+    # Each is a rule the repository states (CONTRIBUTING.md, the workflow headers), written so that
+    # the same diff gives the same verdict. The
+    # sandbox cannot run the tests, so none asks it to. Six of the ten a Team plan allows. A rule
+    # CI already fails on (the skip lists, the contract export, the verified paths' harness) is not
+    # repeated here.
+    custom_checks:
+      - name: "A fix has a test that can fail"
+        mode: warning
+        instructions: "Applies only when the pull request title begins with `fix` (`fix:` or `fix(area):`), and the diff changes the behaviour of code under `substrate/`: a change to comments or docstrings only passes. Otherwise pass. Pass only if the diff adds or changes a test under `tests/` that exercises the code the fix changes and asserts the corrected behaviour. Fail if no file under `tests/` is added or changed. Fail if an added or changed test cannot fail: it asserts a constant, asserts a value the test itself just set, asserts on a mock configured to return that value, is skipped or xfailed unconditionally, or has a name that pytest does not collect (a function not starting with `test`). A mark that skips only when an extra, a platform or a program is missing does not fail this check. You cannot run the tests: judge from the diff, and name the test and the assertion that fails this check."
+      - name: "A visible change has a CHANGELOG line"
+        mode: warning
+        instructions: "Applies, as CONTRIBUTING.md's Style section says, when the diff changes a file under `substrate/` in a way a user or a client can see: a CLI command, flag, output line or exit code; an MCP tool, argument, reply field or refusal message; a manifest key; what compose, ingest, amend, refresh or serve does or refuses. A change to tests only, comments only, a rename, or a refactor that changes none of those does not apply, and nor does a pull request whose description says no CHANGELOG line is needed and why. Otherwise pass. When it applies, pass only if the diff adds a bullet under `## Unreleased` in CHANGELOG.md, in any `###` subsection, that names the change. Fail if CHANGELOG.md is not changed, or is changed only outside `## Unreleased`."
+      - name: "A contract change says additive or breaking"
+        mode: warning
+        instructions: "Pass if the diff changes nothing under `contract/`. If it changes any file under `contract/` (`contract.json` or `frames/`), pass only if the pull request description says the change is additive or breaking, as `docs/client-contract.md` defines the words. Fail otherwise."
+      - name: "Fixtures hold only synthetic data"
+        mode: warning
+        instructions: "Look only at lines the diff adds under `tests/`, `vaults/` and `eval/`. Fail if an added line contains a path under a home folder (`/Users/<name>/`, `/home/<name>/`, `C:\\Users\\<name>\\`, `~/Documents`, `~/vaults`, `~/Library`) or an email address, unless the name in the path is a placeholder (`x`, `me`, `user`, `someone`, `example`, `alice`, `bob`, `runner`) or the domain is example.com, example.org, example.net, or ends in `.example`, `.invalid` or `.test`. `~/.substrate` and `~/.cache/` are the engine's and uv's own folders and are allowed. A test whose subject is these patterns (`tests/test_public_docs.py`, `tests/test_loopback_guard.py`) is exempt, and `tests/data/` is excluded from review and not seen. Otherwise pass. This check does not judge whether a name or a note title is real: the review does."
+      - name: "A test does not quietly stop testing"
+        mode: warning
+        instructions: "Look at skips and returns that the diff adds or changes in tests under `tests/`; one that was already there does not count. Fail if a test calls `pytest.skip`, `pytest.xfail` or `pytest.importorskip`, or carries a `skip`, `skipif` or `xfail` mark, with no `reason` (a module name given to `importorskip` is one) that says what is missing or why it cannot run here: a package, a platform, a program, a privilege, a filesystem property, or an opt-in environment variable. Fail if a test returns before its first assertion on a condition about the environment (an import that failed, a platform, an environment variable) instead of skipping. Otherwise pass. Whether a skip is named in `tests/core-job-skips.txt` is checked by CI, not here."
+      - name: "Actions are pinned by commit hash"
+        mode: warning
+        instructions: "Look only at lines the diff adds or changes in files under `.github/workflows/`. Pass if there are none. Fail if a `uses:` line that names an action (`owner/name@ref`; not a local path starting `./`, a `docker://` image or a reusable workflow) does not end its reference in `@` and a 40-character hexadecimal commit hash followed by a comment that names the version, such as `# v4.2.1`. A tag (`@v4`), a branch (`@main`), a short hash, and a hash with no version comment all fail."
 
   auto_review:
     enabled: true
     drafts: false
     # Pause automatic reviews after this many reviewed commits; CONTRIBUTING.md says so.
+    # `@coderabbitai resume` restarts them, and `@coderabbitai review` runs one review.
     auto_pause_after_reviewed_commits: 5
     # Dependabot's pull requests bump a version, grouped by tier in `.github/dependabot.yml`. CI
     # vets them, and a lockfile bump is noise to a reviewer. GitHub names the author exactly this.
@@ -73,8 +101,8 @@ reviews:
       - "dependabot[bot]"
 
   # Files nobody reads. `!` excludes, and there is no include pattern, so everything else is
-  # reviewed. Vulnerable dependencies are left to Dependabot: `uv.lock` is excluded here and
-  # `osvScanner` is off below. CodeQL covers the Python source, not the lock.
+  # reviewed. The schema says these filters also apply to the sparse checkout, so a scanner cannot
+  # read an excluded file.
   path_filters:
     # CodeRabbit already skips `*.lock`; this names it.
     - "!uv.lock"
@@ -88,9 +116,8 @@ reviews:
     - "!tests/data/**"
 
   # Each a rule CONTRIBUTING.md, CLAUDE.md, VERIFIED.md or a workflow's own header already states,
-  # one entry per path. VERIFIED.md is the only list of verified files, so this file names none.
-  # Rules a CI job already fails on (the skip lists, the Dependabot tiers, the contract export) are
-  # left out: a comment on those would repeat a red check.
+  # one entry per path. They steer the inline comments; the checks above give the verdicts.
+  # VERIFIED.md is the only list of verified files, so this file names none.
   path_instructions:
     - path: "substrate/**"
       instructions: "A bug fix ships a regression test that fails on the old code; flag a fix whose tests would pass without it. The engine refuses rather than misleads: flag a change that returns a plausible but wrong answer, or silently narrows an incomplete state, where it should fail. Look each changed file up in the first table of VERIFIED.md, which names every verified path's files, model and harness; flag a change to a listed file that its harness would not exercise."
@@ -101,9 +128,11 @@ reviews:
     - path: ".github/workflows/**"
       instructions: "The tier checks fail a job on purpose rather than let tests skip green (docling.yml: docling and torch import; tests.yml: no package outside the tier is present); flag a change that weakens one. Actions are pinned by commit hash with the version in a comment, never by tag. The required `engine` job never sits behind a path filter."
 
-  # Tools. The other defaults stay on: actionlint, zizmor, shellcheck and gitleaks find defects here
-  # and a tool with no matching file does not run. The ones turned off are style linters, or
-  # scanners that overlap CI, Dependabot or CodeQL.
+  # Tools. Every default stays on except the ones named. On, and finding defects here: ruff,
+  # actionlint, zizmor, shellcheck, gitleaks, opengrep (its own security rules, unless a pull
+  # request or the repository supplies a Semgrep-compatible config, which replaces them), ast-grep
+  # (its essentials rules) and github-checks (a failing CI job, explained on the lines it concerns).
+  # Semgrep and trivy are on by default and have nothing to run on here.
   tools:
     # `config_file` makes ruff use this repository's rule set (`[tool.ruff.lint]`, bug-catchers
     # only) rather than its profile's, less the codes CodeRabbit always drops (F401, F811, F841).
@@ -113,6 +142,7 @@ reviews:
     ruff:
       enabled: true
       config_file: "pyproject.toml"
+    # Style and prose, which the maintainer does not want a bot to nag about.
     markdownlint:
       enabled: false
     languagetool:
@@ -125,37 +155,37 @@ reviews:
       enabled: false
     swiftlint:
       enabled: false
-    semgrep:
-      enabled: false
-    opengrep:
-      enabled: false
+    # Repeats a scanner that stays on: gitleaks for secrets, zizmor and actionlint for workflows.
     trufflehog:
       enabled: false
     checkov:
       enabled: false
-    trivy:
-      enabled: false
+    # The demo vaults hold synthetic names, which a PII scanner would report.
     presidio:
       enabled: false
+    # `uv.lock` is the only file it would read, and `path_filters` excludes it.
     osvScanner:
       enabled: false
-    github-checks:
-      enabled: false
 
-# CodeRabbit replies when it is addressed, not to every reply under its comments.
+# Unit tests, when someone with write access asks for them.
+code_generation:
+  unit_tests:
+    path_instructions:
+      - path: "substrate/**/*.py"
+        instructions: "Write pytest tests with plain `assert`, reusing the fixtures in tests/conftest.py. A test for a bug fix must fail on the code before the fix (CONTRIBUTING.md, rule 2); a test of behaviour that already works need not. No network, no real notes: synthetic data or `tmp_path`."
+
+# It answers a reply under its comments without being addressed, as well as when it is; replies are
+# how it learns. No chat art.
 chat:
-  auto_reply: false
   art: false
 
 # Data. CodeRabbit says it never trains on customer code, whatever is set here. The maintainer wants
-# it to learn from this repository (learnings, issue and past-pull-request context), and the
-# repository is public, so keeping them exposes nothing new: `opt_out` stays false, written down
-# because it is a property relied on. Each scope is `local`, so a review of this repository reads
-# only this repository's, and web search is left on, its default. CodeRabbit's docs name no role
-# needed to create a learning with a comment on a pull request or issue, so a learning is advice,
-# like everything else CodeRabbit says.
-# `reviews.disable_cache` is not set: the review cache of the code and dependencies expires within
-# seven days, and is encrypted except for open-source repositories.
+# it to learn from this repository, and the repository is public, so keeping what it learns exposes
+# nothing new: `opt_out` stays false, written down because it is relied on. Each scope is `local`,
+# so a review here reads only this repository's. CodeRabbit's docs name no role needed to create a
+# learning, and say any user can ask for one to be changed or removed, so a learning is advice,
+# like everything else it says. Web search stays on, so the reviewer can check a library's
+# documented behaviour.
 knowledge_base:
   opt_out: false
   learnings:
@@ -164,12 +194,25 @@ knowledge_base:
     scope: local
   issues:
     scope: local
-  # CLAUDE.md is a file CodeRabbit would otherwise read as review criteria. The rules a reviewer
-  # needs from it are in `path_instructions`; the rest is the maintainer's working notes.
+  # The repository's own rules. A string entry applies to the folder of its file, so
+  # `docs/principles.md` is given the code it governs. `VERIFIED.md` is a lookup table that the
+  # path instruction opens itself, and `SECURITY.md` is a disclosure policy: neither
+  # is listed. CLAUDE.md is a default pattern, and a default cannot be removed; the last entry is
+  # meant to confine it to a pull request that changes CLAUDE.md, which the docs do not promise.
+  # A pull request that adds a file a default pattern names (AGENTS.md, a skill) has it applied to
+  # that pull request's review: the walkthrough lists the guideline files that were used.
   code_guidelines:
-    enabled: false
+    enabled: true
+    filePatterns:
+      - "CONTRIBUTING.md"
+      - files: "docs/principles.md"
+        applyTo: "substrate/**"
+      - files: "CLAUDE.md"
+        applyTo: "CLAUDE.md"
 
-# Nothing from CodeRabbit on issues.
+# Issues. A comment on every new issue would be noise, because the maintainer files most of them,
+# and `@coderabbitai plan` is open to anyone on any issue and posts a prompt for coding agents
+# written from the issue's text: off.
 issue_enrichment:
   auto_enrich:
     enabled: false

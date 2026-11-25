@@ -50,10 +50,12 @@ uv run python -m pytest tests -q
 A pull request gets three reviews, and the last one decides.
 
 - **CI** runs the checks in the table above.
-- **CodeRabbit**, a GitHub App, reviews pull requests to `main` automatically, except drafts and
-  Dependabot's, and pauses after five reviewed commits. Its comments are advice: it doesn't request
-  changes, approve or hold a merge, and you can answer a comment, act on it or leave it.
-  [`.coderabbit.yaml`](.coderabbit.yaml) sets what it checks and what it skips.
+- **CodeRabbit**, a GitHub App, reviews pull requests to `main`, except drafts and Dependabot's,
+  and pauses after five reviewed commits (`@coderabbitai resume` restarts it). It reviews
+  automatically when its plan allows it, and otherwise when asked: comment `@coderabbitai review` on a
+  line of its own. Its comments, and the warnings its walkthrough gives for the title, the
+  description and some repository conventions, are advice: it is set not to request changes,
+  approve or hold a merge. [`.coderabbit.yaml`](.coderabbit.yaml) sets what it checks and skips.
 - **The maintainer** reads the change and decides whether it lands, whatever CodeRabbit said.
 
 ## Issue labels
@@ -101,13 +103,15 @@ it doesn't need one.
 ## Style
 
 - **Commit and PR titles** follow the repo's convention: `fix: …`, `feat: …`, `docs: …`, `test: …`,
-  `chore: …` or `ci: …`, with an optional area in parentheses, such as `fix(frontmatter): …`.
-  The title says what is now true.
+  `chore: …`, `ci: …`, `refactor: …`, `perf: …` or `build: …`, with an optional area in parentheses,
+  such as `fix(frontmatter): …`. The title says what is now true.
 - **Branch names** use the same prefixes: `fix/…`, `feat/…`, `docs/…`.
 - **Docs and notes** follow the writing standard in
   [`vaults/demo-core-vault/00-operator/WRITING.md`](vaults/demo-core-vault/00-operator/WRITING.md):
   lead with the conclusion, use tables for anything enumerable, and attach conditions to every
   number.
+- **The changelog** gets a line for a change a user or a client can see: add it under
+  `## Unreleased` in [`CHANGELOG.md`](CHANGELOG.md).
 - **Code comments** explain why, not what. The engine refuses rather than misleads, and a change
   should keep it that way: see [`docs/principles.md`](docs/principles.md).
 
