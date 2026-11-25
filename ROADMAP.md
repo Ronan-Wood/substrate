@@ -6,15 +6,19 @@ line or through an MCP server. It runs on your machine and talks only to a model
 (Ollama today).
 
 **The next goal is `pip install substrate-engine` working on anyone's vault, on macOS and Linux.**
-Today the engine ships inside the Scripta app on Apple silicon, and an ordinary Obsidian vault
-can't compose until it adopts this engine's frontmatter and folder conventions. The themes below
-are in the order we expect to take them. Measured retrieval changes, performance in CI and a few
-experiments run alongside.
+Today the engine ships inside the Scripta app on Apple silicon. On `main`, an ordinary Obsidian
+vault now composes in the common case, with a manifest and no edits to its notes (theme 1 lists
+the known gaps), but no release has that yet and nothing is on PyPI.
+What stands between here and `pip install` is the converter carve-out and publishing (theme 2),
+and the decisions its issues want settled before the first release (#75, #76, #90). The themes
+below are in the order we expect to take them. Measured retrieval changes, performance in CI and a
+few experiments run alongside.
 
 **Want to pick one up?** Comment on its issue first, so two people don't build the same thing, and
-read [`CONTRIBUTING.md`](CONTRIBUTING.md). Items labelled **`needs-decision`** wait on a
-maintainer's choice; the issue says what the choice is. Please don't start one until it is made.
-Items labelled **`good first issue`** need no models and no special hardware.
+read [`CONTRIBUTING.md`](CONTRIBUTING.md). An issue someone has said they're taking, or that has an
+open pull request, is taken. Items labelled **`needs-decision`** wait on a maintainer's choice; the
+issue says what the choice is. Please don't start one until it is made. Items labelled **`good
+first issue`** need no models and no special hardware.
 
 ## Words used below
 
@@ -32,6 +36,9 @@ Items labelled **`good first issue`** need no models and no special hardware.
 | lexprec | a fusion rule: when the keyword top hit is a precise match, keep keyword order first |
 | MRR@5 | mean reciprocal rank of the right answer within the top 5. Higher is better |
 | quiet machine | a latency run with only the model server busy |
+| quarantine | leave a note out of the index, or stop retrying a converted file, and name it and why, so one fault does not stop the rest |
+| extra | an optional install group: `convert` (docling's format readers) or `convert-ml` (models, OCR) |
+| worker | the process docling converts in, which the engine bounds, retries and quarantines |
 
 **How the numbers here were measured.** Accuracy comes from a private evaluation set built from
 real notes, so it isn't published. Deltas are paired, with 95% confidence intervals clustered by
@@ -43,7 +50,7 @@ case leaks. No latency figure here is a quiet-machine measurement yet. The defau
 
 ```mermaid
 flowchart TD
-    subgraph pip["1. Compose a stranger's vault"]
+    subgraph pip["1. Compose a stranger's vault (core done)"]
         PB1["#21 missing spine → defaults"]
         PB2["#22 quarantine one bad note"]
         PB3["#23 writable_folders"]
@@ -53,7 +60,7 @@ flowchart TD
         PB6["#53 rename spine keys"]
     end
     subgraph pkg["2. Converter and PyPI"]
-        CV1["#25 converter phase 1"]
+        CV1["#25 converter phase 1 (3 of 4 planned PRs merged)"]
         CV2["#26 PyPI substrate-engine"]
     end
     L1["3. #27 Linux CI, full lock"]
@@ -79,28 +86,37 @@ flowchart TD
     PB6 --> CV2
     CV1 --> CV2
     L1 -.-> CV1
-    R2 -.-> CV2
+    D90["#90 minimum Python"] -.-> CV2
     R3 --> E4
     P1 -.-> E9
+    classDef done fill:#d4edda,stroke:#2e7d32,color:#000
+    classDef part fill:#fff3cd,stroke:#b8860b,color:#000
+    class PB1,PB2,PB3,PB4,PB5,PB6,PB8 done
+    class CV1 part
 ```
 
-Solid arrows are hard dependencies; dotted ones mean "decide or measure first".
+Solid arrows are hard dependencies; dotted ones mean "decide or measure first". Green nodes are
+merged to `main`; the yellow one is partly merged.
 
 ---
 
-## 1. Compose a stranger's vault (pip blockers)
+## 1. Compose a stranger's vault (pip blockers): done
 
-These come first: until an ordinary vault composes, a pip package has nothing to offer.
+All seven are merged to `main` and their issues are closed: [#21](https://github.com/Ronan-Wood/substrate/issues/21), [#22](https://github.com/Ronan-Wood/substrate/issues/22), [#23](https://github.com/Ronan-Wood/substrate/issues/23),
+[#24](https://github.com/Ronan-Wood/substrate/issues/24), [#55](https://github.com/Ronan-Wood/substrate/issues/55), [#71](https://github.com/Ronan-Wood/substrate/issues/71) and [#53](https://github.com/Ronan-Wood/substrate/issues/53). The pull request for each is under Shipped. A vault of
+plain notes now composes: a missing spine takes defaults, one bad note is quarantined, the
+manifest declares what is skipped, where writes go and which keys the engine reads, and notes with
+the same bytes compose. None of it is in a release yet. Closed beside them: [#59](https://github.com/Ronan-Wood/substrate/issues/59) (first run: `substrate init`) and [#52](https://github.com/Ronan-Wood/substrate/issues/52) (an unknown manifest key refuses). What grew out of it is still open:
 
 | id | item | status |
 |---|---|---|
-| [#21](https://github.com/Ronan-Wood/substrate/issues/21) | A note with no `status` or `doc_type` composes with the defaults (`active`, `reference`) instead of refusing the whole scope, and `substrate status` reports how many notes were defaulted. Corrupt input (unparseable frontmatter, duplicate `doc_id`, an unreadable note, a missing declared vault) still refuses. | planned |
-| [#22](https://github.com/Ronan-Wood/substrate/issues/22) | Decided: quarantine. A note that fails on its own is left out, the rest of the scope is indexed, and `status` and the refresh record name the note and the reason. Above a ceiling (`quarantine_ceiling`, by default the larger of 10 notes and 1% of the scope) the whole scope refuses again. A duplicate `doc_id`, a missing declared vault and a broken manifest still refuse the whole scope. | planned |
-| [#23](https://github.com/Ronan-Wood/substrate/issues/23) | The manifest declares `writable_folders` for `ingest`. The default becomes any folder in the project vault that compose doesn't skip, instead of three fixed folder names. Path containment checks stay as they are. | planned |
-| [#24](https://github.com/Ronan-Wood/substrate/issues/24) | The manifest declares a `skip` list. Today's hard-coded skips (`_meta.md`, `log.md`, `MEMORY.md`, `99-templates/` and the rest) become defaults a vault can change. | planned |
-| [#55](https://github.com/Ronan-Wood/substrate/issues/55) | A note with no `title:` and no heading takes its file name as its title, as Obsidian names it, instead of being quarantined. A declared title or a heading still wins. An empty note composes holding nothing. | planned |
-| [#71](https://github.com/Ronan-Wood/substrate/issues/71) | Decided: notes with the same bytes compose. Under different names each is indexed as its own note; of copies that derive one `doc_id`, the first by path is indexed and the others are named in `status` as its copies. `status` lists each group of identical notes, so a sync conflict stays visible. A declared `doc_id` two notes share still refuses. | planned |
-| [#53](https://github.com/Ronan-Wood/substrate/issues/53) | Decided: the manifest renames the keys the engine reads (`[engine_keys]`, per field, per vault, none by default), so a vault whose notes say `status: done` or `class: Math 101` composes. A value outside the vocabulary under the engine's key is still quarantined. A note whose old key still holds `archived`, `superseded`, `conversation` or `reference-frozen` is quarantined, never indexed live. `substrate init` and the over-ceiling refusal name the setting. | planned |
+| [#60](https://github.com/Ronan-Wood/substrate/issues/60) | Two faults that belong to one file still refuse the whole scope: a skipped file that declares a spine, and a source's `_meta.md` the vault layer can't read. Decided: both are quarantined and count toward the ceiling. | planned |
+| [#61](https://github.com/Ronan-Wood/substrate/issues/61) | A refused compose's report is built from structure, not from failure text that quotes a note's value, and names a folder it removed before it refused. | planned |
+| [#62](https://github.com/Ronan-Wood/substrate/issues/62) | A bug: over MCP, `drift.error` quotes a broken `_meta.md` and its absolute path, where a quarantined note is named by kind and key only. | planned |
+| [#63](https://github.com/Ronan-Wood/substrate/issues/63) | A bug: `amend` reads a note's class key less strictly than compose does, so a frozen note whose key is spelled another way can be amended. | planned |
+| [#64](https://github.com/Ronan-Wood/substrate/issues/64) | `ingest` and `amend` should refuse, at the plan, a note whose declared `doc_id` another note already has: today the write succeeds and the next compose refuses the whole scope. The issue's identical-bytes case predates #73, which made such notes compose. | planned |
+| [#75](https://github.com/Ronan-Wood/substrate/issues/75) | Decide what compose does when a vault's `[engine_keys]` renames shrink or change: today, removing one un-withholds notes labelled only under the new name. | `needs-decision` |
+| [#76](https://github.com/Ronan-Wood/substrate/issues/76) | Decide which heading, if any, names a note that declares no title. Today, with no level-1 heading, the first heading of any level does, so a month of daily notes made from one template are all titled `Tasks`. | `needs-decision` |
 
 ## 2. Converter carve-out, then PyPI
 
@@ -110,8 +126,23 @@ packages in Scripta 0.3.5's bundled engine, through docling and torch. The core 
 
 | id | item | status |
 |---|---|---|
-| [#25](https://github.com/Ronan-Wood/substrate/issues/25) | **Phase 1.** Two extras: `[convert]` (docling-slim's torch-free format readers, the same readers the engine runs today) and `[convert-ml]` (layout and table models, OCR, granite-docling). `numpy` becomes a declared core dependency. `[convert-ml]` always runs in a JSON-lines stdio worker process. CI gains core-only jobs that prove the core runs with nothing else installed. Decided: D1–D10, as the issue records them. Four pull requests: the extras with a core-only `engine` job, a `[convert]` job, the worker, a conversion cache. The Linux `[convert-ml]` job waits for [#27](https://github.com/Ronan-Wood/substrate/issues/27). | planned |
-| [#26](https://github.com/Ronan-Wood/substrate/issues/26) | **Phase 2.** Publish `substrate-engine` to PyPI (the name `substrate` belongs to another project). The commands keep their names. Needs a build system, `[project.scripts]`, Trusted Publishing from a tag-gated job, and a decision on pure versus per-platform wheels, which [#30](https://github.com/Ronan-Wood/substrate/issues/30) and D4 drive. Documented install: `uv tool install --python 3.14 'substrate-engine[convert]'`. | `needs-decision`, after [#25](https://github.com/Ronan-Wood/substrate/issues/25) and [#21](https://github.com/Ronan-Wood/substrate/issues/21)–[#24](https://github.com/Ronan-Wood/substrate/issues/24) |
+| [#25](https://github.com/Ronan-Wood/substrate/issues/25) | **Phase 1.** Two extras: `[convert]` (docling-slim's torch-free format readers, the same readers the engine runs today) and `[convert-ml]` (layout and table models, OCR, granite-docling). `numpy` becomes a declared core dependency. Every docling conversion runs in a stdio worker process, which the engine bounds, retries once and then quarantines. Decided: D1–D10, as the issue's comments record them (D2 is always the worker, D4 a pure wheel first), not as the recommendation column in its body has them. Four pull requests were planned. Merged: the extras with a core-only `engine` job (PR #80), the `engine convert` job (PR #88), and the worker (PR #91). Remaining: the conversion cache. A Lean model of the worker's quarantine rule (PR #101), outside the four, is merged too. The Linux `[convert-ml]` job waits for [#27](https://github.com/Ronan-Wood/substrate/issues/27). | 3 of the 4 planned pull requests merged |
+| [#26](https://github.com/Ronan-Wood/substrate/issues/26) | **Phase 2.** Publish `substrate-engine` to PyPI (the name `substrate` belongs to another project). The commands keep their names. Needs a build system, `[project.scripts]` and Trusted Publishing from a tag-gated job. Decided on #25 (D4): the first release is one pure wheel for macOS and Linux; the macOS wheel with the Apple reader follows under [#30](https://github.com/Ronan-Wood/substrate/issues/30). Documented install: `uv tool install --python 3.14 'substrate-engine[convert]'`. | `needs-decision`, after [#25](https://github.com/Ronan-Wood/substrate/issues/25), with [#90](https://github.com/Ronan-Wood/substrate/issues/90) settled first |
+
+The conversion worker's reviews and the first real documents turned up follow-ups. Each is its own
+issue:
+
+| id | item | status |
+|---|---|---|
+| [#86](https://github.com/Ronan-Wood/substrate/issues/86) | Decide what to do about an ordinary web page being refused at ingest: Docling leaves out the text before the first heading, and hidden elements. | `needs-decision` |
+| [#87](https://github.com/Ronan-Wood/substrate/issues/87) | The HTML coverage probe joins text with spaces where Docling does not, so a drop cap is refused and a number split across tags is not checked. | planned |
+| [#89](https://github.com/Ronan-Wood/substrate/issues/89) | Decide what `--docling-models` does with a PDF page that is only an image, since Docling's OCR is off in this engine. | `needs-decision` |
+| [#90](https://github.com/Ronan-Wood/substrate/issues/90) | Decide the minimum Python version: `html.parser` before 3.14.7 hides text after an empty comment. It should be settled before [#26](https://github.com/Ronan-Wood/substrate/issues/26) publishes. | `needs-decision` |
+| [#94](https://github.com/Ronan-Wood/substrate/issues/94) | The conversion worker's memory is not limited. | planned |
+| [#95](https://github.com/Ronan-Wood/substrate/issues/95) | The coverage probes read a document in the engine with no bound: a zip bomb can exhaust its memory, and a FIFO in the file's place blocks it. | planned |
+| [#96](https://github.com/Ronan-Wood/substrate/issues/96) | One worker per converted file pays the docling import every time; a worker that outlives one file needs a design first. | planned |
+| [#97](https://github.com/Ronan-Wood/substrate/issues/97) | `ingest --pages` is checked by the PDF readers, not the CLI, so a bad range is not exit 2. | taken, pull request open |
+| [#98](https://github.com/Ronan-Wood/substrate/issues/98) | A file's name reaches the terminal unfiltered in refusals and log lines. | `good first issue` |
 
 Later converter phases, not filed yet: a conversion benchmark and reader bake-off (which also picks
 the Linux OCR default, D10), an escalation router between tiers, and Scripta bundling the pinned
@@ -121,7 +152,7 @@ extras.
 
 | id | item | status |
 |---|---|---|
-| [#27](https://github.com/Ronan-Wood/substrate/issues/27) | A CI job that installs the full locked environment on Ubuntu (`uv sync --frozen --extra convert --extra convert-ml`) and runs the whole suite, with only named macOS-only tests allowed to skip. It needs torch pinned to its CPU build on Linux and OpenCV built from source as on macOS. It is also the Linux `[convert-ml]` job [#25](https://github.com/Ronan-Wood/substrate/issues/25) defers. Today's Linux job installs the locked core alone. | planned |
+| [#27](https://github.com/Ronan-Wood/substrate/issues/27) | A CI job that installs the full locked environment on Ubuntu (`uv sync --frozen --extra convert --extra convert-ml`) and runs the whole suite, with only named macOS-only tests allowed to skip. It needs torch pinned to its CPU build on Linux and OpenCV built from source as on macOS. It is also the Linux `[convert-ml]` job [#25](https://github.com/Ronan-Wood/substrate/issues/25) defers. Today's Linux jobs install the locked core (`engine`) and the core plus `convert` (`engine convert`, PR #88). | planned |
 
 ## 4. Retrieval
 
@@ -129,7 +160,7 @@ extras.
 |---|---|---|
 | [#28](https://github.com/Ronan-Wood/substrate/issues/28) | Four rule changes, no new model: lexprec fusion, the Qwen3 query-instruct prefix, graded rerank verdicts (promote at P(yes) ≥ 0.9) and a rerank pool of 30. MRR@5 on the decision set (1,368 positives, 60 negatives): **0.767 shipped → 0.821**, with no HyDE call and no negative leaked. Open question: whether the default drops HyDE. One PR per change, then a latency pass. | `needs-decision` |
 | [#29](https://github.com/Ronan-Wood/substrate/issues/29) | Send `num_ctx` with each model request (4096 rerank, 8192 embed). Measured: embedder 4.8 → 1.2 GB resident, reranker 8.7 → 2.9 GB, with identical outputs. | `needs-decision` |
-| [#30](https://github.com/Ronan-Wood/substrate/issues/30) | Ship the FTS5 identifier tokenizer (a Rust SQLite extension; the experiment is on branch `exp/fts5-tokenizer`). Respelled identifiers gain MRR@10 +0.201 keyword-only and +0.147 hybrid, with no change on the set as written. Shipping means a schema bump, per-platform builds and signing inside the macOS app, and it makes the wheel per-platform. | `needs-decision` |
+| [#30](https://github.com/Ronan-Wood/substrate/issues/30) | Ship the FTS5 identifier tokenizer (a Rust SQLite extension; the experiment is on branch `exp/fts5-tokenizer`). Respelled identifiers gain MRR@10 +0.201 keyword-only and +0.147 hybrid, with no change on the set as written. Shipping means a schema bump, per-platform builds and signing inside the macOS app, and it makes the wheel per-platform, after the first, pure one. | `needs-decision` |
 
 ## 5. MCP: small wins
 
@@ -185,7 +216,6 @@ spends its time).
 | id | item | status |
 |---|---|---|
 | [#47](https://github.com/Ronan-Wood/substrate/issues/47) | A CI gate that fails a PR whose diff or commit messages carry personal data: structural rules that need no list (home-folder paths, cloud-sync folder paths, frames pointing outside the demo fixtures, database files), plus a match against a private list that is never readable in the repo. Local hooks exist; CI has nothing. Scripta gets the same gate. | planned |
-| [#48](https://github.com/Ronan-Wood/substrate/issues/48) | Stale sections in `EXPERIMENTS.md`, the "inert inside Scripta" comments in the CI files, and an out-of-date log-probabilities caveat in `rerank_cross.py`. | PR in preparation |
 
 ## 10. Needs a decision: multi-machine sync
 
@@ -211,11 +241,14 @@ Kept from the previous roadmap; each gets an issue when its turn comes.
 
 ## Shipped
 
+Released:
+
 | what | PR |
 |---|---|
 | The engine has its own repository, signed release tags and source tarballs | the split, in Scripta's repository |
 | A Lean model of `blobs gc --unreferenced`, run against the planner in CI; `VERIFIED.md` | #3 |
 | A newcomer can install, run and contribute from the repo alone | #4 |
+| **v0.1.0** | the tag, on the merge of #1 |
 | A YAML block list no longer drops a note's frontmatter | #5 |
 | The embedder refuses a model that runs in Ollama's cloud | #7 |
 | Consented writes: `substrate grant`, `revoke`, `grants`, `serve --writes=granted` | #8 |
@@ -227,6 +260,30 @@ Kept from the previous roadmap; each gets an issue when its turn comes.
 | **v0.2.1** | #15 |
 | The golden contract frames are one capture again, with a test that keeps them so | #16 |
 | **v0.2.2** | #17 |
+
+Notable merges to `main` since v0.2.2, in no release yet:
+
+| what | PR |
+|---|---|
+| Agent snapshots follow their entries, HyDE refuses a cloud model at launch, and `ingest` never writes through a planted name | #18 |
+| `EXPERIMENTS.md` and the engine's plans match what shipped; a roadmap, and CONTRIBUTING points to it | #20 (closes #48), #49 |
+| A manifest declares what compose skips (`skip`), and the fixed list is its default | #54 (closes #24) |
+| A note with no `status` or `doc_type` composes with the defaults, and `status` counts them | #56 (closes #21) |
+| A manifest declares where `ingest` and `amend` write (`writable_folders`), and any indexed folder is the default | #58 (closes #23) |
+| A note that fails on its own is quarantined and the rest of the scope is indexed; past `quarantine_ceiling` compose refuses again. It has a Lean model and harness, in `VERIFIED.md` | #65 (closes #22) |
+| An unknown top-level key in the manifest refuses compose | #69 (closes #52) |
+| A note with no title and no heading takes its file name as its title | #70 (closes #55) |
+| `substrate init`, `--version`, `help`, and help that says where to start | #72 (closes #59) |
+| Notes with the same bytes compose, and a copy under one `doc_id` is left out and named | #73 (closes #71) |
+| A manifest renames the frontmatter keys the engine reads its spine from (`[engine_keys]`) | #74 (closes #53) |
+| The CodeQL regex alerts and the dependency alerts that had a fix are closed | #77 |
+| Wire 4, with `MIN_VERSION` staying 1 | #78 (closes #57) |
+| The core is three packages; document conversion is the `convert` and `convert-ml` extras | #80 (part of #25) |
+| The HTML coverage probe reads the page with BeautifulSoup, as Docling's reader does | #85 |
+| An `engine convert` CI job runs the suite on the core and `convert` alone, and `substrate formats` names what an uninstalled extra would add | #88 (part of #25) |
+| Docling converts in a worker process, which the engine bounds, retries and quarantines | #91 (part of #25) |
+| CodeRabbit reviews pull requests as advice, and CONTRIBUTING says what review a PR gets | #99 |
+| A Lean model of the conversion quarantine rule, run against the real rule in CI; `VERIFIED.md` | #101 (part of #25) |
 
 **Dropped:** the guard correctness fix and the Lean proof of the guard, because the guard itself
 was removed in #13.
