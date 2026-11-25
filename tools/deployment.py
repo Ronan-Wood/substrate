@@ -5,9 +5,8 @@
     deployment.py --sign <manifest-file>       the signature that goes in the record
     deployment.py --verify <record-file>       prove a deployment, or refuse and say why
 
-WHY THIS EXISTS. The retired `com.ronanwood.substrate-refresh` exec'd the repo WORKING TREE every
-900 seconds, and on 2026-08-03 an UNCOMMITTED v8->v9 schema bump reached all six live scopes inside
-one tick.
+WHY THIS EXISTS. A retired refresh agent exec'd the repo WORKING TREE every 900 seconds, and an
+UNCOMMITTED v8->v9 schema bump once reached every live scope inside one tick.
 `b334da4` caught that specific shape — a schema mismatch now REFUSES to recompose — and its own
 message named what it did not fix: no separation between the code being edited and the code running
 against real data. A chunker change, an `ingest` change, a `classes.py` change: none of them bump
@@ -16,13 +15,13 @@ the schema, all of them rewrite stored content, and none would have been caught.
 THE OPTION TAKEN, AND THE TWO THAT WERE NOT.
 
   Refuse on a DIRTY tree. Total, and one line. But this operator edits this tree most days, so the
-  refresh would be off most days and all six scopes would sit at `frozen: null`. A guard that is
+  refresh would be off most days and every scope would sit at `frozen: null`. A guard that is
   usually tripped is a guard that gets commented out — and this one would be tripped by editing
   a doc.
 
   Refuse when the running code differs from what is COMMITTED. Narrower, and it does close
-  2026-08-03. But it makes `git commit` the deployment action, and the log here is a working branch
-  taking several commits a day. `git commit -m "wip: v9 schema"` and then waiting fifteen minutes
+  that incident. But it makes `git commit` the deployment action, and the log here is a working
+  branch taking several commits a day. `git commit -m "wip: v9 schema"` and then waiting fifteen minutes
   reproduces the incident exactly, past a guard reporting everything clean. It closes the incident
   and leaves the hazard, which is what `b334da4` already did.
 
@@ -234,7 +233,7 @@ def verify(record_path: Path) -> dict:
     engine, source = engine.resolve(), source.resolve()
 
     # THE INVARIANT, stated as code because it is the whole point of the mechanism. A deployment
-    # inside the tree the operator edits is not a deployment; it is the 2026-08-03 configuration
+    # inside the tree the operator edits is not a deployment; it is the run-the-working-tree configuration
     # with a verification step in front of it, which is worse than no verification step because it
     # reports clean. `.git` is checked for the same reason one indirection over: a git checkout can
     # be moved to another commit by anything that runs `git checkout` with that directory as cwd,

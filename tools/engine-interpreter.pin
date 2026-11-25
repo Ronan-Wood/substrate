@@ -1,7 +1,7 @@
 # The engine interpreter, file by file. Written by tools/engine-interpreter-pin.py --write and
 # checked by tools/build-bundled-engine; re-pin only as the engine's RELEASING.md describes.
 # python 3.14.7, python-build-standalone 20260805
-prefix	/Users/ronanwood/.local/share/uv/python/cpython-3.14.7-macos-aarch64-none
+prefix	/Users/Shared/substrate-python/cpython-3.14.7-macos-aarch64-none
 f	a10d6c9db47cd4ed801aefa8601afa701f0db1e35ce0337e0dc861610774c1c6	BUILD
 l	idle3.14	bin/idle3
 f	b5f1229959ef0f3ad4ae8166c7c2c9315ce4ac48b52d83e1a63f200a12f433eb	bin/idle3.14
@@ -307,7 +307,7 @@ f	810d45c3118bf30af2f6ff2d175aa58d170b307d5b8740f3368db695868fdced	lib/itcl4.3.8
 f	810d45c3118bf30af2f6ff2d175aa58d170b307d5b8740f3368db695868fdced	lib/itcl4.3.8/libitclstub4.3.8.a
 f	819c2e28780cd16ab4747f4dd068ad94f07408b89920820c7b9bc4670dba1df3	lib/itcl4.3.8/libtcl9itcl4.3.8.dylib
 f	90a59fed78e87097f37c391e2c6803b44a67c4221a9d89c3c459892ed6798dbe	lib/itcl4.3.8/pkgIndex.tcl
-f	f34babc6d0921bb0211b653cfc3b58528915d5e1e4368510502aea000ba6afcd	lib/libpython3.14.dylib
+f	b948455cc2eb5b05ee8c74867b8d14ce056f04cbddcb0ebf67969798bb61f462	lib/libpython3.14.dylib
 f	3db4dad457903f00fd14f531e8e669ab41c34cbb58760817d9023df4fcda9b04	lib/libtcl9.0.dylib
 f	d0bc0b4f8c0bd3ba3599f1e5ebc4a5bdc0e8c61ba45692186072d0fffa552cf3	lib/libtcl9tk9.0.dylib
 f	8c1304fbfd929545a3c8df80be2aa9c00a32a8029a589fdcb5242ec54bff3d56	lib/pkgconfig/python-3.14-embed.pc
@@ -366,7 +366,7 @@ f	ca39efc778d55c97357fc8b95f25f1c9301f79f487ee7486f24bf872a87c3aa7	lib/python3.1
 f	f688c89b860d5839aff1047d4f3df6c9695f136e2ae8a167bbbfa51846bbdaa5	lib/python3.14/_sitebuiltins.py
 f	3283216b39dc619ad1b0c0ccbed0c6a13c69884177e8032211087736fedacf4d	lib/python3.14/_strptime.py
 f	0ead5fb1bcd3e4de9c47d187235c4a12e9b3bd2b473afc0df99a90d68f7133fa	lib/python3.14/_sysconfig_vars__darwin_darwin.json
-f	fdc2ab23e84fa46c1266c767b390948168f9d16ec6c7cd89995fd6b1fc41d9fd	lib/python3.14/_sysconfigdata__darwin_darwin.py
+f	efb845b1c5f546d4e41b21b22220e074a6e5b5ce19a8f21205a1a763cf83f290	lib/python3.14/_sysconfigdata__darwin_darwin.py
 f	c28a8fee862741e9173f5a76f0c680761b5f61e1dd9f2ca479b02c69c9ada4e7	lib/python3.14/_threading_local.py
 f	2dd7cb459d654fe78b00c5c47ee8e786c037ee77763304603f5e976dd62cbf81	lib/python3.14/_weakrefset.py
 f	e558702a95cdce3febd289da021715d2b92bc43995b8a1bc58dfa1c3d8010287	lib/python3.14/abc.py

@@ -194,21 +194,22 @@ knowledge_base:
     scope: local
   issues:
     scope: local
-  # The repository's own rules. A string entry applies to the folder of its file, so
-  # `docs/principles.md` is given the code it governs. `VERIFIED.md` is a lookup table that the
-  # path instruction opens itself, and `SECURITY.md` is a disclosure policy: neither
-  # is listed. CLAUDE.md is a default pattern, and a default cannot be removed; the last entry is
-  # meant to confine it to a pull request that changes CLAUDE.md, which the docs do not promise.
-  # A pull request that adds a file a default pattern names (AGENTS.md, a skill) has it applied to
-  # that pull request's review: the walkthrough lists the guideline files that were used.
+  # The repository's own rules. `CONTRIBUTING.md` has its scope written out: as a plain string entry
+  # the review of #105 did not list it. `docs/principles.md` is given the code it governs. CLAUDE.md is a default
+  # pattern, which cannot be removed; its entry is meant to set what it governs: every Markdown file
+  # (the writing standard), the deployment pin's tools and the refresh code. `VERIFIED.md` is a
+  # lookup table the path instruction opens itself, and `SECURITY.md` is a disclosure policy:
+  # neither is listed. A pull request that adds a file a default pattern names (AGENTS.md, a skill)
+  # has it applied to that pull request's review: the walkthrough lists the files that were used.
   code_guidelines:
     enabled: true
     filePatterns:
-      - "CONTRIBUTING.md"
+      - files: "CONTRIBUTING.md"
+        applyTo: "**"
       - files: "docs/principles.md"
         applyTo: "substrate/**"
       - files: "CLAUDE.md"
-        applyTo: "CLAUDE.md"
+        applyTo: "**/*.md, tools/substrate-deploy, tools/deployment.py, substrate/refresh.py, substrate/serve_config.py"
 
 # Issues. A comment on every new issue would be noise, because the maintainer files most of them,
 # and `@coderabbitai plan` is open to anyone on any issue and posts a prompt for coding agents

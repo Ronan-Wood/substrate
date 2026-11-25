@@ -79,9 +79,9 @@ jobs:
       # The interpreter pin's tests on uv's real output need it AT THE PIN'S PATH: uv writes its
       # install path into libpython and `_sysconfigdata`, so an install anywhere else is other bytes
       # (measured 2026-11-05: those two files are the only difference, and uv re-ids libpython with
-      # the host's install_name_tool). That path is under the maintainer's home, hence sudo. WHICH
-      # BUILD comes from this job's uv, not the pin: a re-pin made with a newer uv fails here or in
-      # the pin's tests, so move `version` above with it.
+      # the host's install_name_tool). That path is in `/Users/Shared`, which every account may
+      # create folders in, so no sudo. WHICH BUILD comes from this job's uv, not the pin: a re-pin
+      # made with a newer uv fails here or in the pin's tests, so move `version` above with it.
       - run: |
           pin=tools/engine-interpreter.pin
           prefix=$(awk -F '\t' '$1 == "prefix" { print $2; exit }' "$pin")
@@ -90,7 +90,7 @@ jobs:
           case "${prefix##*/}" in cpython-[0-9]*.[0-9]*.[0-9]*-*) ;;
             *) echo "$pin's prefix '$prefix' is not a uv CPython install" >&2; exit 1 ;; esac
           test -n "$build" || { echo "no python-build-standalone release in $pin" >&2; exit 1; }
-          sudo -n install -d -o "$(id -un)" "${prefix%/*}"
+          mkdir -p "${prefix%/*}"
           uv python install --no-bin --install-dir "${prefix%/*}" "${prefix##*/}"
           got=$(cat "$prefix/BUILD") || { echo "uv wrote no BUILD into $prefix" >&2; exit 1; }
           test "$got" = "$build" || { echo "uv installed build $got, $pin is $build" >&2; exit 1; }

@@ -78,6 +78,10 @@ Every release of the engine, newest first. The format follows
 
 ### Changed
 
+- **Building the bundled engine needs its pinned Python in `/Users/Shared/substrate-python`,**
+  not in a home folder. `build-bundled-engine` takes that folder from the interpreter pin, so no
+  variable has to be set, and refuses a store that is missing or that anyone but you can write.
+  `RELEASING.md`, "The interpreter pin", has the two commands a new Mac needs.
 - **Document conversion is two optional extras.** The engine's own dependencies are `pypdfium2`,
   `pyyaml` and `numpy`, which read Markdown, text and a PDF's text layer; `numpy` was imported
   before and arrived only through docling. `convert` adds docling's readers for Office files, HTML,

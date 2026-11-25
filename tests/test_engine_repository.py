@@ -36,7 +36,8 @@ def test_the_licence_is_the_gpl_the_package_declares() -> None:
 
 def test_the_public_documents_are_there_and_name_no_ones_machine() -> None:
     for name in ("README.md", "SECURITY.md", "RELEASING.md"):
-        text = (ROOT / name).read_text()
+        # `/Users/Shared` is no one's home, and the runbook names the interpreter's folder there.
+        text = re.sub(r"/Users/Shared(?![\w-])", "", (ROOT / name).read_text())
         assert "/Users/" not in text and "~/vaults" not in text, name
     assert "security/advisories/new" in (ROOT / "SECURITY.md").read_text()
 

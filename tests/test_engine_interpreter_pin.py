@@ -16,6 +16,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -116,7 +117,8 @@ def test_a_modified_copy_is_refused_and_named(tmp_path: Path, capsys, tamper, ex
     err = capsys.readouterr().err
     assert "does not match engine-interpreter.pin before the build ran it: " in err
     assert expected in err
-    assert "uv python install --reinstall" in err
+    # The remedy names the store the interpreter is in: without it uv reinstalls into its default one.
+    assert f"uv python install --reinstall --no-bin --install-dir '{store.parent}' {store.name}`" in err
 
 
 @pytest.mark.parametrize(
@@ -716,7 +718,7 @@ def test_the_real_store_passes_every_step_the_build_runs(tmp_path: Path) -> None
     assert _run("--check", staged, prefix, PIN) == 0
     assert _run("--relocate", staged, prefix) == 0
     text = (staged / SYSCONFIG).read_text()
-    assert str(prefix) not in text and "uv/python/" not in text
+    assert str(prefix) not in text and f"{prefix.parent}/" not in text and "uv/python/" not in text
     assert _run("--recheck", staged, prefix, PIN) == 0
 
 
@@ -829,11 +831,11 @@ def _fake_uv(bin_dir: Path, body: str) -> None:
     uv.chmod(uv.stat().st_mode | stat.S_IXUSR)
 
 
-def _build(build: Path, dest: Path, bin_dir: Path) -> subprocess.CompletedProcess[str]:
-    env = {k: v for k, v in os.environ.items() if k != "VIRTUAL_ENV"}
+def _build(build: Path, dest: Path, bin_dir: Path, **extra: str) -> subprocess.CompletedProcess[str]:
+    env = {k: v for k, v in os.environ.items() if k not in ("VIRTUAL_ENV", "UV_PYTHON_INSTALL_DIR")}
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
-    return subprocess.run([str(build), str(dest)], cwd=build.parent, env=env, capture_output=True, text=True,
-                          timeout=300)
+    return subprocess.run([str(build), str(dest)], cwd=build.parent, env={**env, **extra}, capture_output=True,
+                          text=True, timeout=300)
 
 
 def _setup(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -842,6 +844,7 @@ def _setup(tmp_path: Path) -> tuple[Path, Path, Path]:
     handed and stops the build."""
     managed = tmp_path / "uv-python"
     store = _interpreter(managed / "cpython-3.14.7-macos-aarch64-none")
+    managed.chmod(0o755)  # the build uses a pin's folder only when this user alone can write it
     repo = _repo(tmp_path, store)
     seen = tmp_path / "seen"
     seen.mkdir()
@@ -900,11 +903,170 @@ def test_the_build_refuses_an_interpreter_the_pin_does_not_describe(tmp_path: Pa
         f'echo "$@" >>"{calls}"\nexit 3',
     )
 
-    result = _build(BUILD, tmp_path / "out" / "substrate-engine", tmp_path / "fakebin")
+    # The caller's store, so this does not depend on the pin's own folder being on this machine.
+    result = _build(BUILD, tmp_path / "out" / "substrate-engine", tmp_path / "fakebin",
+                    UV_PYTHON_INSTALL_DIR=str(managed))
 
     assert result.returncode != 0
     assert "was made for" in result.stderr, result.stderr
     assert not calls.exists(), f"uv ran the unchecked interpreter: {calls.read_text()}"
+
+
+# ------------------------------------------------------------------ where the build looks for it
+
+
+STORE_NAME = "cpython-3.14.7-macos-aarch64-none"
+
+
+def _asks(tmp_path: Path, python: Path | None) -> tuple[Path, Path]:
+    """A fake uv that records the store it was asked in, answers with `python` (or fails to find
+    one), and stops the build at the first thing that would run the copy. `(bin dir, record)`."""
+    asked = tmp_path / "asked"
+    answer = f'echo "{python}"; exit 0;' if python else "exit 2;"
+    _fake_uv(
+        tmp_path / "asking-uv",
+        f'[ "$1 $2" = "python find" ] && {{ echo "${{UV_PYTHON_INSTALL_DIR:-}}" "$*" >"{asked}"; {answer} }}\n'
+        '[ "$1 $2" = "python dir" ] && { echo "$UV_PYTHON_INSTALL_DIR"; exit 0; }\n'
+        "exit 3",
+    )
+    return tmp_path / "asking-uv", asked
+
+
+def _repoint(repo: Path, prefix: Path) -> None:
+    pin = repo / "tools" / "engine-interpreter.pin"
+    lines = [f"prefix\t{prefix}" if line.startswith("prefix\t") else line
+             for line in pin.read_text().splitlines()]
+    pin.write_text("\n".join(lines) + "\n")
+
+
+def test_the_build_asks_uv_in_the_pins_folder_with_nothing_set(tmp_path: Path) -> None:
+    store, repo, dest = _setup(tmp_path)
+    fakebin, asked = _asks(tmp_path, store / "bin" / "python3.14")
+
+    result = _build(repo / "tools" / "build-bundled-engine", dest, fakebin)
+
+    assert asked.read_text().startswith(f"{store.parent} python find "), result.stderr
+    assert "--no-python-downloads" in asked.read_text()
+    assert "checking the interpreter against tools/engine-interpreter.pin" in result.stdout, result.stderr
+    assert "was refused" not in result.stderr
+
+
+def test_a_store_the_caller_set_is_used_instead_of_the_pins(tmp_path: Path) -> None:
+    store, repo, dest = _setup(tmp_path)
+    _repoint(repo, tmp_path / "gone" / STORE_NAME)
+    fakebin, asked = _asks(tmp_path, store / "bin" / "python3.14")
+
+    result = _build(repo / "tools" / "build-bundled-engine", dest, fakebin,
+                    UV_PYTHON_INSTALL_DIR=str(store.parent))
+
+    assert asked.read_text().startswith(f"{store.parent} python find "), result.stderr
+    # Used, and still held to the pin.
+    assert "was made for" in result.stderr, result.stderr
+
+
+def test_a_missing_pin_folder_is_refused_with_the_commands_and_uv_is_not_asked(tmp_path: Path) -> None:
+    store, repo, dest = _setup(tmp_path)
+    gone = tmp_path / "gone"
+    _repoint(repo, gone / STORE_NAME)
+    fakebin, asked = _asks(tmp_path, store / "bin" / "python3.14")
+
+    result = _build(repo / "tools" / "build-bundled-engine", dest, fakebin)
+
+    assert result.returncode != 0
+    assert f"{gone} does not exist" in result.stderr, result.stderr
+    assert f"mkdir -m 755 '{gone}'" in result.stderr
+    assert f"uv python install --no-bin --install-dir '{gone}' {STORE_NAME}" in result.stderr
+    assert not asked.exists(), "uv was asked about a folder that is not there"
+    assert not gone.exists()
+
+
+# `acl` only where there are access lists to read; left out elsewhere rather than skipped.
+@pytest.mark.parametrize("how", ["group", "others", "link", "a file inside", "set by the caller",
+                                 "another user's",
+                                 *(["acl"] if sys.platform == "darwin" else [])])
+def test_a_store_someone_else_could_write_is_not_used(tmp_path: Path, how: str) -> None:
+    store, repo, dest = _setup(tmp_path)
+    folder = store.parent
+    extra = {}
+    loose = folder
+    if how == "link":
+        link = tmp_path / "a-link"
+        link.symlink_to(folder, target_is_directory=True)
+        _repoint(repo, link / STORE_NAME)
+    elif how == "a file inside":
+        loose = store / "lib" / "python3.14" / "os.py"
+        loose.chmod(0o666)
+    elif how == "acl":
+        subprocess.run(["chmod", "+a", "everyone allow add_file,add_subdirectory", str(folder)], check=True)
+    elif how == "set by the caller":
+        _repoint(repo, tmp_path / "gone" / STORE_NAME)
+        folder.chmod(0o757)
+        extra = {"UV_PYTHON_INSTALL_DIR": f"{folder}/"}
+    elif how in ("group", "others"):
+        folder.chmod(0o775 if how == "group" else 0o757)
+    fakebin, asked = _asks(tmp_path, store / "bin" / "python3.14")
+    if how == "another user's":
+        # No test can give a file away, so `id` answers as someone else instead.
+        stand_in = fakebin / "id"
+        stand_in.write_text("#!/usr/bin/env bash\necho 12345\n")
+        stand_in.chmod(0o755)
+    try:
+        result = _build(repo / "tools" / "build-bundled-engine", dest, fakebin, **extra)
+    finally:
+        if how == "acl":
+            subprocess.run(["chmod", "-N", str(folder)], check=True)
+        folder.chmod(0o755)
+
+    assert result.returncode != 0
+    said = "is a link" if how == "link" else f"is not yours alone to write: {loose} is"
+    assert said in result.stderr, result.stderr
+    assert not asked.exists(), "uv ran what is in a folder others can write"
+
+
+def test_a_store_the_caller_set_that_is_not_there_says_to_unset_it(tmp_path: Path) -> None:
+    store, repo, dest = _setup(tmp_path)
+    fakebin, asked = _asks(tmp_path, store / "bin" / "python3.14")
+
+    result = _build(repo / "tools" / "build-bundled-engine", dest, fakebin,
+                    UV_PYTHON_INSTALL_DIR=str(tmp_path / "gone"))
+
+    assert "from UV_PYTHON_INSTALL_DIR, is not a folder. Unset the variable" in result.stderr, result.stderr
+    assert "mkdir" not in result.stderr
+    assert not asked.exists()
+
+
+def test_uvs_world_writable_lock_does_not_refuse_the_store(tmp_path: Path) -> None:
+    store, repo, dest = _setup(tmp_path)
+    lock = store.parent / ".lock"
+    lock.write_text("")
+    lock.chmod(0o666)
+    fakebin, asked = _asks(tmp_path, store / "bin" / "python3.14")
+
+    result = _build(repo / "tools" / "build-bundled-engine", dest, fakebin)
+
+    assert asked.exists(), result.stderr
+
+
+def test_a_pin_that_names_no_install_path_is_refused(tmp_path: Path) -> None:
+    store, repo, dest = _setup(tmp_path)
+    _repoint(repo, Path("relative") / STORE_NAME)
+    fakebin, asked = _asks(tmp_path, store / "bin" / "python3.14")
+
+    result = _build(repo / "tools" / "build-bundled-engine", dest, fakebin)
+
+    assert "names no install path" in result.stderr, result.stderr
+    assert not asked.exists()
+
+
+def test_a_pin_folder_without_the_interpreter_names_the_install_command(tmp_path: Path) -> None:
+    store, repo, dest = _setup(tmp_path)
+    fakebin, _ = _asks(tmp_path, None)
+
+    result = _build(repo / "tools" / "build-bundled-engine", dest, fakebin)
+
+    assert result.returncode != 0
+    assert f"no uv-managed CPython 3.14 in {store.parent}." in result.stderr, result.stderr
+    assert f"uv python install --no-bin --install-dir '{store.parent}' {STORE_NAME}" in result.stderr
 
 
 # ------------------------------------------------------------------ where the steps sit
