@@ -977,25 +977,38 @@ def test_the_watchdog_kills_the_group_when_the_engine_lets_go(monkeypatch, fast)
 
 def test_the_engine_does_not_close_stderr_under_its_reader(monkeypatch, fast, tmp_path) -> None:
     """A descendant that escapes the group can hold the stderr pipe open; its descriptor must stay
-    the reader's until the reader sees its end, or a later pipe could take its number."""
-    pidfile = tmp_path / "escaped.pid"
+    the reader's until the reader sees its end, or a later pipe could take its number. The
+    descendant holds the pipe until this test releases it, or this test's process is gone, so no
+    assert races a clock; its 300 s bound only stops a stray one."""
+    # It spawns the descendant before its hello, which is not what is measured here.
+    monkeypatch.setattr(worker_client, "HELLO_SECONDS", 30)
+    release = tmp_path / "release"
+    hold = textwrap.dedent(f"""
+        import os, time
+        deadline = time.monotonic() + 300
+        while not os.path.exists({str(release)!r}) and time.monotonic() < deadline:
+            try:
+                os.kill({os.getpid()}, 0)
+            except ProcessLookupError:
+                break
+            except PermissionError:
+                pass
+            time.sleep(0.05)
+    """)
     _fake(monkeypatch, f"""
         import subprocess
-        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(3)"],
-                                 start_new_session=True)
-        open({str(pidfile)!r}, "w").write(str(child.pid))
+        subprocess.Popen([sys.executable, "-c", {hold!r}], start_new_session=True)
         hello(); request(); sys.exit(1)
     """)
-    w = _worker()
-    with pytest.raises(worker_client.WorkerFault), w:
-        w.start()
-        _ask(w)
     try:
+        w = _worker()
+        with pytest.raises(worker_client.WorkerFault), w:
+            w.start()
+            _ask(w)
         assert w._drain.is_alive() and not w.proc.stderr.closed
     finally:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(int(pidfile.read_text()), signal.SIGKILL)
-    w._drain.join(timeout=5)
+        release.touch()
+    w._drain.join(timeout=30)
     assert not w._drain.is_alive() and w.proc.stderr.closed
 
 
