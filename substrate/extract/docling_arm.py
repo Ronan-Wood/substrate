@@ -61,17 +61,19 @@ class DoclingExtractor:
         self.retry_quarantined = retry_quarantined
 
     def extract(
-        self, pdf: Path, doc_class: str, *, pages: tuple[int, int] | None = None, log=print
+        self, pdf: Path, doc_class: str, *, pages: tuple[int, int] | None = None, log=print,
+        checksum: str | None = None,
     ) -> Document:
         """`pdf` must not change while this runs: `substrate ingest` hands it its private copy
-        (`snapshot`). Raises ConverterMissing, ConverterUnsupported, ConversionRefused or
-        Quarantined (`convert`), and `worker_client.WorkerUnavailable` or `Interrupted`."""
+        (`snapshot`), and that copy's `checksum`, so the file is not hashed again. Raises
+        ConverterMissing, ConverterUnsupported, ConversionRefused or Quarantined (`convert`), and
+        `worker_client.WorkerUnavailable` or `Interrupted`."""
         from substrate.extract import convert, worker_client
         from substrate.extract.base import sha256_file
 
         convert.need_extra(convert.PDF)
         real = pdf.resolve()
-        checksum = sha256_file(real)
+        checksum = checksum or sha256_file(real)
         total = _page_count(real)
         first, last = pages or (1, total)
         last = min(last, total)
@@ -114,6 +116,7 @@ class DoclingExtractor:
                 extractor=f"docling {docling}",
                 extractor_arm=self.name,
                 layout_model="docling-layout-heron",
+                sha256=checksum,
             )
 
         return convert.through_worker(

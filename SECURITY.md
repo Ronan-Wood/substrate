@@ -41,12 +41,15 @@ An ingest reads a PDF or a converted document once, into a private copy (0400 in
 and the readers, the worker, the coverage probes and the blob store all take that copy. So the
 checksum a note records, its text and the original stored under that checksum are of the same
 bytes, whatever happens to the file meanwhile. A FIFO or a device in the file's place is refused
-without being read. The copy lives in the system temporary folder and is removed when the ingest
-ends, by a SIGTERM or SIGHUP too; one left by an ingest killed outright stays until the next ingest
-removes it. Once the path is resolved, no link in it is followed on macOS, and on Linux the
-opened file must be the one at that path where `/proc` says so. A file whose size or modification
-time moves while it is copied is refused. A LaTeX source that includes another file is refused,
-so nothing beside a source is read; figures are not read either.
+without being read. The copy lives in a folder of the engine's own in the system temporary folder,
+`substrate-<uid>`, which must be a folder of this user's, closed to others, not a link; the engine
+refuses to use one that is not. The copy is removed when the ingest ends, by a SIGTERM or SIGHUP
+too. One left by an ingest killed outright stays until the next ingest's sweep, which removes only
+a folder that proves it is a copy an ingest left and touches nothing else. Once the path is
+resolved, no link in it is followed on macOS, and on Linux the opened file must be the one at that
+path where `/proc` says so. A file whose size or modification time moves while it is copied is
+refused. A LaTeX source that includes another file is refused, so nothing beside a source is read;
+figures are not read either.
 
 ## Supported versions
 

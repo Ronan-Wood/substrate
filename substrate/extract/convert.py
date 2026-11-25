@@ -57,6 +57,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from substrate.extract.convert_frames import MAX_MARKDOWN
 from substrate.markdown.reader import _TOKEN, content_coverage
 
 # Word tokens of the source that must survive into the converted markdown, where an independent
@@ -666,31 +667,59 @@ def to_markdown(src: Path, spec: FormatSpec, *, models: Path | None = None, log=
                           retry_quarantined=retry_quarantined, log=log)
 
 
-# `\input` or `\include` as a command, wherever it is: in a comment, `verbatim` or `\iffalse` too,
-# and not after an odd run of backslashes, as in `\\input`, a line break and then a word. Matched
-# on the bytes, which docling's encodings (UTF-8, cp1252, latin-1) all spell alike.
-_LATEX_INCLUDE = re.compile(rb"(?<!\\)(?:\\\\)*\\(input|include)(?![A-Za-z])")
+# A LaTeX source is read whole to look for an include, so it is held to the bound the markdown
+# made of it is held to.
+LATEX_MAX_BYTES = MAX_MARKDOWN
+# `\input` or `\include` as a command, wherever it is: in a comment, `verbatim` or `\iffalse` too.
+# A backslash before it counts too: `\\input` is a line break and then a word, but in
+# `\verb\x\\input` the first two close a `\verb` span and the command is live. Where the command's
+# name ends is `latex_include`'s to decide.
+_LATEX_INCLUDE = re.compile(r"\\(input|include)")
 
 
-def latex_include(data: bytes) -> re.Match | None:
-    """The first include command in a LaTeX source's bytes, or None."""
-    return _LATEX_INCLUDE.search(data)
+def _latex_text(data: bytes) -> str:
+    """A LaTeX source's bytes decoded as docling's reader decodes them: UTF-8, else cp1252, else
+    latin-1 (`docling/backend/latex/utils/encoding.py`)."""
+    for encoding in ("utf-8", "cp1252"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("latin-1")
+
+
+def latex_include(data: bytes) -> tuple[str, int] | None:
+    """The first include command in a LaTeX source's bytes, with its line, or None. A command's
+    name runs on while `str.isalpha()` holds, as pylatexenc reads one, so `\\inputé` is another
+    command. Lines end as a text-mode read ends them, at `\\n`, `\\r\\n` or `\\r`."""
+    text = _latex_text(data)
+    for m in _LATEX_INCLUDE.finditer(text):
+        if m.end() < len(text) and text[m.end()].isalpha():
+            continue
+        at = m.start()
+        return m.group(1), (1 + text.count("\n", 0, at) + text.count("\r", 0, at)
+                            - text.count("\r\n", 0, at))
+    return None
 
 
 def refuse_includes(src: Path) -> None:
     """Refuse a LaTeX source that includes another file. Docling reads an include from the folder
     beside the file it converts, which is the ingest's private copy, so the included text would be
-    missing without a word. Raises ConversionRefused (exit 3)."""
-    data = src.read_bytes()
-    m = latex_include(data)
-    if m is None:
+    missing without a word. Raises ConversionRefused (exit 3), and for a source over
+    `LATEX_MAX_BYTES` before reading it."""
+    size = src.stat().st_size
+    if size > LATEX_MAX_BYTES:
+        raise ConversionRefused(
+            f"latex: {printable(src.name)} is {size:,} bytes, over the {LATEX_MAX_BYTES:,} bytes "
+            f"({LATEX_MAX_BYTES / 2**20:g} MiB) a LaTeX source may be.")
+    found = latex_include(src.read_bytes())
+    if found is None:
         return
-    before = data[:m.start()]
-    line = 1 + before.count(b"\n") + before.count(b"\r") - before.count(b"\r\n")
+    command, line = found
     raise ConversionRefused(
-        f"latex: {printable(src.name)} uses \\{m.group(1).decode()} on line {line}, and a LaTeX "
-        "source of several files is not supported yet. Flatten it into one file (latexpand does "
-        "this) and ingest that. A command in a comment counts too.")
+        f"latex: {printable(src.name)} uses \\{command} on line {line}, and a LaTeX source of "
+        "several files is not supported yet. Flatten it into one file (latexpand does this) and "
+        "ingest that. A command in a comment counts too.")
 
 
 def need_extra(spec: FormatSpec) -> None:

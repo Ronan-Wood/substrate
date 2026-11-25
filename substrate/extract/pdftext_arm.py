@@ -321,7 +321,8 @@ class TextLayerExtractor:
     name = "pdf-text"
 
     def extract(
-        self, pdf: Path, doc_class: str, *, pages: tuple[int, int] | None = None, log=print
+        self, pdf: Path, doc_class: str, *, pages: tuple[int, int] | None = None, log=print,
+        checksum: str | None = None,
     ) -> Document:
         from importlib.metadata import version as pkg_version
 
@@ -422,6 +423,7 @@ class TextLayerExtractor:
             extractor=extractor,
             extractor_arm=self.name,
             layout_model="",
+            sha256=checksum,
             stats={
                 "text_layer_pages": len(text_pages),
                 "scanned_pages": scanned,

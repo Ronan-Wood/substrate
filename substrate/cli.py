@@ -223,9 +223,8 @@ def _ingest_pdf(args: argparse.Namespace, pdf: Path, models: Path | None, snap) 
     print(f"ingesting : {pdf.name}  class={args.doc_class}")
 
     try:
-        doc = extractor.extract(snap.path, args.doc_class, pages=pages)
+        doc = extractor.extract(snap.path, args.doc_class, pages=pages, checksum=snap.checksum)
         doc.source_path = str(pdf)
-        _moved_on(snap)
     except PdfReadError as e:
         print(f"\nFATAL (read): {e}", file=sys.stderr)
         return 2
@@ -300,6 +299,7 @@ def _ingest_pdf(args: argparse.Namespace, pdf: Path, models: Path | None, snap) 
     print(f"  elapsed    : {run['elapsed_s']}s")
     print(f"  internal   : {run['internal_cache']}")
     print(f"\nwrote -> {out}")
+    _moved_on(snap)
     return 0
 
 
@@ -406,7 +406,6 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
         conv = convert.to_markdown(snap.path, spec, models=models, quarantine=blobs.root,
                                    retry_quarantined=getattr(args, "retry_quarantined", False),
                                    checksum=snap.checksum)
-        _moved_on(snap)
     except convert.ConversionRefused as e:
         print(f"\nFATAL (conversion): {e}", file=sys.stderr)
         return 3
@@ -485,6 +484,7 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
             return 3
 
     _print_ingest_result(r, out)
+    _moved_on(snap)
     return 0
 
 

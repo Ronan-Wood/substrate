@@ -280,12 +280,15 @@ Every release of the engine, newest first. The format follows
   and the stored original are of the same bytes. Before, the file was read by name at each step,
   so they could be of different bytes. A FIFO in the file's place is refused without being read.
   A file whose size or modification time moves while it is copied is refused (exit 2); one changed
-  after is converted as it was read, with a warning.
+  or replaced after is converted as it was read, with a warning. The copy is kept in
+  `substrate-<uid>` in the temporary folder, a folder of the engine's own; an ingest refuses
+  (exit 2) one that is a link, another user's or open to others, and `TMPDIR` names another.
 - **A LaTeX source that `\input`s or `\include`s another file is refused** (exit 3), naming the
   command and its line. Docling read included files from beside the source, outside the note's
   checksum, and dropped a missing one without a word; the private copy holds the source alone, so
   it would drop them all. Flatten the document into one file to ingest it. A command in a comment
-  counts too. Figures are not read, and `\includegraphics` is not refused.
+  counts too. A source over 64 MiB is refused (exit 3). Figures are not read, and
+  `\includegraphics` is not refused.
 - `ingest` refuses a folder that is a symlink, wherever it points. It used to follow the link and
   check only that the result was inside the vault, so a writable folder linked to a skipped or
   hidden folder of the same vault took a note compose would never index. It now walks the folder

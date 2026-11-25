@@ -12,11 +12,12 @@ its place cannot block the read. A file whose size or modification time moves wh
 is refused; one changed after is converted as it was read, and the ingest warns
 (`Snapshot.moved_on`).
 
-The copy is 0400 in a 0700 folder under the temporary folder: `substrate-source-…/copy/<name>`,
-beside a `.lock` held for as long as its ingest runs. The folder is made under another name and
-takes that name only once its lock is held, so no ingest's sweep can mistake a new one for a dead
-one. It is removed when the ingest ends, by a SIGTERM or SIGHUP too; one left by an ingest killed
-outright is removed by the next, whose lock on it then succeeds.
+The copy is 0400 in a 0700 folder of the engine's own, `<temp>/substrate-<uid>/snap-…/copy/`,
+under the source's name, beside a `.lock` held for as long as its ingest runs. It is removed when
+the ingest ends, by a SIGTERM or SIGHUP too. One left by an ingest killed outright is removed by
+the next ingest's sweep, which looks only inside `substrate-<uid>` and removes only what proves it
+is a snapshot (`_abandoned`). A folder killed before its proof was written stays until the system
+clears its temporary folder: an empty folder, or one holding an empty lock, never a copy.
 """
 
 from __future__ import annotations
@@ -25,23 +26,24 @@ import contextlib
 import fcntl
 import hashlib
 import os
+import re
 import shutil
 import signal
 import stat
 import sys
 import tempfile
 import threading
-import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
-PREFIX = "substrate-source-"
-_STAGING = "substrate-staging-"
+_ENTRY = "snap-"
+# The names `mkdtemp` gives an entry: the prefix and 8 of its characters.
+_ENTRY_NAME = re.compile(r"snap-[a-z0-9_]{8}")
 _LOCK = ".lock"
 _COPY = "copy"
-# A staging folder takes its final name within moments; one this old was left by a killed ingest.
-_STAGED_FOR = 3600
+# Written into the lock once it is held: what a sweep reads as "a snapshot, and its ingest ended".
+_MARK = b"substrate snapshot 1\n"
 # macOS refuses a link anywhere in the path; the two flags together are EINVAL there.
 _NOFOLLOW = os.O_NOFOLLOW_ANY if sys.platform == "darwin" else os.O_NOFOLLOW
 
@@ -62,54 +64,82 @@ class Snapshot:
     source: Path
     size: int
     mtime_ns: int
+    dev: int            # of the file the descriptor opened
+    ino: int
 
     def moved_on(self) -> bool:
-        """Whether the file at `source` looks different now from when it was read, by its size and
-        modification time: a file still being written when it was copied. A stat, never a read."""
+        """Whether the file at `source` looks different now from when it was read: another size or
+        modification time (a file still being written), or another file at that path. A stat,
+        never a read. A save that writes a new file of the same bytes counts as another file; the
+        result is a warning only, so that spurious one is accepted."""
         try:
             st = os.stat(self.source)
         except OSError:
             return True
-        return (st.st_size, st.st_mtime_ns) != (self.size, self.mtime_ns)
+        return ((st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino)
+                != (self.size, self.mtime_ns, self.dev, self.ino))
 
 
-def _sweep(tmp: Path) -> None:
-    """Remove the copies of ingests that ended without removing their own: one whose lock this
-    takes, or whose lock is gone, since a running ingest's folder holds its lock from the moment it
-    has its name; and a staging folder `_STAGED_FOR` old. Nothing here can fail an ingest."""
+def _private_root(tmp: Path, name: str) -> Path:
+    """The engine's own folder under `tmp`: made 0700 if it is missing, and checked each time to be
+    a folder, not a link, this user's and closed to everyone else. Raises CopyFailed."""
+    root = tmp / f"substrate-{os.geteuid()}"
     try:
-        names = os.listdir(tmp)
+        os.mkdir(root, 0o700)
+        os.chmod(root, 0o700)                           # whatever the umask did to the mode
+    except FileExistsError:
+        pass
+    except OSError as e:
+        raise _copy_failed(name, e) from None
+    try:
+        st = os.lstat(root)
+    except OSError as e:
+        raise _copy_failed(name, e) from None
+    if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
+            or stat.S_IMODE(st.st_mode) & 0o077):
+        # Another user's is not this user's to remove: on a shared /tmp, TMPDIR is the way out.
+        way_out = "Remove it, or set" if st.st_uid == os.geteuid() else "Set"
+        raise CopyFailed(f"the engine's temporary folder {root} is not its own: it must be a "
+                         "folder, not a link, owned by this user and closed to others. "
+                         f"{way_out} TMPDIR to a folder of your own.")
+    return root
+
+
+def _sweep(root: Path) -> None:
+    """Remove the copies in `root` of ingests that ended without removing their own: each entry
+    `_abandoned` proves is one. Anything else is left alone. Nothing here can fail an ingest."""
+    try:
+        names = os.listdir(root)
     except OSError:
         return
     for name in names:
-        staged = name.startswith(_STAGING)
-        if not (staged or name.startswith(PREFIX)):
+        if not _ENTRY_NAME.fullmatch(name):
             continue
-        path = tmp / name
+        path = root / name
         try:
             st = os.lstat(path)
             if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
                 continue
-            if staged:
-                if time.time() - st.st_mtime < _STAGED_FOR:
-                    continue
-            elif not _unlocked(path / _LOCK):
+            if not _abandoned(path / _LOCK):
                 continue
         except OSError:
             continue
-        with contextlib.suppress(OSError):
-            shutil.rmtree(path)
+        _remove(path)
 
 
-def _unlocked(lock: Path) -> bool:
-    """Whether no ingest holds `lock`: it is gone, or this takes it. Raises OSError otherwise."""
+def _abandoned(lock: Path) -> bool:
+    """Whether `lock` is a snapshot's whose ingest has ended: a regular file, not a link, holding
+    exactly `_MARK`, which an ingest writes only once it holds the lock, and free for this to take.
+    A missing, empty or other lock is not one. Raises OSError where it cannot tell."""
     try:
         fd = os.open(lock, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return True
+        return False
     try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode) or os.read(fd, len(_MARK) + 1) != _MARK:
+            return False
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
+    except BlockingIOError:
         return False                                    # its ingest is still running
     finally:
         os.close(fd)
@@ -117,7 +147,7 @@ def _unlocked(lock: Path) -> bool:
 
 
 def _remove(folder: Path) -> None:
-    """The copy first, so a removal cut short leaves the lock for the next sweep to take."""
+    """The copy first, so a removal cut short leaves the lock and its mark for the next sweep."""
     shutil.rmtree(folder / _COPY, ignore_errors=True)
     shutil.rmtree(folder, ignore_errors=True)
 
@@ -214,28 +244,28 @@ def _opened(src: Path, real: Path) -> tuple[int, os.stat_result]:
     return fd, st
 
 
-def _folder(tmp: Path, stack: contextlib.ExitStack, name: str) -> Path:
-    """A new private folder, locked, with its removal on `stack`, a stop's included."""
+def _folder(root: Path, stack: contextlib.ExitStack, name: str) -> Path:
+    """A new private folder in `root`, locked and marked, with its removal on `stack` and on a
+    stop from the moment it exists."""
+    from substrate.blobs import _write_all
+
     try:
-        staging = Path(tempfile.mkdtemp(prefix=_STAGING, dir=tmp))
+        folder = Path(tempfile.mkdtemp(prefix=_ENTRY, dir=root))
     except OSError as e:
-        raise _copy_failed(name, e) from None
-    try:
-        lock = os.open(staging / _LOCK, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-    except OSError as e:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise _copy_failed(name, e) from None
-    stack.callback(os.close, lock)
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        folder = tmp / (PREFIX + staging.name.removeprefix(_STAGING))
-        os.rename(staging, folder)
-    except OSError as e:
-        shutil.rmtree(staging, ignore_errors=True)
         raise _copy_failed(name, e) from None
     stack.enter_context(_removed_on_stop(folder))
-    stack.callback(_remove, folder)                     # before the handlers are put back
     try:
+        lock = os.open(folder / _LOCK, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    except OSError as e:
+        _remove(folder)
+        raise _copy_failed(name, e) from None
+    # Unwound in reverse: the folder is removed while its lock is held, then the lock let go, then
+    # the stop handlers put back.
+    stack.callback(os.close, lock)
+    stack.callback(_remove, folder)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _write_all(lock, _MARK)
         (folder / _COPY).mkdir(mode=0o700)
     except OSError as e:
         raise _copy_failed(name, e) from None
@@ -263,7 +293,7 @@ def _written(fd: int, size: int, dest: Path, name: str) -> str:
 def snapshot(src: Path) -> Iterator[Snapshot]:
     """Copy `src` once into a private folder, hashing it as it is copied. Raises SourceUnreadable
     or CopyFailed. The folder is removed when the block ends, and by a SIGTERM or SIGHUP from the
-    moment it has its name."""
+    moment it exists."""
     real = src.resolve()
     fd, st = _opened(src, real)
     with contextlib.ExitStack() as stack:
@@ -272,8 +302,9 @@ def snapshot(src: Path) -> Iterator[Snapshot]:
                 tmp = Path(tempfile.gettempdir())
             except OSError as e:
                 raise _copy_failed(src.name, e) from None
-            _sweep(tmp)
-            dest = _folder(tmp, stack, src.name) / _COPY / src.name
+            root = _private_root(tmp, src.name)
+            _sweep(root)
+            dest = _folder(root, stack, src.name) / _COPY / src.name
             checksum = _written(fd, st.st_size, dest, src.name)
             # A write in place while the copy was made leaves the size alone but not the time, and
             # the copy may then hold bytes the file never held at once.
@@ -283,4 +314,4 @@ def snapshot(src: Path) -> Iterator[Snapshot]:
                                        "ingest it again once nothing is writing to it.")
         finally:
             os.close(fd)
-        yield Snapshot(dest, checksum, src, st.st_size, st.st_mtime_ns)
+        yield Snapshot(dest, checksum, src, st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino)

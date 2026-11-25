@@ -50,23 +50,44 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _made(monkeypatch) -> list[Path]:
-    """The snapshot folders this test's ingests make: each staged, then renamed."""
-    made: list[Path] = []
-    mkdtemp, rename = tempfile.mkdtemp, os.rename
+@pytest.fixture(autouse=True)
+def _own_temp(monkeypatch, tmp_path) -> Path:
+    """Every test here has a temporary folder of its own, so no other run's sweep sees its
+    fixtures and its sweep sees no other run's."""
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(temp))
+    return temp
 
-    def staged(*a, **kw):
+
+def _root() -> Path:
+    return Path(tempfile.gettempdir()) / f"substrate-{os.geteuid()}"
+
+
+def _made(monkeypatch) -> list[Path]:
+    """The snapshot folders this test's ingests make."""
+    made: list[Path] = []
+    mkdtemp = tempfile.mkdtemp
+
+    def making(*a, **kw):
         made.append(Path(mkdtemp(*a, **kw)))
         return str(made[-1])
 
-    def renamed(old, new, *a, **kw):
-        if Path(old) in made:
-            made.append(Path(new))
-        return rename(old, new, *a, **kw)
-
-    monkeypatch.setattr(snapshot.tempfile, "mkdtemp", staged)
-    monkeypatch.setattr(os, "rename", renamed)
+    monkeypatch.setattr(snapshot.tempfile, "mkdtemp", making)
     return made
+
+
+def _unopenable(monkeypatch, src: Path) -> None:
+    """`src` cannot be opened, for any user: a mode of 000 does not stop a process that may
+    override it, as root in a container may."""
+    real, at = os.open, str(src.resolve())
+
+    def opening(path, flags, *a, **kw):
+        if str(path) == at:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real(path, flags, *a, **kw)
+
+    monkeypatch.setattr(os, "open", opening)
 
 
 # ---------------------------------------------------------------- the copy
@@ -102,31 +123,82 @@ def test_the_copy_is_removed_however_the_ingest_ends(tmp_path) -> None:
         assert not folder.exists(), type(stop)
 
 
-def test_a_copy_whose_ingest_ended_is_removed_and_a_running_one_kept(tmp_path) -> None:
-    """A folder whose lock nobody holds is a dead ingest's; one whose lock is held is running."""
-    tmp = Path(tempfile.gettempdir())
-    dead = Path(tempfile.mkdtemp(prefix=snapshot.PREFIX, dir=tmp))
-    alive = Path(tempfile.mkdtemp(prefix=snapshot.PREFIX, dir=tmp))
-    odd = tmp / f"{snapshot.PREFIX}99999999999999999999-²"
-    odd.mkdir()
-    for d in (dead, alive):
-        (d / ".lock").touch()
-        (d / "review.adoc").write_text(ORIGINAL)
+def _entry(root: Path, lock: bytes | None) -> Path:
+    """A folder shaped as a snapshot is, its lock holding `lock`, or no lock at all."""
+    d = Path(tempfile.mkdtemp(prefix=snapshot._ENTRY, dir=root))
+    (d / "copy").mkdir()
+    (d / "copy" / "review.adoc").write_text(ORIGINAL)
+    if lock is not None:
+        (d / ".lock").write_bytes(lock)
+    return d
+
+
+def test_a_sweep_leaves_a_folder_it_did_not_make(tmp_path, _own_temp) -> None:
+    """A folder named as the engine once named its copies, `substrate-source-…`, with no lock: in
+    the temporary folder, and in the engine's own. Neither is a snapshot, so neither is touched."""
+    src = tmp_path / "review.adoc"
+    src.write_text(ORIGINAL, "utf-8")
+    with snapshot.snapshot(src):
+        pass
+    unrelated = [d / "substrate-source-export" for d in (_own_temp, _root())]
+    for d in unrelated:
+        d.mkdir()
+        (d / "keep.txt").write_text("not a snapshot")
+    for _ in range(2):
+        with snapshot.snapshot(src):
+            pass
+    assert [(d / "keep.txt").read_text() for d in unrelated] == ["not a snapshot"] * 2
+
+
+def test_a_sweep_removes_only_a_snapshot_whose_ingest_ended(tmp_path) -> None:
+    """Removed: a snapshot-shaped folder in the engine's own folder whose lock holds the mark and
+    is free. Kept: a running ingest's, a lockless one, an unmarked or otherwise marked one, and one
+    of another name."""
+    src = tmp_path / "review.adoc"
+    src.write_text(ORIGINAL, "utf-8")
+    with snapshot.snapshot(src):
+        pass
+    root = _root()
+    dead = _entry(root, snapshot._MARK)
+    alive = _entry(root, snapshot._MARK)
+    unmarked, lockless = _entry(root, b""), _entry(root, None)
+    other_mark = _entry(root, b"something else\n")
+    misnamed = root / "snap-not-ours"
+    misnamed.mkdir()
+    (misnamed / ".lock").write_bytes(snapshot._MARK)
     held = os.open(alive / ".lock", os.O_RDWR)
     fcntl.flock(held, fcntl.LOCK_EX)
     try:
-        src = tmp_path / "review.adoc"
-        src.write_text(ORIGINAL, "utf-8")
         with snapshot.snapshot(src):
             pass
-        # A folder holds its lock from the moment it has its name, so one without is a dead one.
-        assert not dead.exists() and alive.exists() and not odd.exists()
     finally:
         os.close(held)
-        import shutil
+    assert not dead.exists()
+    for kept in (alive, unmarked, lockless, other_mark, misnamed):
+        assert kept.exists(), kept
 
-        for d in (dead, alive, odd):
-            shutil.rmtree(d, ignore_errors=True)
+
+@pytest.mark.parametrize("wrong", ["a link", "open to others", "a file"])
+def test_an_engine_folder_that_is_not_its_own_is_refused_and_left_alone(monkeypatch, fast,
+                                                                        tmp_path, wrong) -> None:
+    root = _root()
+    if wrong == "a link":
+        (tmp_path / "elsewhere").mkdir(mode=0o700)
+        root.symlink_to(tmp_path / "elsewhere")
+    elif wrong == "open to others":
+        root.mkdir(mode=0o700)
+        root.chmod(0o755)
+    else:
+        root.write_text("x")
+        root.chmod(0o600)                               # closed to others, and still not a folder
+    src = tmp_path / "review.adoc"
+    src.write_text(ORIGINAL, "utf-8")
+    _no_spawn(monkeypatch)
+    rc, err = _run_cli(["ingest", str(src), "--out", str(tmp_path / "out")])
+    assert rc == 2 and "FATAL (engine)" in err and "is not its own" in err, err
+    assert os.path.lexists(root)
+    if wrong == "a link":
+        assert root.is_symlink() and not list((tmp_path / "elsewhere").iterdir())
 
 
 def test_a_fifo_in_the_source_s_place_is_refused_without_blocking(tmp_path) -> None:
@@ -159,13 +231,9 @@ def test_a_source_that_is_not_a_readable_file_is_an_input_refusal(monkeypatch, f
         src.mkdir()
     else:
         src.write_text(ORIGINAL, "utf-8")
-        src.chmod(0)
+        _unopenable(monkeypatch, src)
     _no_spawn(monkeypatch)
-    try:
-        rc, err = _run_cli(["ingest", str(src), "--out", str(tmp_path / "out")])
-    finally:
-        if kind != "a folder":
-            src.chmod(0o600)
+    rc, err = _run_cli(["ingest", str(src), "--out", str(tmp_path / "out")])
     assert rc == 2 and "FATAL (read)" in err and "Traceback" not in err, err
 
 
@@ -176,7 +244,7 @@ def test_a_copy_that_cannot_be_written_is_the_engine_s_problem(monkeypatch, fast
 
     def opening(path, flags, *a, **kw):
         fd = real_open(path, flags, *a, **kw)
-        if snapshot.PREFIX in str(path) and str(path).endswith(src.name) and flags & os.O_CREAT:
+        if "/snap-" in str(path) and str(path).endswith(f"/copy/{src.name}") and flags & os.O_CREAT:
             copies.add(fd)
         return fd
 
@@ -213,7 +281,7 @@ def test_a_stop_during_the_writes_removes_the_copy_and_ends_the_ingest(tmp_path)
         real = ingest.ingest_markdown
         def stopping(tmp, out, **kw):
             import tempfile, glob
-            folders = glob.glob(os.path.join(tempfile.gettempdir(), "substrate-source-*"))
+            folders = glob.glob(os.path.join(tempfile.gettempdir(), "substrate-*", "snap-*"))
             open({str(seen)!r}, "w").write("\\n".join(folders))
             os.kill(os.getpid(), signal.SIGTERM)
             return real(tmp, out, **kw)
@@ -351,7 +419,7 @@ def _text_layer(monkeypatch, seen: list[Path]) -> None:
     from substrate.extract.assemble import assemble
     from substrate.models import Block, Kind
 
-    def extract(self, pdf, doc_class, *, pages=None, log=print):
+    def extract(self, pdf, doc_class, *, pages=None, log=print, checksum=None):
         seen.append(pdf)
         block = Block(id="b000001", kind=Kind.TEXT, text="The meadow drains toward the harbour.",
                       page=1, label="text", level=None, lang=None, height=10.0, left=10.0,
@@ -399,6 +467,76 @@ def test_apple_s_reader_reads_the_copy(monkeypatch, fast, tmp_path) -> None:
 
 # ---------------------------------------------------------------- the copy: names, locks, paths
 
+def test_another_file_put_at_the_path_is_warned_of(tmp_path) -> None:
+    """Same bytes, size and modification time, another file: a save that writes a new file."""
+    src = tmp_path / "review.adoc"
+    src.write_text(ORIGINAL, "utf-8")
+    with snapshot.snapshot(src) as snap:
+        st = os.stat(src)
+        other = tmp_path / "saved.adoc"
+        other.write_text(ORIGINAL, "utf-8")
+        os.utime(other, ns=(st.st_atime_ns, st.st_mtime_ns))
+        assert not snap.moved_on()
+        os.replace(other, src)
+        assert os.stat(src).st_mtime_ns == st.st_mtime_ns and snap.moved_on()
+
+
+@pytest.mark.parametrize("path", ["converted", "pdf"])
+def test_a_change_while_the_note_is_written_is_warned_of(monkeypatch, fast, tmp_path,
+                                                         path) -> None:
+    """The check runs once everything is written: a change while the original is stored is
+    still seen, and the stored original is the bytes read."""
+    if path == "pdf":
+        _text_layer(monkeypatch, [])
+        src = tmp_path / "survey.pdf"
+        src.write_bytes(b"%PDF-1.7 pretend")
+        args = ["--doc-class", "reference-frozen"]
+    else:
+        src = tmp_path / "review.adoc"
+        src.write_text(ORIGINAL, "utf-8")
+        _fake(monkeypatch, ECHO)
+        args = []
+    original = src.read_bytes()
+    real_put = blobs.put
+
+    def put(path_, expected):
+        with open(src, "ab") as f:
+            f.write(b" tide pool")
+        return real_put(path_, expected=expected)
+
+    monkeypatch.setattr(blobs, "put", put)
+    out = tmp_path / "out"
+    rc, err = _run_cli(["ingest", str(src), *args, "--out", str(out)])
+    assert rc == 0 and f"WARNING (source): {src.name} changed while it was read" in err, err
+    run = json.loads((out / "run.json").read_text())
+    assert run["source_sha256"] == _sha(original)
+    assert blobs.verified(_sha(original)).read_bytes() == original
+
+
+@pytest.mark.parametrize("reader", ["docling", "text layer"])
+def test_a_pdf_is_hashed_once_as_it_is_copied(monkeypatch, fast, tmp_path, reader) -> None:
+    """The snapshot's checksum is the note's: the reader, `assemble` and the note's id take it
+    rather than reading the copy again."""
+    from substrate.extract import assemble, base
+
+    monkeypatch.setattr(convert, "installed_extras", lambda: frozenset({"convert", "convert-ml"}))
+    monkeypatch.setattr(classes, "apply", lambda doc: {"title": "Survey"})
+    pdf = _pdf(tmp_path / "survey.pdf", 2)
+    _fake(monkeypatch, _pdf_worker())
+    hashed = []
+    real = base.sha256_file
+    for module in (base, assemble):
+        monkeypatch.setattr(module, "sha256_file", lambda p, *a: (hashed.append(p), real(p, *a))[1])
+    out = tmp_path / "out"
+    models = ["--docling-models", str(_models(tmp_path))] if reader == "docling" else []
+    rc, err = _run_cli(["ingest", str(pdf), "--doc-class", "reference-frozen", *models,
+                        "--out", str(out)])
+    assert rc == 0, err
+    run = json.loads((out / "run.json").read_text())
+    assert run["source_sha256"] == _sha(pdf.read_bytes()) and run["doc_id"].startswith("survey-")
+    assert hashed == [], hashed
+
+
 def test_a_source_named_as_the_lock_is_copied_beside_it(tmp_path) -> None:
     src = tmp_path / ".lock"
     src.write_text(ORIGINAL, "utf-8")
@@ -407,8 +545,8 @@ def test_a_source_named_as_the_lock_is_copied_beside_it(tmp_path) -> None:
 
 
 def test_a_new_copy_is_never_swept_before_its_lock_is_held(monkeypatch, tmp_path) -> None:
-    """Another ingest's sweep, run between this one making its lock and taking it, finds no folder
-    of its own name there to remove."""
+    """Another ingest's sweep, run between this one making its lock and taking it, finds a lock
+    with no mark in it, which is not a snapshot's to remove."""
     real_open, real_flock, locks = os.open, fcntl.flock, set()
 
     def opening(path, flags, *a, **kw):
@@ -420,7 +558,7 @@ def test_a_new_copy_is_never_swept_before_its_lock_is_held(monkeypatch, tmp_path
     def flock(fd, op):
         if fd in locks:
             locks.discard(fd)
-            snapshot._sweep(Path(tempfile.gettempdir()))
+            snapshot._sweep(_root())
         return real_flock(fd, op)
 
     monkeypatch.setattr(os, "open", opening)
@@ -460,12 +598,9 @@ def test_a_name_that_would_act_on_the_terminal_is_printed_inert(monkeypatch, fas
                                                                 tmp_path) -> None:
     src = tmp_path / "re\x1b]0;owned\x07view.adoc"
     src.write_text(ORIGINAL, "utf-8")
-    src.chmod(0)
+    _unopenable(monkeypatch, src)
     _no_spawn(monkeypatch)
-    try:
-        rc, err = _run_cli(["ingest", str(src), "--out", str(tmp_path / "out")])
-    finally:
-        src.chmod(0o600)
+    rc, err = _run_cli(["ingest", str(src), "--out", str(tmp_path / "out")])
     assert rc == 2 and "FATAL (read): re]0;ownedview.adoc could not be read" in err, err
     assert "\x1b" not in err and "\x07" not in err, err
 
@@ -492,25 +627,6 @@ def test_a_copy_made_while_the_file_was_written_is_refused(monkeypatch, tmp_path
         with snapshot.snapshot(src):
             pass
     assert wrote and made and not any(d.exists() for d in made)
-
-
-def test_a_staging_folder_left_by_a_killed_ingest_is_removed_once_old(tmp_path) -> None:
-    tmp = Path(tempfile.gettempdir())
-    old = Path(tempfile.mkdtemp(prefix=snapshot._STAGING, dir=tmp))
-    fresh = Path(tempfile.mkdtemp(prefix=snapshot._STAGING, dir=tmp))
-    then = os.stat(old).st_mtime - snapshot._STAGED_FOR - 60
-    os.utime(old, (then, then))
-    try:
-        src = tmp_path / "review.adoc"
-        src.write_text(ORIGINAL, "utf-8")
-        with snapshot.snapshot(src):
-            pass
-        assert not old.exists() and fresh.exists()
-    finally:
-        import shutil
-
-        for d in (old, fresh):
-            shutil.rmtree(d, ignore_errors=True)
 
 
 def test_a_handler_set_outside_python_is_left_alone(monkeypatch, tmp_path) -> None:
@@ -562,7 +678,7 @@ def test_a_stop_while_the_copy_is_written_removes_it(tmp_path) -> None:
         from substrate.extract import snapshot
         real = snapshot._copy
         def stopping(*a):
-            folders = glob.glob(os.path.join(tempfile.gettempdir(), "substrate-source-*"))
+            folders = glob.glob(os.path.join(tempfile.gettempdir(), "substrate-*", "snap-*"))
             open({str(seen)!r}, "w").write("\\n".join(folders))
             os.kill(os.getpid(), signal.SIGTERM)
             return real(*a)
@@ -599,15 +715,29 @@ def test_a_store_failure_names_the_source_not_the_copy(monkeypatch, tmp_path) ->
 
 
 def test_the_copy_is_removed_before_the_stop_handlers_are_put_back(monkeypatch, tmp_path) -> None:
+    """And while its lock is still held, so no other ingest's sweep removes it at the same time."""
     before, during = signal.getsignal(signal.SIGTERM), []
     real = snapshot._remove
-    monkeypatch.setattr(snapshot, "_remove", lambda folder: (
-        during.append(signal.getsignal(signal.SIGTERM)), real(folder))[1])
+
+    def removing(folder):
+        lock = os.open(folder / ".lock", os.O_RDONLY)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            held = False
+        except BlockingIOError:
+            held = True
+        finally:
+            os.close(lock)
+        during.append((signal.getsignal(signal.SIGTERM), held))
+        real(folder)
+
+    monkeypatch.setattr(snapshot, "_remove", removing)
     src = tmp_path / "review.adoc"
     src.write_text(ORIGINAL, "utf-8")
     with snapshot.snapshot(src) as snap:
         folder = snap.path.parent.parent
-    assert during and during[0] != before and not folder.exists(), during
+    ((handler, held),) = during
+    assert handler != before and held and not folder.exists(), during
     assert signal.getsignal(signal.SIGTERM) == before
 
 
@@ -664,12 +794,38 @@ def test_the_refusal_counts_lines_as_docling_does(tmp_path, data, line) -> None:
 
 
 @pytest.mark.parametrize(("data", "refused"), [
-    (b"a\\\\input b", False), (b"\\\\\\\\include b", False), (b"a\\\\\\input{x}", True),
+    (b"a\\\\input b", True), (b"\\\\\\\\include b", True), (b"a\\\\\\input{x}", True),
+    (b"\\verb\\x\\\\input{t1}", True),
     (b"\\inputx", False), (b"\\input@path", True),
+    ("\\input\u00e9{x}".encode(), False), ("\\input\u00e9{x}".encode("cp1252"), False),
+    ("\\include\u03b1 x".encode(), False), ("\\input\u00b2{x}".encode(), True),
+    ("\\inputx \\input{y}".encode(), True),
 ])
-def test_a_command_is_a_backslash_not_after_another(data, refused) -> None:
-    """`\\\\` is a line break, so the word after it is text, not a command."""
+def test_a_command_s_name_ends_where_pylatexenc_ends_it(data, refused) -> None:
+    """A command's name runs on through every letter, `\\inputé` being another command. One after
+    a backslash counts too: `\\\\input` is a line break and a word, but after `\\verb\\x\\` the
+    command is live."""
     assert (convert.latex_include(data) is not None) is refused
+
+
+@pytest.mark.parametrize("command", ["\\input\u00e9", "\\include\u03b1"])
+def test_a_source_defining_a_command_that_starts_as_an_include_is_converted(monkeypatch, fast,
+                                                                           tmp_path,
+                                                                           command) -> None:
+    src = _latex(tmp_path / "p", f"\\newcommand{{{command}}}{{Culvert}}{command} words.")
+    _fake(monkeypatch, ECHO)
+    rc, err = _run_cli(["ingest", str(src), "--out", str(tmp_path / "out")])
+    assert rc == 0, err
+
+
+def test_a_latex_source_over_the_bound_is_refused_unread(monkeypatch, fast, tmp_path) -> None:
+    src = _latex(tmp_path / "p", "Words.")
+    size = src.stat().st_size
+    monkeypatch.setattr(convert, "LATEX_MAX_BYTES", size - 1)
+    monkeypatch.setattr(Path, "read_bytes", lambda self: pytest.fail(f"{self} was read"))
+    with pytest.raises(convert.ConversionRefused,
+                       match=f"is {size:,} bytes, over the {size - 1:,} bytes"):
+        convert.refuse_includes(src)
 
 
 def test_a_latex_source_with_only_figures_is_converted(monkeypatch, fast, tmp_path) -> None:
@@ -744,7 +900,11 @@ _FORMS = {
     "iffalse": ("\\iffalse \\input{t1} \\fi", True),
     "line-break-then-command": ("a\\\\\\input{t1}", True),
     "includeonly": ("\\includeonly{t1}", False),
-    "line-break-then-word": ("a\\\\input{t1}", False),
+    "line-break-then-word": ("a\\\\input{t1}", True),
+    "verb-backslash-delimiter": ("\\verb\\x\\\\input{t1}", True),
+    "letter-after-input": ("\\input\u00e9{t1}", False),
+    "greek-letter-after-include": ("\\include\u03b1{t1}", False),
+    "superscript-after-input": ("\\input\u00b2{t1}", True),
     "figure": ("\\includegraphics{t1}", False),
     "inputencoding": ("\\inputencoding{utf8}", False),
     "csname": ("\\csname input\\endcsname{t1}", False),
@@ -770,11 +930,10 @@ def _form(folder: Path, case: str, line: str) -> Path:
     return src
 
 
+@pytest.mark.skipif(not DOCLING, reason="runs docling's reader: needs SUBSTRATE_DOCLING_TESTS=1")
 def test_every_include_docling_s_latex_reader_follows_is_refused(tmp_path) -> None:
     """Runs docling's reader over every form on the locked docling, so an upgrade that teaches the
     reader a new form fails here before it is released."""
-    if not DOCLING:
-        return
     sources = {case: _form(tmp_path / case, case, line) for case, (line, _) in _FORMS.items()}
     run = subprocess.run([sys.executable, "-B", "-E", "-s", "-P", "-c", _DOCLING_READ, str(ROOT),
                           json.dumps({c: str(p) for c, p in sources.items()})],
@@ -794,12 +953,11 @@ def test_every_include_docling_s_latex_reader_follows_is_refused(tmp_path) -> No
     assert {"input", "newline", "crlf", "nested", "bare"} <= {c for c, f in followed.items() if f}
 
 
+@pytest.mark.skipif(not DOCLING, reason="runs docling's reader: needs SUBSTRATE_DOCLING_TESTS=1")
 def test_docling_converting_the_copy_opens_nothing_beside_the_source(monkeypatch, tmp_path) -> None:
     """The real worker's reader, run on what the engine hands it: a figure beside the source,
     which docling opens when it is handed the source's own path, is never opened, named by its
     relative path or its absolute one."""
-    if not DOCLING:
-        return
     folder = tmp_path / "paper"
     figures = f"\\includegraphics{{figure.png}}\\includegraphics{{{folder / 'figure.png'}}}"
     src = _latex(folder, figures, {"figure.png": "x", "refs.bib": "x"})

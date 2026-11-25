@@ -187,17 +187,21 @@ def _cli_converted(args, src: Path, spec):
 
 @pytest.mark.parametrize("spec", [s for s in convert.ACCEPTED if s.arm == "docling"],
                          ids=lambda s: s.token)
-def test_formats_and_ingest_agree_here(tmp_path, spec) -> None:
+def test_formats_and_ingest_agree_here(monkeypatch, tmp_path, spec) -> None:
     """In this install, as each CI job has it: a format `formats` lists is not refused by ingest for
     a missing extra, and one it refuses is refused by ingest naming the same extra, or none where
-    the row names none."""
+    the row names none. The ingest must reach the converter, or the agreement is of nothing."""
     accepted, refused = _parse(_printed())
     src = tmp_path / f"fixture{spec.extensions[0]}"
     src.write_bytes(b"placeholder")
+    reached, real = [], convert.to_markdown
+    monkeypatch.setattr(convert, "to_markdown", lambda *a, **kw: (reached.append(a[1]),
+                                                                  real(*a, **kw))[1])
     out = io.StringIO()
     args = argparse.Namespace(out=str(tmp_path / "ingest"), doc_class=None)
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(out):
         rc = _cli_converted(args, src, spec)
+    assert reached == [spec], (spec.token, rc, out.getvalue())
     said = _refused_for(rc, out.getvalue())
     if spec.token in accepted:
         assert said is None, (spec.token, rc, out.getvalue())
