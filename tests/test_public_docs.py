@@ -20,9 +20,6 @@ HOME = re.compile(
     r"/Users/|/home/\w|/var/folders/|[A-Za-z]:\\Users\\|\$\{?HOME\}?/"
     r"|~/(?!\.substrate(?![\w.-])|\.cache/)[\w.-]"
 )
-# Agent guidance that still describes the maintainer's machine. Rewriting it is its own change.
-EXEMPT = {"CLAUDE.md"}
-
 
 NAMED = ("README.md", "SECURITY.md", "RELEASING.md", "docs/history/README.md",
          ".github/pull_request_template.md")
@@ -47,7 +44,7 @@ def _tracked() -> set[str] | None:
 
 
 def _documents() -> list[Path]:
-    found = [p for p in sorted(ROOT.glob("*.md")) if p.name not in EXEMPT]
+    found = sorted(ROOT.glob("*.md"))
     # `docs/history/`'s dated records keep their original text and are not scanned; its index is.
     found += [p for p in sorted((ROOT / "docs").rglob("*.md"))
               if p.relative_to(ROOT / "docs").parts[0] != "history"]
