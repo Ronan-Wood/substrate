@@ -192,8 +192,10 @@ names. A note that writes one of them another way (`Class:`, `"class":`, `Status
 naming the key and the spelling to use. So is a note that declares no status or no doc_type but
 opens with frontmatter the engine can't read. **`Status: archived` is never indexed as live**, and
 **`Class: conversation` is never indexed as unclassified.** A vault that uses `Status` or `Class`
-as a property of its own has those notes refused; engine issue #53 decides how such a vault is
-served.
+as a property of its own declares `[engine_keys]` in its manifest, so the engine reads the field
+from another property and leaves the vault's own alone, and a withheld value left under the old
+name (`archived`, `conversation`) still quarantines the note
+([`configuration.md`](configuration.md#a-vault-that-already-uses-status-or-class)).
 
 **What this guard is for: mistakes, not disguise.** It catches the mistakes people and editors
 make: letter case, `-` for `_`, a quoted key, a byte-order mark, an invisible character, smart
