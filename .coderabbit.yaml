@@ -172,7 +172,7 @@ code_generation:
   unit_tests:
     path_instructions:
       - path: "substrate/**/*.py"
-        instructions: "Write pytest tests with plain `assert`, reusing the fixtures in tests/conftest.py. The test must fail on the code before the change (CONTRIBUTING.md, rule 2). No network, no real notes: synthetic data or `tmp_path`."
+        instructions: "Write pytest tests with plain `assert`, reusing the fixtures in tests/conftest.py. A test for a bug fix must fail on the code before the fix (CONTRIBUTING.md, rule 2); a test of behaviour that already works need not. No network, no real notes: synthetic data or `tmp_path`."
 
 # It answers a reply under its comments without being addressed, as well as when it is; replies are
 # how it learns. No chat art.
