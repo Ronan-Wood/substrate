@@ -12,8 +12,8 @@ Exit codes, and the split is the point: **2 is an INPUT problem** (no such file,
 engine will not attempt, bytes it cannot decode) and **3 is a GATE** (the class policy, the spine
 contract, A18 coverage, or a conversion whose faithfulness could not be established). A 2 says
 "give me a different file"; a 3 says "this file is not safe to index and here is what is wrong
-with it". A quarantined file and one that changed during its ingest are 3s. An ingest stopped by
-Ctrl-C, SIGTERM or SIGHUP while it converts exits 128 plus the signal.
+with it". A quarantined file is a 3, and so is a LaTeX source that includes another file. An
+ingest stopped by Ctrl-C, SIGTERM or SIGHUP while it converts exits 128 plus the signal.
 """
 
 from __future__ import annotations
@@ -46,8 +46,11 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     )
 
 
-def _store_original(doc) -> None:
+def _store_original(doc, copy: Path | None = None) -> None:
     """Keep the original `doc` was read from in the blob store. Raises blobs.BlobError.
+
+    `copy` is the ingest's private copy of it (`extract.snapshot`): the bytes that were read,
+    whatever the file at `source_path` holds by now.
 
     Stored only when the file at `source_path` IS the original the note declares — its own checksum
     equals `source_sha256`. A markdown file that declares a different source (the engine's own
@@ -59,9 +62,10 @@ def _store_original(doc) -> None:
               f"({doc.source_sha256[:12]}…) rather than being it")
         return
     try:
-        r = blobs.put(Path(doc.source_path), expected=doc.source_sha256)
+        r = blobs.put(copy or Path(doc.source_path), expected=doc.source_sha256)
     except OSError as e:
-        raise blobs.BlobError(f"{e.filename or doc.source_path}: {e.strerror or e}.") from e
+        named = doc.source_path if e.filename in (None, str(copy)) else e.filename
+        raise blobs.BlobError(f"{named}: {e.strerror or e}.") from e
     if r.outcome == "discarded":
         print(f"original  : not stored — {r.checksum[:12]}… was forgotten "
               "(`substrate blobs forget`), and stays forgotten")
@@ -137,12 +141,12 @@ def cmd_ingest(args: argparse.Namespace) -> int:
                   f"and relaxing that is a separate decision. Choose one of "
                   f"{sorted(classes.DECLARABLE_CLASSES)}.", file=sys.stderr)
             return 2
-        if models is None:
-            return _ingest_pdf(args, src, models)
-        return _converting(lambda: _ingest_pdf(args, src, models))
+        return _converting(lambda: _from_snapshot(
+            src, lambda snap: _ingest_pdf(args, src, models, snap)))
     if spec.arm in ("markdown", "text"):
         return _ingest_markdown_file(args, src, spec)
-    return _converting(lambda: _ingest_converted(args, src, spec, models))
+    return _converting(lambda: _from_snapshot(
+        src, lambda snap: _ingest_converted(args, src, spec, models, snap)))
 
 
 def _converting(run) -> int:
@@ -165,7 +169,34 @@ def _converting(run) -> int:
         return 2
 
 
-def _ingest_pdf(args: argparse.Namespace, pdf: Path, models: Path | None) -> int:
+def _from_snapshot(src: Path, run) -> int:
+    """`run(snapshot)` on the ingest's one read of `src` (`extract.snapshot`), which every reader,
+    the probes and the blob store take."""
+    from substrate.extract import snapshot
+    from substrate.extract.convert import printable
+
+    try:
+        with snapshot.snapshot(src) as snap:
+            return run(snap)
+    except snapshot.SourceUnreadable as e:
+        print(f"\nFATAL (read): {printable(str(e))}", file=sys.stderr)
+        return 2
+    except snapshot.CopyFailed as e:
+        print(f"\nFATAL (engine): {printable(str(e))}", file=sys.stderr)
+        return 2
+
+
+def _moved_on(snap) -> None:
+    from substrate.extract.convert import printable
+
+    if snap.moved_on():
+        print(f"WARNING (source): {printable(snap.source.name)} changed while it was read; this "
+              "note is of the bytes read when the ingest began. Ingest it again once nothing is "
+              "writing to it.",
+              file=sys.stderr)
+
+
+def _ingest_pdf(args: argparse.Namespace, pdf: Path, models: Path | None, snap) -> int:
     from substrate.chunk.chunker import chunk
     from substrate.extract import convert
     from substrate.extract.pdftext_arm import PdfReadError, TextLayerExtractor
@@ -192,7 +223,9 @@ def _ingest_pdf(args: argparse.Namespace, pdf: Path, models: Path | None) -> int
     print(f"ingesting : {pdf.name}  class={args.doc_class}")
 
     try:
-        doc = extractor.extract(pdf, args.doc_class, pages=pages)
+        doc = extractor.extract(snap.path, args.doc_class, pages=pages)
+        doc.source_path = str(pdf)
+        _moved_on(snap)
     except PdfReadError as e:
         print(f"\nFATAL (read): {e}", file=sys.stderr)
         return 2
@@ -201,9 +234,6 @@ def _ingest_pdf(args: argparse.Namespace, pdf: Path, models: Path | None) -> int
         return 3
     except convert.Quarantined as e:
         print(f"\nFATAL (quarantined): {e}", file=sys.stderr)
-        return 3
-    except convert.FileChanged as e:
-        print(f"\nFATAL (changed): {e}", file=sys.stderr)
         return 3
     except convert.ConverterUnsupported as e:
         print(f"\nFATAL (converter): {e}", file=sys.stderr)
@@ -229,7 +259,7 @@ def _ingest_pdf(args: argparse.Namespace, pdf: Path, models: Path | None) -> int
     chunks, cstats = chunk(doc)
 
     try:
-        _store_original(doc)
+        _store_original(doc, copy=snap.path)
     except blobs.BlobError as e:
         return _store_failed(e)
 
@@ -356,7 +386,7 @@ def _ingest_markdown_file(args: argparse.Namespace, src: Path, spec) -> int:
     return 0
 
 
-def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | None) -> int:
+def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | None, snap) -> int:
     """A non-PDF, non-markdown document → Docling markdown → the SAME gate-enforcing ingest body.
 
     The markdown is a temporary derivative and is thrown away: `document.md` in the output dir is
@@ -373,16 +403,15 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
 
     out = Path(args.out).expanduser()
     try:
-        conv = convert.to_markdown(src, spec, models=models, quarantine=blobs.root,
-                                   retry_quarantined=getattr(args, "retry_quarantined", False))
+        conv = convert.to_markdown(snap.path, spec, models=models, quarantine=blobs.root,
+                                   retry_quarantined=getattr(args, "retry_quarantined", False),
+                                   checksum=snap.checksum)
+        _moved_on(snap)
     except convert.ConversionRefused as e:
         print(f"\nFATAL (conversion): {e}", file=sys.stderr)
         return 3
     except convert.Quarantined as e:
         print(f"\nFATAL (quarantined): {e}", file=sys.stderr)
-        return 3
-    except convert.FileChanged as e:
-        print(f"\nFATAL (changed): {e}", file=sys.stderr)
         return 3
     except AppleReaderUnavailable as e:
         # Said as `formats` says it, naming another reader only where one would work.
@@ -431,7 +460,7 @@ def _ingest_converted(args: argparse.Namespace, src: Path, spec, models: Path | 
         try:
             r = ingest_markdown(
                 tmp, out, doc_class=args.doc_class, require_status=False, origin=origin,
-                before_write=_store_original,
+                before_write=lambda doc: _store_original(doc, copy=snap.path),
             )
         except blobs.BlobError as e:
             return _store_failed(e)

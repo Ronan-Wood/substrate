@@ -11,8 +11,9 @@ This is not compose's quarantine (`substrate.quarantine`), which leaves a note o
 withholds one file from one ingest, loudly, and names the way out.
 
 `quarantine_decision` is the rule, as a pure function with no I/O, so a model can drive it
-unchanged. Its Lean model and differential harness are `experiments/lean-convert-quarantine/`
-(VERIFIED.md).
+unchanged. It still decides a `changed` outcome, which the driver no longer produces: the worker
+reads the ingest's private copy (`snapshot`), which cannot change. Its Lean model and differential
+harness are `experiments/lean-convert-quarantine/` (VERIFIED.md).
 
 The RECORD is `<blob store>/convert/quarantine/<source_sha256>.json`: the checksum, the format,
 whether a models folder was named, the docling version, the faults and when. Nothing from the

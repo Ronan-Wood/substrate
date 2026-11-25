@@ -94,9 +94,9 @@ Every release of the engine, newest first. The format follows
   one per converted file and kills its process group when it hangs, crashes or answers something
   the engine cannot trust; a second fault quarantines the file, which `ingest` then refuses with
   exit 3 until `--retry-quarantined` or a new docling. `substrate blobs status` lists the
-  quarantined files. The coverage gate still runs in the engine. A file that changes during its
-  ingest is refused with exit 3, and Ctrl-C, SIGTERM or SIGHUP stops the worker and exits 128 plus
-  the signal. The worker is not a sandbox: [`SECURITY.md`](SECURITY.md) says what it is.
+  quarantined files. The coverage gate still runs in the engine. Ctrl-C, SIGTERM or SIGHUP stops
+  the worker and exits 128 plus the signal. The worker is not a sandbox:
+  [`SECURITY.md`](SECURITY.md) says what it is.
 - **The rule that decides when a converted file is retried, quarantined or blocked is proved in
   Lean** and checked against the code ([`VERIFIED.md`](VERIFIED.md)). Writing the model found
   that the rule decided two kinds of attempt it never asks for: one after the second fault, and one
@@ -275,6 +275,17 @@ Every release of the engine, newest first. The format follows
 
 ### Fixed
 
+- **An ingest reads a PDF or a converted document once,** into a private copy that the readers,
+  the conversion worker, the coverage probes and the blob store all take, so the checksum, the text
+  and the stored original are of the same bytes. Before, the file was read by name at each step,
+  so they could be of different bytes. A FIFO in the file's place is refused without being read.
+  A file whose size or modification time moves while it is copied is refused (exit 2); one changed
+  after is converted as it was read, with a warning.
+- **A LaTeX source that `\input`s or `\include`s another file is refused** (exit 3), naming the
+  command and its line. Docling read included files from beside the source, outside the note's
+  checksum, and dropped a missing one without a word; the private copy holds the source alone, so
+  it would drop them all. Flatten the document into one file to ingest it. A command in a comment
+  counts too. Figures are not read, and `\includegraphics` is not refused.
 - `ingest` refuses a folder that is a symlink, wherever it points. It used to follow the link and
   check only that the result was inside the vault, so a writable folder linked to a skipped or
   hidden folder of the same vault took a note compose would never index. It now walks the folder

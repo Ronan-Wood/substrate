@@ -37,6 +37,17 @@ sandbox. The worker runs as you, with your files in reach, so a document that ge
 inside docling runs it with your privileges. That belongs upstream with docling; what
 substrate does with the worker's answers is in scope here.
 
+An ingest reads a PDF or a converted document once, into a private copy (0400 in a 0700 folder),
+and the readers, the worker, the coverage probes and the blob store all take that copy. So the
+checksum a note records, its text and the original stored under that checksum are of the same
+bytes, whatever happens to the file meanwhile. A FIFO or a device in the file's place is refused
+without being read. The copy lives in the system temporary folder and is removed when the ingest
+ends, by a SIGTERM or SIGHUP too; one left by an ingest killed outright stays until the next ingest
+removes it. Once the path is resolved, no link in it is followed on macOS, and on Linux the
+opened file must be the one at that path where `/proc` says so. A file whose size or modification
+time moves while it is copied is refused. A LaTeX source that includes another file is refused,
+so nothing beside a source is read; figures are not read either.
+
 ## Supported versions
 
 The latest release. Fixes go into the next release rather than to older versions.

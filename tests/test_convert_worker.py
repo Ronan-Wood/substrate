@@ -25,6 +25,7 @@ import pytest
 from substrate import cli
 from substrate.extract import conversion_quarantine as q
 from substrate.extract import convert, convert_frames as frames, docling_arm, worker_client
+from substrate.extract.base import sha256_file
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -128,7 +129,8 @@ def _source(tmp_path: Path) -> Path:
 
 
 def _convert(src: Path, **kw) -> convert.Conversion:
-    return convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None, **kw)
+    return convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None,
+                               checksum=sha256_file(src), **kw)
 
 
 # ---------------------------------------------------------------- frames
@@ -483,8 +485,9 @@ def test_a_worker_that_will_not_exit_after_its_answer_is_a_fault(monkeypatch, fa
 def test_a_fault_is_retried_once_in_a_new_worker(monkeypatch, fast, tmp_path) -> None:
     spawned = _fake(monkeypatch, "hello(); request(); sys.exit(1)", OK)
     said: list[str] = []
-    conv = convert.to_markdown(_source(tmp_path), convert.spec_for(_source(tmp_path)),
-                               log=said.append, quarantine=lambda: tmp_path / "store")
+    src = _source(tmp_path)
+    conv = convert.to_markdown(src, convert.spec_for(src), log=said.append,
+                               quarantine=lambda: tmp_path / "store", checksum=sha256_file(src))
     assert "harbour" in conv.markdown and len(spawned) == 2
     assert any("WARNING (converter)" in s and "exited with status 1" in s and "once more" in s
                for s in said), said
@@ -570,18 +573,6 @@ def test_without_a_store_the_file_still_refuses_after_two_faults(monkeypatch, fa
 
 
 # ---------------------------------------------------------------- the bytes that were hashed
-
-def test_a_file_rewritten_during_its_conversion_is_refused_and_not_quarantined(monkeypatch, fast,
-                                                                               tmp_path) -> None:
-    spawned = _fake(monkeypatch, """
-        hello(); r = request()
-        with open(r["path"], "a") as f:
-            f.write("tide\\n")
-        converted(r); bye()
-    """)
-    with pytest.raises(convert.FileChanged, match="while it was being ingested"):
-        _convert(_source(tmp_path), quarantine=lambda: tmp_path / "store")
-    assert len(spawned) == 1 and q.listing(tmp_path / "store") == []
 
 
 def test_ingest_records_the_checksum_of_the_bytes_it_converted(monkeypatch, fast, tmp_path) -> None:
@@ -898,44 +889,6 @@ def test_a_worker_that_fails_before_hello_is_the_engine_s_problem_not_the_file_s
         assert len(spawned) == 1 and q.listing(tmp_path / "store") == []
 
 
-def test_a_file_changed_while_the_worker_failed_on_it_is_not_quarantined(monkeypatch, fast,
-                                                                        tmp_path) -> None:
-    spawned = _fake(monkeypatch, """
-        hello(); r = request()
-        with open(r["path"], "a") as f:
-            f.write("tide\\n")
-        sys.exit(1)
-    """)
-    with pytest.raises(convert.FileChanged):
-        _convert(_source(tmp_path), quarantine=lambda: tmp_path / "store")
-    assert len(spawned) == 1 and q.listing(tmp_path / "store") == []
-
-
-def test_a_rewrite_that_keeps_the_size_and_the_mtime_is_still_seen(monkeypatch, fast,
-                                                                   tmp_path) -> None:
-    _fake(monkeypatch, """
-        hello(); r = request()
-        st = os.stat(r["path"])
-        data = open(r["path"], "rb").read()
-        open(r["path"], "r+b").write(data.upper())
-        os.utime(r["path"], ns=(st.st_atime_ns, st.st_mtime_ns))
-        converted(r); bye()
-    """)
-    with pytest.raises(convert.FileChanged):
-        _convert(_source(tmp_path), quarantine=lambda: tmp_path / "store")
-
-
-def test_the_unchanged_check_hashes_the_file_again(tmp_path) -> None:
-    src = _source(tmp_path)
-    from substrate.extract.base import sha256_file
-
-    checksum = sha256_file(src)
-    assert convert.unchanged(src, checksum)
-    assert not convert.unchanged(src, "0" * 64)
-    src.unlink()
-    assert not convert.unchanged(src, checksum)
-
-
 def test_a_worker_given_its_full_grace_to_exit_keeps_its_answer(monkeypatch, fast, tmp_path) -> None:
     monkeypatch.setattr(worker_client, "KILL_GRACE_SECONDS", 4)
     _fake(monkeypatch, "hello(); converted(request()); request(); os.close(1); time.sleep(1.5)")
@@ -1213,10 +1166,19 @@ def test_the_stop_handlers_cover_the_conversion_and_not_the_writes(monkeypatch, 
         return real(*a, **kw)
 
     monkeypatch.setattr(ingest, "ingest_markdown", recording)
+    converting = []
+    start = worker_client.Worker.start
+    monkeypatch.setattr(worker_client.Worker, "start", lambda self: (
+        converting.append(signal.getsignal(signal.SIGTERM)), start(self))[1])
     _fake(monkeypatch, OK)
     before = signal.getsignal(signal.SIGTERM)
     _run_cli(["ingest", str(_source(tmp_path)), "--out", str(tmp_path / "out")])
-    assert seen == [before], seen
+    # During the writes the snapshot's handler holds, which removes the ingest's private copy and
+    # ends the process as the default does; it never raises into a half-done write
+    # (`test_ingest_snapshot` stops one there). The conversion's own handler is gone by then.
+    (during,) = seen
+    assert callable(during) and during not in (before, *converting), (during, converting)
+    assert converting and signal.getsignal(signal.SIGTERM) == before
 
 
 def test_an_engine_valueerror_in_the_pdf_path_is_not_a_converter_refusal(monkeypatch,
@@ -1390,7 +1352,7 @@ def test_a_request_the_engine_cannot_frame_is_a_refusal_not_a_fault(monkeypatch,
                               2, ("converted",))
 
     with pytest.raises(convert.ConversionRefused, match="cannot be named to the converter"):
-        convert.through_worker(src, spec, real=src, checksum=sha256_file(src), models=None,
+        convert.through_worker(src, spec, checksum=sha256_file(src), models=None,
                                budget=2, work=work,
                                accept=lambda reply, docling: reply,
                                quarantine=lambda: tmp_path / "store", retry_quarantined=False,
@@ -1460,31 +1422,6 @@ def test_an_ignored_stop_stays_ignored_inside_the_handlers(monkeypatch) -> None:
         signal.signal(signal.SIGHUP, previous)
 
 
-def _xattr(path: str) -> str:
-    """Script lines that set an extended attribute, as a Finder tag or a sync client does."""
-    return (f"os.setxattr({path}, 'user.substrate-test', b'1')" if hasattr(os, "setxattr") else
-            f"import subprocess; subprocess.run(['/usr/bin/xattr', '-w', 'com.substrate.test', "
-            f"'1', {path}], check=True)")
-
-
-METADATA_ONLY = {
-    "chmod": "os.chmod(r['path'], 0o600)",
-    "xattr": _xattr("r['path']"),
-    "touch": "st = os.stat(r['path']); os.utime(r['path'], ns=(st.st_atime_ns, "
-             "st.st_mtime_ns + 10**9))",
-}
-
-
-@pytest.mark.parametrize("change", sorted(METADATA_ONLY))
-def test_a_change_to_the_file_s_metadata_alone_is_not_a_changed_file(monkeypatch, fast, tmp_path,
-                                                                     change) -> None:
-    """Only the bytes decide: the file's mode, an extended attribute or its times changing while
-    it converts leave its bytes, and its conversion, what they were."""
-    _fake(monkeypatch, f"hello(); r = request(); {METADATA_ONLY[change]}; converted(r); bye()")
-    conv = _convert(_source(tmp_path), quarantine=lambda: tmp_path / "store")
-    assert "harbour" in conv.markdown and q.listing(tmp_path / "store") == []
-
-
 def _models(tmp_path: Path) -> Path:
     from substrate import paths
 
@@ -1519,73 +1456,6 @@ def _pdf_worker(after_first: str = "", missing: str = "", before_bye: str = "") 
             if n == 2:
                 {before_bye or "pass"}
     """
-
-
-@pytest.mark.parametrize(("when", "how"), [
-    ("before a later batch", "os.remove"),
-    ("before a later batch", "move"),
-    ("before assemble", "os.remove"),
-    ("before assemble", "move"),
-])
-def test_a_models_pdf_removed_or_moved_mid_ingest_is_the_changed_file_refusal(monkeypatch, fast,
-                                                                               tmp_path, when,
-                                                                               how) -> None:
-    monkeypatch.setattr(convert, "installed_extras", lambda: frozenset({"convert", "convert-ml"}))
-    monkeypatch.setattr(worker_client, "pdf_batch_deadline", lambda pages: 2)
-    gone = ("os.remove(r['path'])" if how == "os.remove" else
-            "os.rename(r['path'], r['path'] + '.moved')")
-    spawned = _fake(monkeypatch, _pdf_worker(**{
-        "after_first" if when == "before a later batch" else "before_bye": gone}))
-    pdf = _pdf(tmp_path / "survey.pdf", 2)
-    rc, err = _run_cli(["ingest", str(pdf), "--doc-class", "reference-frozen", "--docling-models",
-                        str(_models(tmp_path)), "--batch", "1", "--out", str(tmp_path / "out")])
-    assert rc == 3 and "FATAL (changed)" in err and "Traceback" not in err, (rc, err)
-    from substrate import blobs
-
-    assert len(spawned) == 1 and q.listing(blobs.root()) == []
-
-
-def test_a_models_pdf_whose_metadata_changes_mid_ingest_is_accepted(monkeypatch, fast,
-                                                                    tmp_path) -> None:
-    """`assemble` hashes the file again, and that hash is the whole check, as for any format."""
-    monkeypatch.setattr(convert, "installed_extras", lambda: frozenset({"convert", "convert-ml"}))
-    monkeypatch.setattr(worker_client, "pdf_batch_deadline", lambda pages: 2)
-    _fake(monkeypatch, _pdf_worker(after_first="os.chmod(r['path'], 0o600); " + _xattr("r['path']")))
-    doc = docling_arm.DoclingExtractor(_models(tmp_path), batch_pages=1).extract(
-        _pdf(tmp_path / "survey.pdf", 2), "reference-frozen", log=lambda *_: None)
-    assert [b.text for b in doc.blocks] == ["The meadow drains toward the harbour."] * 2
-
-
-@pytest.mark.parametrize("answer", ["converted(r)", "send({'v': 1, 'type': 'refused', "
-                                                    "'id': r['id'], 'reason': 'no such file'})"])
-@pytest.mark.parametrize("name", ["review.adoc", "table.csv"])
-def test_a_document_removed_during_its_conversion_is_the_changed_file_refusal(monkeypatch, fast,
-                                                                               tmp_path, answer,
-                                                                               name) -> None:
-    """Whether the converter answers from what it read first or refuses the missing file."""
-    src = tmp_path / name
-    src.write_text("harbour meadow culvert\n", "utf-8")
-    spawned = _fake(monkeypatch, f"hello(); r = request(); os.remove(r['path']); {answer}; bye()")
-    with pytest.raises(convert.FileChanged, match="while it was being ingested"):
-        _convert(src, quarantine=lambda: tmp_path / "store")
-    assert len(spawned) == 1 and q.listing(tmp_path / "store") == []
-
-
-def test_an_image_removed_while_apple_s_reader_reads_it_is_the_changed_file_refusal(monkeypatch,
-                                                                                  tmp_path) -> None:
-    from substrate.extract import apple_arm
-
-    src = tmp_path / "scan.png"
-    src.write_bytes(b"not really an image")
-
-    def read(path):
-        Path(path).unlink()
-        raise apple_arm.AppleReaderError("the file could not be opened")
-
-    monkeypatch.setattr(apple_arm, "read", read)
-    _no_spawn(monkeypatch)
-    with pytest.raises(convert.FileChanged, match="while it was being ingested"):
-        _convert(src)
 
 
 def _slow_docling(tmp_path: Path, seconds: float) -> Path:
@@ -1771,51 +1641,6 @@ def test_a_start_that_fails_after_the_spawn_kills_the_group_and_closes_everythin
 
 # ---------------------------------------------------------------- what the confirming round found
 
-def test_a_symlinked_pdf_pointed_at_a_copy_of_its_old_bytes_mid_ingest_is_changed(monkeypatch, fast,
-                                                                                  tmp_path) -> None:
-    """The worker read the link's target; `assemble` hashes the link. Rewriting the target while
-    the link moves to a copy of its old bytes must not pass as the bytes that were converted."""
-    monkeypatch.setattr(convert, "installed_extras", lambda: frozenset({"convert", "convert-ml"}))
-    monkeypatch.setattr(worker_client, "pdf_batch_deadline", lambda pages: 2)
-    target = _pdf(tmp_path / "survey-target.pdf", 2)
-    link = tmp_path / "survey.pdf"
-    link.symlink_to(target)
-    copy = tmp_path / "survey-copy.pdf"
-    swap = (f"import shutil; shutil.copyfile({str(target)!r}, {str(copy)!r}); "
-            f"open({str(target)!r}, 'ab').write(b'%changed'); os.remove({str(link)!r}); "
-            f"os.symlink({str(copy)!r}, {str(link)!r})")
-    _fake(monkeypatch, _pdf_worker(after_first=swap))
-    with pytest.raises(convert.FileChanged):
-        docling_arm.DoclingExtractor(_models(tmp_path), batch_pages=1).extract(
-            link, "reference-frozen", log=lambda *_: None)
-
-
-@pytest.mark.parametrize("answer", ["converted(r)", "send({'v': 1, 'type': 'refused', "
-                                                    "'id': r['id'], 'reason': 'not a file'})"])
-def test_a_file_replaced_by_a_fifo_is_changed_without_blocking_on_it(monkeypatch, fast, tmp_path,
-                                                                     answer) -> None:
-    src = _source(tmp_path)
-    _fake(monkeypatch, f"hello(); r = request(); os.remove(r['path']); os.mkfifo(r['path']); "
-                       f"{answer}; bye()")
-    outcome: list[BaseException] = []
-
-    def run():
-        try:
-            _convert(src, quarantine=lambda: tmp_path / "store")
-        except BaseException as e:  # noqa: BLE001
-            outcome.append(e)
-
-    t = threading.Thread(target=run, daemon=True)
-    t.start()
-    t.join(20)
-    if t.is_alive():
-        # Release the read the engine is stuck in, so the test can end.
-        fd = os.open(src, os.O_WRONLY | os.O_NONBLOCK)
-        os.close(fd)
-        t.join(5)
-        raise AssertionError("the engine blocked opening the FIFO")
-    assert len(outcome) == 1 and isinstance(outcome[0], convert.FileChanged), outcome
-
 
 def test_a_worker_started_by_an_engine_ignoring_sigterm_still_dies_of_it() -> None:
     """The engine keeps an inherited SIG_IGN, and a spawn passes it on; the worker must not, or
@@ -1836,19 +1661,6 @@ def test_a_worker_started_by_an_engine_ignoring_sigterm_still_dies_of_it() -> No
         assert ended.si_status == signal.SIGTERM
     finally:
         w.close(gently=False)
-
-
-def test_a_symlinked_pdf_whose_link_alone_is_removed_mid_ingest_is_changed(monkeypatch, fast,
-                                                                          tmp_path) -> None:
-    monkeypatch.setattr(convert, "installed_extras", lambda: frozenset({"convert", "convert-ml"}))
-    monkeypatch.setattr(worker_client, "pdf_batch_deadline", lambda pages: 2)
-    target = _pdf(tmp_path / "survey-target.pdf", 2)
-    link = tmp_path / "survey.pdf"
-    link.symlink_to(target)
-    _fake(monkeypatch, _pdf_worker(before_bye=f"os.remove({str(link)!r})"))
-    with pytest.raises(convert.FileChanged):
-        docling_arm.DoclingExtractor(_models(tmp_path), batch_pages=1).extract(
-            link, "reference-frozen", log=lambda *_: None)
 
 
 def test_a_converter_that_would_not_preload_is_a_missing_extra_not_a_second_import(tmp_path) -> None:
