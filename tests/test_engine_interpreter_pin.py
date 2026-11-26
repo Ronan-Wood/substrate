@@ -38,6 +38,18 @@ def _tool():
     return module
 
 
+@pytest.fixture(autouse=True)
+def _umask():
+    """What these tests create, the synthetic store, the stand-in tools and what a test plants in a
+    tree, gets the modes it would have under `umask 022`, whatever the caller's umask; a copy keeps
+    its source's. The pin tool and the build refuse a tree others can write, so under `umask 0002`
+    the fixtures were refused before a test reached what it tests. A test that wants a loose mode
+    sets it itself, with `chmod`."""
+    previous = os.umask(0o022)
+    yield
+    os.umask(previous)
+
+
 def _sysconfig(root: object) -> str:
     # Every shape the real file spells a path in: followed by `/`, by a quote, by a space.
     return (f"build_time_vars = {{'INCLUDEPY': '{root}/include/python3.14', 'prefix': '{root}', "
@@ -1067,6 +1079,23 @@ def test_a_pin_folder_without_the_interpreter_names_the_install_command(tmp_path
     assert result.returncode != 0
     assert f"no uv-managed CPython 3.14 in {store.parent}." in result.stderr, result.stderr
     assert f"uv python install --no-bin --install-dir '{store.parent}' {STORE_NAME}" in result.stderr
+    assert "UV_PYTHON_INSTALL_DIR" not in result.stderr
+
+
+def test_a_store_the_caller_set_without_the_interpreter_says_to_unset_it(tmp_path: Path) -> None:
+    store, repo, dest = _setup(tmp_path)
+    empty = tmp_path / "empty-store"
+    empty.mkdir()
+    fakebin, asked = _asks(tmp_path, None)
+
+    result = _build(repo / "tools" / "build-bundled-engine", dest, fakebin, UV_PYTHON_INSTALL_DIR=str(empty))
+
+    assert result.returncode != 0
+    assert asked.read_text().startswith(f"{empty} python find "), result.stderr
+    assert (f"no uv-managed CPython 3.14 in {empty}, from UV_PYTHON_INSTALL_DIR. Unset the variable"
+            in result.stderr), result.stderr
+    # Installing into the pin's folder would change nothing while the variable still points elsewhere.
+    assert "uv python install" not in result.stderr
 
 
 # ------------------------------------------------------------------ where the steps sit

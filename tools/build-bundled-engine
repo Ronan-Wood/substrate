@@ -118,9 +118,13 @@ uv_in_store() { UV_PYTHON_INSTALL_DIR="$STORE" "$UV" "$@"; }
 # `runtime/` became a copy of it — ipykernel and all, a 2.0 GB engine whose interpreter is a symlink
 # into this Mac's uv store. No later check refused it.
 # `--no-python-downloads`: a build never installs an interpreter it would then check.
-PY_BIN=$(uv_in_store python find 3.14 --python-preference only-managed --no-project --system --no-python-downloads 2>/dev/null) \
-  || die "no uv-managed CPython 3.14 in $STORE. The pin describes an install in $PIN_STORE:
+# The install command only for the pin's own folder: after installing there, a build told to look in
+# the caller's folder would still look in the caller's.
+PY_BIN=$(uv_in_store python find 3.14 --python-preference only-managed --no-project --system --no-python-downloads 2>/dev/null) || {
+  [ "$STORE" = "$PIN_STORE" ] || die "no uv-managed CPython 3.14 in $STORE, from UV_PYTHON_INSTALL_DIR. Unset the variable: the interpreter pin holds only for an install in $PIN_STORE."
+  die "no uv-managed CPython 3.14 in $STORE. Install the pinned one:
   $INSTALL"
+}
 PY_ROOT=$(cd "$(dirname "$PY_BIN")/.." && pwd -P)
 [ -x "$PY_ROOT/bin/python3.14" ] || die "$PY_ROOT does not look like a standalone interpreter"
 # `pyvenv.cfg` is what makes a directory a venv (PEP 405), so it is the signal rather than a path
