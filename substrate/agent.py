@@ -55,9 +55,9 @@ CONFIG_FILENAME = "agent-publish.toml"
 LEDGER_FILENAME = "agent-published.json"
 LEDGER_VERSION = 1
 
-# Older than this and the snapshot says so on every answer. A day: the in-app refresh runs only
-# while Scripta is open (substrate/CLAUDE.md), so an older copy means nobody has refreshed, and the
-# agent's reader should know that rather than assume it.
+# Older than this and the snapshot says so on every answer. A day: each publish that succeeds after
+# a refresh re-verifies the snapshot (`refresh.record_and_publish`), so an older copy means none has
+# since, and the agent's reader should know that rather than assume it.
 DEFAULT_MAX_AGE_SECONDS = 24 * 3600
 
 # Readable by the folder's GROUP, never by every local user. Files created in a directory take its

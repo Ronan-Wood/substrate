@@ -438,8 +438,8 @@ def _compare(tree: Path, root: Path, pin: Path, *, recheck: bool) -> None:
     if pinned_prefix != root_s:
         raise Refused(
             f"the engine interpreter is {root_s}, but {pin.name} was made for {pinned_prefix}. "
-            "A Python update, or a uv store somewhere else, needs a new pin; "
-            "the engine's RELEASING.md says how"
+            "If UV_PYTHON_INSTALL_DIR is set, unset it. A Python update, or a uv store somewhere "
+            "else, needs a new pin; the engine's RELEASING.md says how"
         )
     relocated = _relocation(tree, root_s) if recheck else None
     actual = scan(tree, checking=True, relocated=relocated)
@@ -460,7 +460,8 @@ def _compare(tree: Path, root: Path, pin: Path, *, recheck: bool) -> None:
             f"{len(missing)} missing, {len(unexpected)} unexpected.{detail}\n"
             "If this is a deliberate Python update, re-pin as the engine's RELEASING.md describes. If it "
             "is not, the interpreter was modified after uv installed it: run "
-            "`uv python install --reinstall <version>` and build again."
+            f"`uv python install --reinstall --no-bin --install-dir '{os.path.dirname(root_s)}' "
+            f"{os.path.basename(root_s)}` and build again."
         )
 
 

@@ -108,10 +108,10 @@ OUTCOMES: dict[str, dict] = {
     # runs a PINNED export of one commit at `~/.substrate/engine`, and when that export cannot be
     # proven — never deployed, half-written, clobbered, or a file changed since — it refuses the
     # whole tick and will refuse every tick until a human runs `substrate-deploy`. Folding it into
-    # `skipped` would send that human to check the embedding daemon while all six scopes aged.
+    # `skipped` would send that human to check the embedding daemon while every scope aged.
     #
     # The refusal is the point. Before it, the agent exec'd the working TREE every 900 seconds,
-    # and on 2026-08-03 an uncommitted schema bump reached all six live scopes inside one tick.
+    # and an uncommitted schema bump once reached every live scope inside one tick.
     # `schema_mismatch` catches the one shape that made itself visible by refusing to be read; this
     # catches the general case, where the engine that would run is simply not the engine anyone
     # decided to run — a re-chunk, a changed `document_class` rule, a half-saved ingest module.
@@ -128,8 +128,8 @@ OUTCOMES: dict[str, dict] = {
     # construction. It is a DISTINCT outcome rather than a compose failure because no compose was
     # attempted — the agent refused to start one. That refusal is the point: recomposing across a
     # schema bump is a MIGRATION, `122a45d` made migration opt-in on every read path, and a job
-    # running every 900 seconds is not an opt-in. On 2026-08-03 the absence of this outcome let a
-    # scheduler migrate six live scopes off an uncommitted bump in the working tree.
+    # running every 900 seconds is not an opt-in. The absence of this outcome once let a
+    # scheduler migrate every live scope off an uncommitted bump in the working tree.
     "schema_mismatch": {
         "success": False, "frozen": True,
         "note": ("FROZEN — the index on disk was built by a different schema version than this "

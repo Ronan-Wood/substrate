@@ -5,9 +5,9 @@
 #   substrate-deploy <commit-ish>    deploy something else (a tag, a known-good sha, a rollback)
 #   substrate-deploy --show          what is deployed now, and whether it still verifies
 #
-# WHY A DEPLOY STEP AT ALL. The retired `com.ronanwood.substrate-refresh` exec'd the working tree
-# every 900 seconds. On 2026-08-03 an uncommitted v8->v9 schema bump reached all six live scopes inside one
-# tick. `b334da4` guarded that specific shape and said so: "the refresh agent still execs $REPO —
+# WHY A DEPLOY STEP AT ALL. A retired refresh agent exec'd the working tree every 900 seconds, and
+# an uncommitted v8->v9 schema bump once reached every live scope inside one tick. `b334da4` guarded
+# that specific shape and said so: "the refresh agent still execs $REPO —
 # the working tree — so uncommitted engine changes still reach live indexes on the next tick."
 # `tools/deployment.py` records why a pinned export was chosen over refusing on a dirty tree and
 # over refusing on a diff against HEAD; the short version is that those two turn the refresh OFF

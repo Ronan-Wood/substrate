@@ -22,9 +22,9 @@
 #
 # NOT A DEPLOYMENT, and the distinction is load-bearing. `substrate-deploy` pins ONE COMMIT because
 # the retired refresh agent exec'd the working tree every 900 seconds and an uncommitted schema bump
-# once reached six live scopes inside a tick. Nothing here is unattended: a build is a deliberate act by someone
-# looking at the tree, so this ships the WORKING TREE and says so. The two tools answer different
-# questions and neither replaces the other.
+# once reached every live scope inside a tick. Nothing here is unattended: a build is a deliberate
+# act by someone looking at the tree, so this ships the WORKING TREE and says so. The two tools
+# answer different questions and neither replaces the other.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -68,6 +68,46 @@ if [ -z "$UV" ]; then
 fi
 [ -n "$UV" ] || die "uv not found on PATH, in ~/.local/bin, /opt/homebrew/bin or /usr/local/bin"
 
+# WHERE THE PIN'S INTERPRETER IS INSTALLED. A pin holds for one install path
+# (`tools/engine-interpreter-pin.py` says why) and names it, so uv is asked in that path's folder and
+# no build has to set a variable, Xcode opened from Finder included. `UV_PYTHON_INSTALL_DIR`, when
+# the caller set it, is where uv is asked instead; the pin still refuses any other install path. A
+# folder that is not there is refused here: the pin's own with the commands that make it, the
+# caller's with the advice to unset the variable.
+#
+# WHICHEVER FOLDER IT IS, IT MUST BE THIS USER'S ALONE. `uv python find` runs what it finds, before
+# the pin has checked anything, and the pin's folder is under `/Users/Shared`, where any account can
+# create it first. So it is a folder and no link, and neither it nor anything in it is another
+# user's, writable by group or others, or (on a Mac, where an access list grants what the mode bits
+# do not show) carries an ACL. Its parents, and what a link inside it points to, are not looked at.
+# uv's own `.lock` is the exception: uv makes it writable by all, and nothing runs it.
+PIN="$REPO/tools/engine-interpreter.pin"
+PIN_ROOT=$(awk -F '\t' '$1 == "prefix" { sub(/\r$/, "", $2); print $2; exit }' "$PIN") \
+  || die "cannot read tools/engine-interpreter.pin"
+case "$PIN_ROOT" in
+  /*/*[!/]) ;;
+  *) die "tools/engine-interpreter.pin names no install path (its prefix reads '$PIN_ROOT')" ;;
+esac
+PIN_STORE=${PIN_ROOT%/*}
+INSTALL="uv python install --no-bin --install-dir '$PIN_STORE' ${PIN_ROOT##*/}"
+STORE=${UV_PYTHON_INSTALL_DIR:-$PIN_STORE}
+while [ "${STORE%/}" != "$STORE" ]; do STORE=${STORE%/}; done
+[ ! -L "$STORE" ] || die "$STORE is a link. The build runs what is in that folder, so it takes only a real folder of yours. Look first: ls -lde '$STORE'"
+if [ ! -d "$STORE" ]; then
+  [ "$STORE" = "$PIN_STORE" ] || die "$STORE, from UV_PYTHON_INSTALL_DIR, is not a folder. Unset the variable: the interpreter pin holds only for an install in $PIN_STORE."
+  die "$STORE does not exist as a folder, and the interpreter pin holds only for an install there. Create it and install the pinned Python:
+  mkdir -m 755 '$PIN_STORE'
+  $INSTALL"
+fi
+# The system's `find` on a Mac: `-acl` is BSD's, and a GNU `find` earlier on PATH does not know it.
+FIND=find ACLS=()
+if [ "$(uname)" = Darwin ]; then FIND=/usr/bin/find ACLS=(-acl -o); fi
+LOOSE=$("$FIND" "$STORE" ! -path "$STORE/.lock" \( ${ACLS[@]+"${ACLS[@]}"} ! -user "$(id -u)" \
+  -o ! -type l \( -perm -020 -o -perm -002 \) \) -print) || die "could not check who can write $STORE"
+[ -z "$LOOSE" ] || die "$STORE is not yours alone to write: ${LOOSE%%$'\n'*} is another user's, writable by group or others, or has an access list. The build runs what is in that folder, so it will not use it. Look first: ls -lde '${LOOSE%%$'\n'*}'"
+# For uv's two questions below and nothing after them: the rest of the build names its interpreter.
+uv_in_store() { UV_PYTHON_INSTALL_DIR="$STORE" "$UV" "$@"; }
+
 # ONLY-MANAGED, because relocatability is the whole requirement. uv would otherwise be free to
 # resolve Homebrew's python3.14, which is a framework build wired to its own absolute prefix: it
 # would build here and fail on the first machine that is not this one. python-build-standalone
@@ -77,8 +117,14 @@ fi
 # or a `.venv` in the working directory or any parent. Run from `substrate/`, that is the dev venv, and
 # `runtime/` became a copy of it — ipykernel and all, a 2.0 GB engine whose interpreter is a symlink
 # into this Mac's uv store. No later check refused it.
-PY_BIN=$("$UV" python find 3.14 --python-preference only-managed --no-project --system 2>/dev/null) \
-  || die "no uv-managed CPython 3.14. Install one: uv python install 3.14"
+# `--no-python-downloads`: a build never installs an interpreter it would then check.
+# The install command only for the pin's own folder: after installing there, a build told to look in
+# the caller's folder would still look in the caller's.
+PY_BIN=$(uv_in_store python find 3.14 --python-preference only-managed --no-project --system --no-python-downloads 2>/dev/null) || {
+  [ "$STORE" = "$PIN_STORE" ] || die "no uv-managed CPython 3.14 in $STORE, from UV_PYTHON_INSTALL_DIR. Unset the variable: the interpreter pin holds only for an install in $PIN_STORE."
+  die "no uv-managed CPython 3.14 in $STORE. Install the pinned one:
+  $INSTALL"
+}
 PY_ROOT=$(cd "$(dirname "$PY_BIN")/.." && pwd -P)
 [ -x "$PY_ROOT/bin/python3.14" ] || die "$PY_ROOT does not look like a standalone interpreter"
 # `pyvenv.cfg` is what makes a directory a venv (PEP 405), so it is the signal rather than a path
@@ -91,7 +137,7 @@ PY_ROOT=$(cd "$(dirname "$PY_BIN")/.." && pwd -P)
 # the managed install is reached through a minor-version symlink, which `pwd -P` above has already
 # resolved. The empty answer is refused by name: `cd ""` succeeds in bash and would make the working
 # directory the root.
-UV_PY_DIR=$("$UV" python dir 2>/dev/null) && [ -n "$UV_PY_DIR" ] && UV_PY_DIR=$(cd "$UV_PY_DIR" && pwd -P) \
+UV_PY_DIR=$(uv_in_store python dir 2>/dev/null) && [ -n "$UV_PY_DIR" ] && UV_PY_DIR=$(cd "$UV_PY_DIR" && pwd -P) \
   || die "could not resolve uv's managed-interpreter directory (uv python dir)"
 case "$PY_ROOT" in
   "$UV_PY_DIR"/*) ;;
@@ -255,7 +301,6 @@ cp -Rp "$PY_ROOT/" "$STAGE/runtime/"
 # without the command line tools it is a stub that exists, is executable, and exits non-zero — which
 # would read as a refusal.
 say "checking the interpreter against tools/engine-interpreter.pin"
-PIN="$REPO/tools/engine-interpreter.pin"
 /usr/bin/python3 -I -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1 \
   || die "/usr/bin/python3 does not run as Python 3.9 or later — it checks the interpreter (install Xcode's command line tools)"
 pin_tool() {

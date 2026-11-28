@@ -50,7 +50,10 @@ def test_refuses_a_virtual_environment_as_the_interpreter(tmp_path: Path) -> Non
     )
     dest = tmp_path / "out" / "substrate-engine"
 
-    result = _build(dest, ROOT, tmp_path / "fakebin")
+    # A store of the caller's, so these do not depend on the pin's own folder being on this machine,
+    # and empty, so they do not depend on the umask.
+    (tmp_path / "store").mkdir(mode=0o700)
+    result = _build(dest, ROOT, tmp_path / "fakebin", UV_PYTHON_INSTALL_DIR=str(tmp_path / "store"))
 
     assert result.returncode != 0
     assert "is a virtual environment, not a standalone interpreter" in result.stderr, result.stderr
@@ -66,7 +69,7 @@ def test_refuses_an_interpreter_outside_uvs_managed_directory(tmp_path: Path) ->
     python.write_text("")
     python.chmod(0o755)
     managed = tmp_path / "uv-python"
-    managed.mkdir()
+    managed.mkdir(mode=0o700)
     _fake_uv(
         tmp_path / "fakebin",
         f'[ "$1 $2" = "python find" ] && {{ echo "{python}"; exit 0; }}\n'
@@ -75,7 +78,7 @@ def test_refuses_an_interpreter_outside_uvs_managed_directory(tmp_path: Path) ->
     )
     dest = tmp_path / "out" / "substrate-engine"
 
-    result = _build(dest, ROOT, tmp_path / "fakebin")
+    result = _build(dest, ROOT, tmp_path / "fakebin", UV_PYTHON_INSTALL_DIR=str(managed))
 
     assert result.returncode != 0
     assert "is not a uv-managed interpreter" in result.stderr, result.stderr
@@ -112,16 +115,18 @@ def test_a_venv_beside_the_build_is_never_the_interpreter(tmp_path: Path, how: s
     )
     # A destination whose parent cannot be written: the build fails at `mkdir` of its stage, after
     # resolving the interpreter and before copying 80 MB of it.
+    # uv's own store, as `_managed_314` asked it, not the pin's folder: this test is about venvs.
+    store = subprocess.run([REAL_UV, "python", "dir"], capture_output=True, text=True, check=True)
+    env = {"UV_PYTHON_INSTALL_DIR": store.stdout.strip()}
     locked = tmp_path / "locked"
     locked.mkdir()
     locked.chmod(0o555)
     try:
         if how == "cwd":
-            result = _build(locked / "substrate-engine", project, tmp_path / "fakebin")
+            result = _build(locked / "substrate-engine", project, tmp_path / "fakebin", **env)
         else:
-            result = _build(
-                locked / "substrate-engine", ROOT, tmp_path / "fakebin", VIRTUAL_ENV=str(project / ".venv")
-            )
+            result = _build(locked / "substrate-engine", ROOT, tmp_path / "fakebin",
+                            VIRTUAL_ENV=str(project / ".venv"), **env)
     finally:
         locked.chmod(0o755)
 
