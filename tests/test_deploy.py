@@ -1,9 +1,8 @@
 """A DEBUG Scripta runs a DEPLOYED engine, never the tree the operator is editing.
 
-The retired `com.ronanwood.substrate-refresh` exec'd the working tree every 900 seconds, and on
-2026-08-03 an uncommitted v8->v9 schema bump reached all six live scopes inside one tick. `b334da4`
-guarded that specific shape and named what it left open: "no separation between code being edited
-and code running against real data". `tools/substrate-deploy` publishes an export of one commit to
+A retired refresh agent exec'd the working tree every 900 seconds, and an uncommitted v8->v9 schema
+bump once reached every live scope inside one tick. `b334da4` guarded that specific shape and named
+what it left open: "no separation between code being edited and code running against real data". `tools/substrate-deploy` publishes an export of one commit to
 `~/.substrate/engine` (`discover()` tier 2), and `tools/deployment.py` proves it file-by-file.
 
 WHAT IS ACTUALLY EXECUTED HERE. The deploy tool and the verifier, as subprocesses, against a
@@ -116,7 +115,7 @@ def test_a_deployment_inside_the_source_repo_is_refused() -> None:
     """The one check that can fail while every hash matches.
 
     A record whose `engine_root` is the tree being edited describes a verifiable, self-consistent,
-    completely pointless deployment — it is the 2026-08-03 configuration with a verification step
+    completely pointless deployment — it is the run-the-working-tree configuration with a verification step
     in front of it, which is worse than no verification step because it reports clean.
 
     The fixture is a COMPLETE, correctly-signed engine that happens to sit inside its own source
@@ -349,8 +348,8 @@ def test_a_deploy_names_an_engine_still_running_the_old_code() -> None:
 def test_deploying_ships_the_commit_and_not_the_working_tree() -> None:
     """THE INCIDENT, inverted, and the reason a deploy step exists at all.
 
-    On 2026-08-03 an uncommitted edit reached six live scopes because the scheduler exec'd the
-    working tree. Here the tree is dirtied with a change that would be catastrophic if it shipped,
+    An uncommitted edit once reached every live scope because the scheduler exec'd the working
+    tree. Here the tree is dirtied with a change that would be catastrophic if it shipped,
     and the deployment must contain the COMMITTED bytes.
 
     Run against a throwaway repo rather than this one, because the assertion needs a working tree
@@ -358,7 +357,7 @@ def test_deploying_ships_the_commit_and_not_the_working_tree() -> None:
     """
     repo, home = _throwaway_repo()
 
-    # The 2026-08-03 shape: an uncommitted schema bump sitting in the tree.
+    # The incident's shape: an uncommitted schema bump sitting in the tree.
     (repo / "substrate" / "cli.py").write_text("SCHEMA_VERSION = 9\n", encoding="utf-8")
 
     r = _run([str(repo / "tools" / "substrate-deploy")], home, extra_path=str(home / "stub"))

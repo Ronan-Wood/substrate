@@ -1,9 +1,5 @@
 # The Boundary Principle
 
-> **This document is also the operator note `boundary-principle` in core-vault's
-> `00-operator/patterns/`.** The vault copy is the migrated home; this file stays as the
-> repo's working doc. They are byte-identical below the frontmatter — keep them so.
-
 > **Information that exists but does not cross the boundary to its consumer reads as
 > absence — and absence reads as fine.**
 
@@ -99,7 +95,7 @@ check, and the discipline was pushed onto every consumer.
 
 **The sixth occurrence then arrived, and this paragraph predicted it.** It used to end: *a version
 stamp that implied staleness was handled would be the sixth occurrence.* What produced it was the
-fix for the manual half. An unattended agent (`tools/substrate-refresh`, every fifteen minutes)
+fix for the manual half. An unattended agent (a scheduled shell script, every fifteen minutes)
 made freshness automatic — and `compose` returns before it opens the database, so a scope whose
 recompose REFUSED simply kept its old index and went on answering in an envelope byte-identical to
 a healthy run. The agent converted freshness a human checked into freshness a human assumes. The
@@ -258,9 +254,10 @@ back is a one-way door, which is what "system contract" meant all along.
 against…"* — the engine declines to compute age and leaves it to the caller. No caller does.
 
 That was harmless while an unattended agent guaranteed a 900-second cadence: `frozen: false` meant
-"index and vault agreed", checked recently by construction. **`com.ronanwood.substrate-refresh` was
-retired 2026-08-12 and refresh moved in-app, so cadence now depends on the app being open.** The
-same `false` now means "agreed as of whenever Scripta last ran", which may be a week ago.
+"index and vault agreed", checked recently by construction. **The unattended agent was
+retired and refresh moved in-app, so cadence then depended on the app being open.** The
+same `false` then meant "agreed as of whenever Scripta last ran", which could be a week ago.
+(`substrate serve` has since taken the refresh loop into the engine.)
 
 Nothing lies. The tri-state is honest per its own definition — `frozen: null` covers *attempted and
 inconclusive*, and a scope nobody attempted keeps its last real verdict rather than inventing one.
@@ -274,9 +271,9 @@ catch because every assertion downstream sees a well-formed envelope.
 **Open question rather than a decided fix:** should age be part of the verdict — a fourth state, or
 `frozen` becoming a function of `attempted` — or does it stay metadata that surfaces are obliged to
 render? Making it a verdict risks a scope reading as broken because its owner went on holiday. The
-same shape shows up beside it: `~/.substrate/refresh.lock` is still taken by `tools/substrate-deploy`
-and its only counterparty retired with the agent, so a declared coordination value now has no
-reader at all.
+same shape showed up beside it: `refresh.lock` was still taken by the deploy tool after its only
+counterparty retired with the agent, so a declared coordination value had no reader at all.
+(The deploy tool now takes `vaults.lock`, the one every compose and embed takes.)
 
 ---
 
