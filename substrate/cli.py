@@ -79,6 +79,19 @@ def _store_failed(e: Exception) -> int:
     return 2
 
 
+def _page_range_error(value: str) -> str | None:
+    """Return a CLI usage error for a malformed or reversed PDF page range."""
+    if not re.fullmatch(r"[0-9]+-[0-9]+", value):
+        return "--pages must be N-M, using positive page numbers"
+    try:
+        first, last = (int(part) for part in value.split("-"))
+    except ValueError:
+        return "--pages must be N-M, using positive page numbers"
+    if first < 1 or last < first:
+        return "--pages must be N-M with N >= 1 and M >= N"
+    return None
+
+
 def cmd_ingest(args: argparse.Namespace) -> int:
     """Ingest ONE source document, whatever it is. The format is detected, not declared.
 
@@ -117,6 +130,14 @@ def cmd_ingest(args: argparse.Namespace) -> int:
             spec = convert.spec_for(src)
         except convert.UnsupportedFormat as e:
             print(f"FATAL (format): {e}", file=sys.stderr)
+            return 2
+
+    # Page selection is CLI input, not a reader-specific document failure. Reject it
+    # before either PDF reader starts so both arms return the same usage error.
+    if spec.arm == "pdf" and args.pages is not None:
+        page_error = _page_range_error(args.pages)
+        if page_error:
+            print(f"FATAL: {page_error}", file=sys.stderr)
             return 2
 
     # The models folder is checked only for a format that uses it: a .docx needs no weights, so an

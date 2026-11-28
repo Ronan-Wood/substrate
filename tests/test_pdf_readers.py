@@ -313,6 +313,34 @@ def test_cli_warns_and_reads_without_models_when_the_folder_is_missing(tmp_path,
     assert run["extract"]["extractor_arm"] == "pdf-text"
 
 
+
+@pytest.mark.parametrize("pages", ["5", "a-b", "1-2-3", "0-3", "4-2", "-1-2"])
+@pytest.mark.parametrize("with_models", [False, True], ids=["text-layer", "docling"])
+def test_cli_rejects_bad_page_ranges_before_either_reader_starts(
+    tmp_path, monkeypatch, capsys, pages, with_models
+):
+    pdf = _report(tmp_path)
+    out = tmp_path / "out"
+
+    def reader_must_not_start(*_args, **_kwargs):
+        raise AssertionError("invalid page range reached a PDF reader")
+
+    monkeypatch.setattr(cli, "_ingest_pdf", reader_must_not_start)
+    monkeypatch.setattr(cli, "_converting", lambda run: run())
+    if with_models:
+        monkeypatch.setattr(cli, "models_folder", lambda _path: tmp_path)
+
+    argv = [
+        "ingest", str(pdf), "--out", str(out), "--doc-class", "reference-frozen",
+        f"--pages={pages}",
+    ]
+    if with_models:
+        argv.extend(["--docling-models", str(tmp_path)])
+
+    assert cli.main(argv) == 2
+    assert "--pages" in capsys.readouterr().err
+    assert not out.exists()
+
 def test_cli_ingests_a_text_pdf_with_no_models_and_records_the_reader(tmp_path):
     out = tmp_path / "out"
     argv = ["ingest", str(_report(tmp_path)), "--out", str(out), "--doc-class", "reference-frozen"]
