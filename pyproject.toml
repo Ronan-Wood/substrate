@@ -37,7 +37,7 @@ convert-ml = [
     # OpenCV, for docling's TableFormer, which reads the tables in every PDF and image and imports `cv2`
     # without declaring it. A `uv sync` of this repository builds it from source (below); a pip
     # install takes PyPI's wheel. The version bound is TableFormer's own.
-    "opencv-python-headless>=5.0.0.93,<6",
+    "opencv-python-headless>=5.1.0.95,<6",
 ]
 
 [tool.uv]
