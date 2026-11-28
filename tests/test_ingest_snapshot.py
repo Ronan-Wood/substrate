@@ -8,6 +8,7 @@ tests that run docling's own LaTeX reader, where docling is installed and opted 
 
 from __future__ import annotations
 
+import errno
 import fcntl
 import hashlib
 import json
@@ -629,6 +630,111 @@ def test_a_copy_made_while_the_file_was_written_is_refused(monkeypatch, tmp_path
     assert wrote and made and not any(d.exists() for d in made)
 
 
+def _failing(monkeypatch, src: Path, call: str) -> list[str]:
+    """Make one OS call fail, once, on the source's descriptor, or the copy's or the lock's, as
+    `call` says: the source's final stat, the copy's close, or the lock's close. Returns the list
+    that records it firing: a descriptor's number is reused once it is closed, so the call is
+    failed once and then forgotten."""
+    real_open, real_fstat, real_close = os.open, os.fstat, os.close
+    fds, stats, fired = {}, [0], []
+
+    def opening(path, flags, *a, **kw):
+        fd = real_open(path, flags, *a, **kw)
+        name = str(path)
+        if name == str(src.resolve()):
+            fds["source"] = fd
+        elif name.endswith(f"/copy/{src.name}"):
+            fds["copy"] = fd
+        elif name.endswith("/.lock") and flags & os.O_CREAT:
+            fds["lock"] = fd
+        return fd
+
+    def fstat(fd):
+        if fd == fds.get("source") and not fired:
+            stats[0] += 1
+            if call == "final stat" and stats[0] == 2:            # the first is `_opened`'s
+                fired.append(call)
+                raise OSError(errno.EIO, "Input/output error")
+        return real_fstat(fd)
+
+    def close(fd):
+        result = real_close(fd)
+        target = fds.get({"copy close": "copy", "lock close": "lock"}.get(call, ""))
+        if fd == target and not fired:
+            fired.append(call)
+            raise OSError(errno.EIO, "Input/output error")
+        return result
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(os, "fstat", fstat)
+    monkeypatch.setattr(os, "close", close)
+    return fired
+
+
+@pytest.mark.parametrize(("call", "said"), [
+    ("final stat", "FATAL (read): review.adoc could not be read: Input/output error."),
+    ("copy close", "FATAL (engine): the engine could not make its private copy of review.adoc: "
+                   "Input/output error."),
+])
+def test_an_os_error_before_the_copy_is_handed_on_is_an_exit_2(monkeypatch, fast, tmp_path, call,
+                                                               said) -> None:
+    src = tmp_path / "review.adoc"
+    src.write_text(ORIGINAL, "utf-8")
+    made = _made(monkeypatch)
+    fired = _failing(monkeypatch, src, call)
+    _no_spawn(monkeypatch)
+    rc, err = _run_cli(["ingest", str(src), "--out", str(tmp_path / "out")])
+    assert fired == [call] and rc == 2 and said in err and "Traceback" not in err, err
+    assert made and not any(d.exists() for d in made), made
+
+
+def test_a_source_path_that_cannot_be_resolved_is_unreadable(monkeypatch, fast, tmp_path) -> None:
+    """`resolve` fails only for a relative path once the working folder has gone: the source's."""
+    src = tmp_path / "review.adoc"
+    src.write_text(ORIGINAL, "utf-8")
+    real = Path.resolve
+
+    def resolve(self, *a, **kw):
+        if self == src:
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory")
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    _no_spawn(monkeypatch)
+    rc, err = _run_cli(["ingest", str(src), "--out", str(tmp_path / "out")])
+    assert rc == 2 and "FATAL (read): review.adoc could not be read" in err, err
+    assert "Traceback" not in err, err
+
+
+def test_an_os_error_with_no_message_of_its_own_is_the_engine_s(monkeypatch, fast,
+                                                                tmp_path) -> None:
+    """The boundary: an OS error no step translates is still one of `snapshot`'s own, with no
+    advice about space that it gives only for a full disk or quota."""
+    src = tmp_path / "review.adoc"
+    src.write_text(ORIGINAL, "utf-8")
+
+    def failing(tmp):
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(snapshot, "_private_root", failing)
+    _no_spawn(monkeypatch)
+    rc, err = _run_cli(["ingest", str(src), "--out", str(tmp_path / "out")])
+    assert rc == 2 and ("FATAL (engine): the engine could not make its private copy of "
+                        "review.adoc: Input/output error.\n") in err, err
+    assert "Traceback" not in err and "TMPDIR" not in err, err
+
+
+def test_a_lock_that_fails_to_close_changes_nothing(monkeypatch, tmp_path) -> None:
+    """Its close loses nothing: the copy was used and is gone, and no error replaces the result."""
+    src = tmp_path / "review.adoc"
+    src.write_text(ORIGINAL, "utf-8")
+    made = _made(monkeypatch)
+    fired = _failing(monkeypatch, src, "lock close")
+    with snapshot.snapshot(src) as snap:
+        assert snap.path.read_text() == ORIGINAL
+    assert fired == ["lock close"] and made and not any(d.exists() for d in made), made
+
+
 def test_a_handler_set_outside_python_is_left_alone(monkeypatch, tmp_path) -> None:
     """`getsignal` says None for a handler Python did not set, which could not be put back."""
     real_get, real_set, set_ = signal.getsignal, signal.signal, []
@@ -751,6 +857,25 @@ def test_no_temporary_folder_is_the_engine_s_problem(monkeypatch, fast, tmp_path
     _no_spawn(monkeypatch)
     rc, err = _run_cli(["ingest", str(src), "--out", str(tmp_path / "out")])
     assert rc == 2 and "FATAL (engine)" in err and "Traceback" not in err, err
+    assert "no temporary folder it can write to" in err and "TMPDIR names one" in err, err
+
+
+def test_a_temporary_folder_the_engine_cannot_use_names_tmpdir(monkeypatch, fast,
+                                                               tmp_path) -> None:
+    real = os.mkdir
+
+    def mkdir(path, *a, **kw):
+        if Path(path) == _root():
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real(path, *a, **kw)
+
+    monkeypatch.setattr(os, "mkdir", mkdir)
+    src = tmp_path / "review.adoc"
+    src.write_text(ORIGINAL, "utf-8")
+    _no_spawn(monkeypatch)
+    rc, err = _run_cli(["ingest", str(src), "--out", str(tmp_path / "out")])
+    assert rc == 2 and "cannot use the temporary folder" in err, err
+    assert "Permission denied. TMPDIR names another folder." in err and "Traceback" not in err, err
 
 
 # ---------------------------------------------------------------- LaTeX: one file only

@@ -23,6 +23,7 @@ clears its temporary folder: an empty folder, or one holding an empty lock, neve
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import hashlib
 import os
@@ -80,7 +81,7 @@ class Snapshot:
                 != (self.size, self.mtime_ns, self.dev, self.ino))
 
 
-def _private_root(tmp: Path, name: str) -> Path:
+def _private_root(tmp: Path) -> Path:
     """The engine's own folder under `tmp`: made 0700 if it is missing, and checked each time to be
     a folder, not a link, this user's and closed to everyone else. Raises CopyFailed."""
     root = tmp / f"substrate-{os.geteuid()}"
@@ -90,11 +91,11 @@ def _private_root(tmp: Path, name: str) -> Path:
     except FileExistsError:
         pass
     except OSError as e:
-        raise _copy_failed(name, e) from None
+        raise _temp_unusable(str(tmp), e) from None
     try:
         st = os.lstat(root)
     except OSError as e:
-        raise _copy_failed(name, e) from None
+        raise _temp_unusable(str(tmp), e) from None
     if (not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid()
             or stat.S_IMODE(st.st_mode) & 0o077):
         # Another user's is not this user's to remove: on a shared /tmp, TMPDIR is the way out.
@@ -195,7 +196,7 @@ def _copy(fd: int, size: int, out: int, name: str) -> str:
         try:
             block = os.read(fd, min(1 << 20, left + 1))
         except OSError as e:
-            raise SourceUnreadable(f"{name} could not be read: {e.strerror or e}.") from None
+            raise _unreadable(name, e) from None
         if not block:
             break
         if len(block) > left:
@@ -214,17 +215,29 @@ def _copy(fd: int, size: int, out: int, name: str) -> str:
 
 
 def _copy_failed(name: str, e: OSError) -> CopyFailed:
-    return CopyFailed(f"the engine could not make its private copy of {name}: {e.strerror or e}. "
-                      "The copy needs as much free space in the temporary folder as the file; "
+    room = (" The copy needs as much free space in the temporary folder as the file; TMPDIR "
+            "names another folder.") if e.errno in (errno.ENOSPC, errno.EDQUOT) else ""
+    return CopyFailed(f"the engine could not make its private copy of {name}: "
+                      f"{e.strerror or e}.{room}")
+
+
+def _temp_unusable(where: str, e: OSError) -> CopyFailed:
+    return CopyFailed(f"the engine cannot use the temporary folder {where}: {e.strerror or e}. "
                       "TMPDIR names another folder.")
 
 
-def _opened(src: Path, real: Path) -> tuple[int, os.stat_result]:
-    """`real` opened once, non-blocking, as a regular file at that path. Raises SourceUnreadable."""
+def _unreadable(name: str, e: OSError) -> SourceUnreadable:
+    return SourceUnreadable(f"{name} could not be read: {e.strerror or e}.")
+
+
+def _opened(src: Path) -> tuple[int, os.stat_result]:
+    """`src` resolved and opened once, non-blocking, as a regular file at the resolved path.
+    Raises SourceUnreadable."""
     try:
+        real = src.resolve()
         fd = os.open(real, os.O_RDONLY | _NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY)
     except OSError as e:
-        raise SourceUnreadable(f"{src.name} could not be read: {e.strerror or e}.") from None
+        raise _unreadable(src.name, e) from None
     try:
         at = _opened_at(fd)
         if at is not None and at != str(real):
@@ -237,11 +250,18 @@ def _opened(src: Path, real: Path) -> tuple[int, os.stat_result]:
         # answer EAGAIN for an ordinary file.
         fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
     except OSError as e:
-        os.close(fd)
+        _close_quietly(fd)
         if isinstance(e, SourceUnreadable):
             raise
-        raise SourceUnreadable(f"{src.name} could not be read: {e.strerror or e}.") from None
+        raise _unreadable(src.name, e) from None
     return fd, st
+
+
+def _close_quietly(fd: int) -> None:
+    """For a descriptor whose close can lose nothing: one read from, the lock's, or a copy's being
+    thrown away."""
+    with contextlib.suppress(OSError):
+        os.close(fd)
 
 
 def _folder(root: Path, stack: contextlib.ExitStack, name: str) -> Path:
@@ -261,7 +281,7 @@ def _folder(root: Path, stack: contextlib.ExitStack, name: str) -> Path:
         raise _copy_failed(name, e) from None
     # Unwound in reverse: the folder is removed while its lock is held, then the lock let go, then
     # the stop handlers put back.
-    stack.callback(os.close, lock)
+    stack.callback(_close_quietly, lock)
     stack.callback(_remove, folder)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -284,34 +304,53 @@ def _written(fd: int, size: int, dest: Path, name: str) -> str:
             os.fchmod(out, 0o400)
         except OSError as e:
             raise _copy_failed(name, e) from None
-    finally:
-        os.close(out)
+    except BaseException:
+        _close_quietly(out)
+        raise
+    try:
+        os.close(out)                                   # where a write can still fail to land
+    except OSError as e:
+        raise _copy_failed(name, e) from None
     return checksum
 
 
 @contextlib.contextmanager
 def snapshot(src: Path) -> Iterator[Snapshot]:
     """Copy `src` once into a private folder, hashing it as it is copied. Raises SourceUnreadable
-    or CopyFailed. The folder is removed when the block ends, and by a SIGTERM or SIGHUP from the
-    moment it exists."""
-    real = src.resolve()
-    fd, st = _opened(src, real)
+    or CopyFailed and no other OSError: any other is reported as CopyFailed. The folder is removed
+    when the block ends, and by a SIGTERM or SIGHUP from the moment it exists."""
     with contextlib.ExitStack() as stack:
         try:
-            try:
-                tmp = Path(tempfile.gettempdir())
-            except OSError as e:
-                raise _copy_failed(src.name, e) from None
-            root = _private_root(tmp, src.name)
-            _sweep(root)
-            dest = _folder(root, stack, src.name) / _COPY / src.name
-            checksum = _written(fd, st.st_size, dest, src.name)
-            # A write in place while the copy was made leaves the size alone but not the time, and
-            # the copy may then hold bytes the file never held at once.
+            snap = _taken(src, stack)
+        except (SourceUnreadable, CopyFailed):
+            raise
+        except OSError as e:
+            raise _copy_failed(src.name, e) from None
+        yield snap
+
+
+def _taken(src: Path, stack: contextlib.ExitStack) -> Snapshot:
+    """The snapshot of `src`, its folder's removal on `stack`."""
+    fd, st = _opened(src)
+    try:
+        try:
+            tmp = Path(tempfile.gettempdir())
+        except OSError as e:
+            raise CopyFailed(f"the engine found no temporary folder it can write to: "
+                             f"{e.strerror or e}. TMPDIR names one.") from None
+        root = _private_root(tmp)
+        _sweep(root)
+        dest = _folder(root, stack, src.name) / _COPY / src.name
+        checksum = _written(fd, st.st_size, dest, src.name)
+        # A write in place while the copy was made leaves the size alone but not the time, and
+        # the copy may then hold bytes the file never held at once.
+        try:
             after = os.fstat(fd)
-            if (after.st_size, after.st_mtime_ns) != (st.st_size, st.st_mtime_ns):
-                raise SourceUnreadable(f"{src.name} was written to while it was being read; "
-                                       "ingest it again once nothing is writing to it.")
-        finally:
-            os.close(fd)
-        yield Snapshot(dest, checksum, src, st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino)
+        except OSError as e:
+            raise _unreadable(src.name, e) from None
+        if (after.st_size, after.st_mtime_ns) != (st.st_size, st.st_mtime_ns):
+            raise SourceUnreadable(f"{src.name} was written to while it was being read; "
+                                   "ingest it again once nothing is writing to it.")
+    finally:
+        _close_quietly(fd)
+    return Snapshot(dest, checksum, src, st.st_size, st.st_mtime_ns, st.st_dev, st.st_ino)
