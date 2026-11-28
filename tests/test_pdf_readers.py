@@ -21,6 +21,7 @@ from substrate.markdown.emit import emit  # noqa: E402
 from substrate.extract import apple_arm, convert  # noqa: E402
 from substrate.extract.pdftext_arm import PdfReadError, TextLayerExtractor  # noqa: E402
 from substrate.models import Kind  # noqa: E402
+from substrate.extract.base import sha256_file  # noqa: E402
 
 QUIET = {"log": lambda *_: None}
 
@@ -243,7 +244,7 @@ def test_an_image_without_models_is_read_by_the_recognizer(tmp_path, monkeypatch
     src = tmp_path / "sign.png"
     src.write_bytes(b"")
     monkeypatch.setattr(apple_arm, "read", lambda path, pages=None: RECOGNIZED)
-    conv = convert.to_markdown(src, convert.spec_for(src), **QUIET)
+    conv = convert.to_markdown(src, convert.spec_for(src), checksum=sha256_file(src), **QUIET)
     assert (conv.arm, conv.stats["reader"], conv.pages) == ("apple-image", "apple-vision", 1)
     assert conv.markdown.startswith("# Quarterly Review\n\n## Renewals\n\n")
 

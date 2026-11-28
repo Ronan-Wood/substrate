@@ -57,6 +57,7 @@ import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from substrate.extract.convert_frames import MAX_MARKDOWN
 from substrate.markdown.reader import _TOKEN, content_coverage
 
 # Word tokens of the source that must survive into the converted markdown, where an independent
@@ -94,12 +95,6 @@ class ConverterMissing(ImportError):
 class Quarantined(RuntimeError):
     """The worker hung, crashed or answered garbage on this file twice, or did so on an earlier
     ingest of the same bytes with the same converter. A GATE (exit 3) naming the way out."""
-
-
-class FileChanged(RuntimeError):
-    """The file's bytes changed, or it went away, between its checksum and the end of its
-    conversion and probe, so the checksum and the conversion may be of different bytes. A GATE
-    (exit 3); never retried, never quarantined."""
 
 
 class ConverterUnsupported(RuntimeError):
@@ -235,8 +230,9 @@ _CONVERTED = (
     FormatSpec("asciidoc", (".adoc", ".asciidoc", ".asc"), "docling", "asciidoc", False, None,
                "AsciiDoc. No probe: its markup and its content share a token space."),
     FormatSpec("latex", (".tex", ".latex"), "docling", "latex", False, None,
-               "LaTeX source. No probe, for the same reason as AsciiDoc — `\\section` is markup, "
-               "and a probe that counted it would report loss on a faithful conversion."),
+               "LaTeX source of one file: one that \\input s or \\include s another is refused. "
+               "Figures are not read. No probe, for the same reason as AsciiDoc — `\\section` is "
+               "markup, and a probe that counted it would report loss on a faithful conversion."),
     FormatSpec("email", (".eml",), "docling", "email", False, None,
                "RFC-822 message. No probe: Docling rewrites the headers it keeps (dates are "
                "normalised) and drops the ones it does not."),
@@ -321,7 +317,7 @@ class Conversion:
     extractor: str
     stats: dict = field(default_factory=dict)
     arm: str = ""                   # run.json["extractor_arm"]: which reader produced the markdown
-    # The checksum of the bytes that were converted and probed (`unchanged` held throughout).
+    # The checksum of the bytes that were converted and probed: the ingest's private copy.
     source_sha256: str = ""
 
 
@@ -576,40 +572,6 @@ def _apple_markdown(src: Path, spec: FormatSpec, *, log=print) -> Conversion:
                       extractor=apple_arm.EXTRACTOR, stats=stats, arm=f"apple-{spec.token}")
 
 
-def changed(src: Path) -> FileChanged:
-    return FileChanged(
-        f"{src.name} changed or went away while it was being ingested, so its checksum and its "
-        "conversion may be of different bytes. Ingest it again once nothing is writing to it.")
-
-
-def unchanged(src: Path, checksum: str) -> bool:
-    """Whether `src` still holds the bytes `checksum` was taken of, hashed again. The bytes alone
-    decide: a chmod, an extended attribute or a touch is no change, and a file that is gone or
-    cannot be read is one, as is a path that is no longer a regular file (a FIFO would block the
-    read, a device never end it), which is found without reading it. A change made and undone
-    between the two hashes is not seen: someone running as this user can arrange that, and so can
-    a sync client replaying another person's edit and its undo."""
-    import hashlib
-    import os
-    import stat
-
-    try:
-        fd = os.open(src, os.O_RDONLY | os.O_NONBLOCK)
-    except OSError:
-        return False
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return False
-        digest = hashlib.sha256()
-        while block := os.read(fd, 1 << 20):
-            digest.update(block)
-        return digest.hexdigest() == checksum
-    except OSError:
-        return False
-    finally:
-        os.close(fd)
-
-
 def printable(text: str) -> str:
     """Text a converter wrote, made safe for a terminal: a document's own words can reach an error
     message, and an escape sequence among them would act on the terminal it is printed to. Control
@@ -636,8 +598,10 @@ def docling_version() -> str:
 
 
 def to_markdown(src: Path, spec: FormatSpec, *, models: Path | None = None, log=print,
-                quarantine=None, retry_quarantined: bool = False) -> Conversion:
+                quarantine=None, retry_quarantined: bool = False, checksum: str) -> Conversion:
     """Convert one non-PDF, non-markdown source to markdown. Raises ConversionRefused.
+
+    `src` is the ingest's private copy (`snapshot`) and `checksum` its checksum.
 
     `models` is the operator's checked docling models folder (`paths.models_folder`), or None. A format
     that uses models is read by Apple's on-device recognizer without one and by docling with one; every
@@ -646,34 +610,23 @@ def to_markdown(src: Path, spec: FormatSpec, *, models: Path | None = None, log=
     Docling runs in the conversion worker (`worker_client`), never in this process; the gates run
     here. `quarantine` is a callable returning the blob store root that holds quarantine records,
     or None for none (`conversion_quarantine`). Also raises ConverterMissing, ConverterUnsupported
-    and `worker_client.WorkerUnavailable` (exit 2), Quarantined and FileChanged (exit 3), and
+    and `worker_client.WorkerUnavailable` (exit 2), Quarantined (exit 3), and
     `worker_client.Interrupted` when Ctrl-C, SIGTERM or SIGHUP stops the conversion.
 
     Every refusal names the format, the file and the specific reason. Nothing partial is returned:
     the caller either gets markdown that cleared both gates, or an exception.
     """
-    from substrate.extract.base import sha256_file
-
     if spec.arm != "docling":
         raise ValueError(f"{spec.token} is read by the {spec.arm} arm, not converted")
-    # Read through one resolved path: the checksum is taken once, here, and the same bytes must be
-    # there when the conversion and its probe are done, or a sync client rewriting the file
-    # mid-ingest would give one file's verdict to another's bytes.
     real = src.resolve()
-    checksum = sha256_file(real)
     size = real.stat().st_size
     if spec.uses_models and models is None:
-        try:
-            conv = _apple_markdown(real, spec, log=log)
-        except ConversionRefused:
-            if not unchanged(real, checksum):
-                raise changed(src) from None
-            raise
-        if not unchanged(real, checksum):
-            raise changed(src)
+        conv = _apple_markdown(real, spec, log=log)
         conv.source_sha256 = checksum
         return conv
     need_extra(spec)
+    if spec.token == "latex":
+        refuse_includes(real)
 
     from substrate.extract import worker_client
 
@@ -687,15 +640,7 @@ def to_markdown(src: Path, spec: FormatSpec, *, models: Path | None = None, log=
 
     def accept(reply, docling):
         md = reply["markdown"]
-        try:
-            gate = verify_conversion(real, spec, md)
-        except ConversionRefused as e:
-            gate = e
-        if not unchanged(real, checksum):
-            raise changed(src)
-        if isinstance(gate, ConversionRefused):
-            raise gate
-        cov, missing, probe = gate
+        cov, missing, probe = verify_conversion(real, spec, md)
         stats = {
             "converted_chars": len(md),
             "converted_seconds": reply["seconds"],
@@ -717,9 +662,64 @@ def to_markdown(src: Path, spec: FormatSpec, *, models: Path | None = None, log=
         return Conversion(markdown=md, pages=reply["pages"], extractor=f"docling {docling}",
                           stats=stats, arm=f"docling-{spec.token}", source_sha256=checksum)
 
-    return through_worker(src, spec, real=real, checksum=checksum, models=models, budget=budget,
+    return through_worker(src, spec, checksum=checksum, models=models, budget=budget,
                           work=work, accept=accept, quarantine=quarantine,
                           retry_quarantined=retry_quarantined, log=log)
+
+
+# A LaTeX source is read whole to look for an include, so it is held to the bound the markdown
+# made of it is held to.
+LATEX_MAX_BYTES = MAX_MARKDOWN
+# `\input` or `\include` as a command, wherever it is: in a comment, `verbatim` or `\iffalse` too.
+# A backslash before it counts too: `\\input` is a line break and then a word, but in
+# `\verb\x\\input` the first two close a `\verb` span and the command is live. Where the command's
+# name ends is `latex_include`'s to decide.
+_LATEX_INCLUDE = re.compile(r"\\(input|include)")
+
+
+def _latex_text(data: bytes) -> str:
+    """A LaTeX source's bytes decoded as docling's reader decodes them: UTF-8, else cp1252, else
+    latin-1 (`docling/backend/latex/utils/encoding.py`)."""
+    for encoding in ("utf-8", "cp1252"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("latin-1")
+
+
+def latex_include(data: bytes) -> tuple[str, int] | None:
+    """The first include command in a LaTeX source's bytes, with its line, or None. A command's
+    name runs on while `str.isalpha()` holds, as pylatexenc reads one, so `\\inputé` is another
+    command. Lines end as a text-mode read ends them, at `\\n`, `\\r\\n` or `\\r`."""
+    text = _latex_text(data)
+    for m in _LATEX_INCLUDE.finditer(text):
+        if m.end() < len(text) and text[m.end()].isalpha():
+            continue
+        at = m.start()
+        return m.group(1), (1 + text.count("\n", 0, at) + text.count("\r", 0, at)
+                            - text.count("\r\n", 0, at))
+    return None
+
+
+def refuse_includes(src: Path) -> None:
+    """Refuse a LaTeX source that includes another file. Docling reads an include from the folder
+    beside the file it converts, which is the ingest's private copy, so the included text would be
+    missing without a word. Raises ConversionRefused (exit 3), and for a source over
+    `LATEX_MAX_BYTES` before reading it."""
+    size = src.stat().st_size
+    if size > LATEX_MAX_BYTES:
+        raise ConversionRefused(
+            f"latex: {printable(src.name)} is {size:,} bytes, over the {LATEX_MAX_BYTES:,} bytes "
+            f"({LATEX_MAX_BYTES / 2**20:g} MiB) a LaTeX source may be.")
+    found = latex_include(src.read_bytes())
+    if found is None:
+        return
+    command, line = found
+    raise ConversionRefused(
+        f"latex: {printable(src.name)} uses \\{command} on line {line}, and a LaTeX source of "
+        "several files is not supported yet. Flatten it into one file (latexpand does this) and "
+        "ingest that. A command in a comment counts too.")
 
 
 def need_extra(spec: FormatSpec) -> None:
@@ -733,15 +733,14 @@ def need_extra(spec: FormatSpec) -> None:
 _SAID = {"hang": "hung", "crash": "crashed", "protocol": "answered with frames it could not trust"}
 
 
-def through_worker(src: Path, spec: FormatSpec, *, real: Path, checksum: str,
-                   models: Path | None, budget: int, work, accept, quarantine,
-                   retry_quarantined: bool, log):
+def through_worker(src: Path, spec: FormatSpec, *, checksum: str, models: Path | None,
+                   budget: int, work, accept, quarantine, retry_quarantined: bool, log):
     """Run `work(worker)` in a fresh worker until `conversion_quarantine.quarantine_decision`
     stops: once, and once more after a fault. `work` returns the worker's reply; for a
     `converted` or `items` reply, `accept(reply, docling_version)` runs the gates here, may raise
-    FileChanged or ConversionRefused, and returns what this returns. Otherwise this raises the
-    verdict. A fault or a refusal on a file whose bytes changed is FileChanged. Ctrl-C, SIGTERM
-    and SIGHUP meanwhile raise `worker_client.Interrupted` once the worker's group is dead."""
+    ConversionRefused, and returns what this returns. Otherwise this raises the verdict. Ctrl-C,
+    SIGTERM and SIGHUP meanwhile raise `worker_client.Interrupted` once the worker's group is
+    dead."""
     from substrate.extract import conversion_quarantine as q
     from substrate.extract import convert_frames as frames
     from substrate.extract import worker_client
@@ -808,28 +807,17 @@ def through_worker(src: Path, spec: FormatSpec, *, real: Path, checksum: str,
                     outcomes.append("refused")
                     continue
                 except worker_client.WorkerFault as fault:
-                    # A change to the file can be what made the converter fail: then it is the
-                    # change that is reported, and nothing is recorded against these bytes.
-                    if not unchanged(real, checksum):
-                        result = changed(src)
-                        outcomes.append("changed")
-                        continue
                     faults.append(fault)
                     outcomes.append(fault.kind)
                     continue
                 if reply["type"] in ("converted", "items"):
                     try:
                         result = accept(reply, docling)
-                    except (FileChanged, ConversionRefused) as e:
+                    except ConversionRefused as e:
                         result = e
-                        outcomes.append("changed" if isinstance(e, FileChanged) else "refused")
+                        outcomes.append("refused")
                         continue
                     outcomes.append("ok")
-                    continue
-                if reply["type"] == "refused" and not unchanged(real, checksum):
-                    # A converter that could not read the file may not have had its bytes, or any.
-                    result = changed(src)
-                    outcomes.append("changed")
                     continue
                 result = reply
                 outcomes.append(reply["type"])

@@ -25,6 +25,9 @@ tests.test_html_probe::test_docling_roundtrip_each_page_clears_the_gate
 tests.test_html_probe::test_docling_roundtrip_refuses_each_page_it_loses_text_from
 tests.test_html_probe::test_docling_reader_removes_exactly_what_the_probe_removes
 tests.test_html_probe::test_docling_walks_no_word_the_probe_lacks
+# Docling's LaTeX reader, run on the include forms and on the private copy (SUBSTRATE_DOCLING_TESTS=1).
+tests.test_ingest_snapshot::test_every_include_docling_s_latex_reader_follows_is_refused
+tests.test_ingest_snapshot::test_docling_converting_the_copy_opens_nothing_beside_the_source
 
 # macOS: Finder's Locked flag, F_FULLFSYNC, BSD find and xattr(1), a case-insensitive volume.
 tests.test_amend::test_a_finder_locked_note_is_refused_at_plan_not_at_the_rename

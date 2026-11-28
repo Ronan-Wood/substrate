@@ -9,7 +9,7 @@
   csv       .csv                                   absence → unclassified           Renders as one markdown table.
   vtt       .vtt                                   absence → unclassified           WebVTT captions — cue text only; timings are not content.
   asciidoc  .adoc .asciidoc .asc                   absence → unclassified           AsciiDoc. No probe: its markup and its content share a token space.
-  latex     .tex .latex                            absence → unclassified           LaTeX source. No probe, for the same reason as AsciiDoc — `\section` is markup, and a probe that counted it would report loss on a faithful conversion.
+  latex     .tex .latex                            absence → unclassified           LaTeX source of one file: one that \input s or \include s another is refused. Figures are not read. No probe, for the same reason as AsciiDoc — `\section` is markup, and a probe that counted it would report loss on a faithful conversion.
   email     .eml                                   absence → unclassified           RFC-822 message. No probe: Docling rewrites the headers it keeps (dates are normalised) and drops the ones it does not.
   epub      .epub                                  absence → unclassified           EPUB. No probe: chapter selection is the backend's decision, so a whole-archive reading would report loss on a correct conversion.
   image     .png .jpg .jpeg .tif .tiff .bmp .webp  absence → unclassified           Apple's on-device document recognizer; docling with Apple Vision OCR and table structure when --docling-models names its models. The pixels are the only reading there is, so there is no independent probe — the non-empty gate is the whole guarantee.

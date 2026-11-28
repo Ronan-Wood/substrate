@@ -12,7 +12,6 @@ blocks and assembles the document, so furniture, heading inference and the PDF g
 
 from __future__ import annotations
 
-import stat
 import time
 from pathlib import Path
 
@@ -62,16 +61,19 @@ class DoclingExtractor:
         self.retry_quarantined = retry_quarantined
 
     def extract(
-        self, pdf: Path, doc_class: str, *, pages: tuple[int, int] | None = None, log=print
+        self, pdf: Path, doc_class: str, *, pages: tuple[int, int] | None = None, log=print,
+        checksum: str | None = None,
     ) -> Document:
-        """Raises ConverterMissing, ConverterUnsupported, ConversionRefused, Quarantined or
-        FileChanged (`convert`), and `worker_client.WorkerUnavailable` or `Interrupted`."""
+        """`pdf` must not change while this runs: `substrate ingest` hands it its private copy
+        (`snapshot`), and that copy's `checksum`, so the file is not hashed again. Raises
+        ConverterMissing, ConverterUnsupported, ConversionRefused or Quarantined (`convert`), and
+        `worker_client.WorkerUnavailable` or `Interrupted`."""
         from substrate.extract import convert, worker_client
         from substrate.extract.base import sha256_file
 
         convert.need_extra(convert.PDF)
         real = pdf.resolve()
-        checksum = sha256_file(real)
+        checksum = checksum or sha256_file(real)
         total = _page_count(real)
         first, last = pages or (1, total)
         last = min(last, total)
@@ -104,37 +106,20 @@ class DoclingExtractor:
 
         def accept(reply, docling):
             blocks = [_block(n, item) for n, item in enumerate(reply["items"], 1)]
-            # `assemble` hashes `pdf`, so it must still be the file the worker read: the same
-            # resolved path, and a regular file, which a FIFO or a device in its place is not.
-            try:
-                same = pdf.resolve() == real and stat.S_ISREG(real.stat().st_mode)
-            except OSError:
-                same = False
-            if not same:
-                raise convert.changed(pdf)
-            try:
-                doc = assemble(
-                    pdf,
-                    doc_class,
-                    blocks,
-                    total_pages=total,
-                    pages_processed=last - first + 1,
-                    seconds=time.monotonic() - t0,
-                    extractor=f"docling {docling}",
-                    extractor_arm=self.name,
-                    layout_model="docling-layout-heron",
-                )
-            except OSError:
-                # `assemble` reads the file to hash it: one gone or unreadable is the change rule's.
-                if convert.unchanged(real, checksum):
-                    raise
-                raise convert.changed(pdf) from None
-            # `assemble` hashed the file again, and that hash is `unchanged`'s rule: bytes alone.
-            if doc.source_sha256 != checksum:
-                raise convert.changed(pdf)
-            return doc
+            return assemble(
+                pdf,
+                doc_class,
+                blocks,
+                total_pages=total,
+                pages_processed=last - first + 1,
+                seconds=time.monotonic() - t0,
+                extractor=f"docling {docling}",
+                extractor_arm=self.name,
+                layout_model="docling-layout-heron",
+                sha256=checksum,
+            )
 
         return convert.through_worker(
-            pdf, convert.PDF, real=real, checksum=checksum, models=self.models,
+            pdf, convert.PDF, checksum=checksum, models=self.models,
             budget=budget, work=work, accept=accept, quarantine=self.quarantine,
             retry_quarantined=self.retry_quarantined, log=log)

@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from substrate.extract import headings, toc
-from substrate.extract.base import doc_id_for, sha256_file
+from substrate.extract.base import doc_id_from, sha256_file
 from substrate.extract.furniture import validate
 from substrate.models import LABEL_MAP, Block, Document, Kind
 
@@ -28,6 +28,7 @@ def assemble(
     extractor: str,
     extractor_arm: str,
     layout_model: str,
+    sha256: str | None = None,
     stats: dict | None = None,
 ) -> Document:
     """Adjudicate furniture, infer heading levels, mark contents, and build the Document."""
@@ -65,10 +66,11 @@ def assemble(
     # matching a block's text against the document's own heading vocabulary.
     toc_report = toc.mark(blocks)
 
-    # One read for both: the PDF is the file at `source_path`, so its checksum is the note's too.
-    sha = sha256_file(pdf)
+    # One read for all three, or none where the caller has the checksum: the PDF is the file at
+    # `source_path`, so its checksum is the note's too.
+    sha = sha256 or sha256_file(pdf)
     doc = Document(
-        doc_id=doc_id_for(pdf),
+        doc_id=doc_id_from(pdf.stem, sha),
         source_path=str(pdf),
         source_sha256=sha,
         note_sha256=sha,

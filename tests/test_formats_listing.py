@@ -78,7 +78,8 @@ def test_every_extension_is_listed_once_in_every_state(monkeypatch, extras, appl
 
 def test_the_bundle_lists_what_it_listed_before_the_extras(monkeypatch) -> None:
     """Both extras and Apple's recognizer, as Scripta ships the engine: byte for byte the listing
-    `0c1686c` printed, which knew nothing of extras."""
+    `0c1686c` printed, which knew nothing of extras, but for the LaTeX row, which now says that one
+    including another file is refused."""
     expected = (ROOT / "tests" / "data" / "formats-bundle.txt").read_text("utf-8")
     assert _listing(monkeypatch, BOTH, True) == expected
 
@@ -179,19 +180,28 @@ def _refused_for(rc: int, err: str) -> str | None:
     return named[0] if named else None
 
 
+def _cli_converted(args, src: Path, spec):
+    """`ingest` of a converted document, from its snapshot as `cmd_ingest` runs it."""
+    return cli._from_snapshot(src, lambda snap: cli._ingest_converted(args, src, spec, None, snap))
+
+
 @pytest.mark.parametrize("spec", [s for s in convert.ACCEPTED if s.arm == "docling"],
                          ids=lambda s: s.token)
-def test_formats_and_ingest_agree_here(tmp_path, spec) -> None:
+def test_formats_and_ingest_agree_here(monkeypatch, tmp_path, spec) -> None:
     """In this install, as each CI job has it: a format `formats` lists is not refused by ingest for
     a missing extra, and one it refuses is refused by ingest naming the same extra, or none where
-    the row names none."""
+    the row names none. The ingest must reach the converter, or the agreement is of nothing."""
     accepted, refused = _parse(_printed())
     src = tmp_path / f"fixture{spec.extensions[0]}"
     src.write_bytes(b"placeholder")
+    reached, real = [], convert.to_markdown
+    monkeypatch.setattr(convert, "to_markdown", lambda *a, **kw: (reached.append(a[1]),
+                                                                  real(*a, **kw))[1])
     out = io.StringIO()
     args = argparse.Namespace(out=str(tmp_path / "ingest"), doc_class=None)
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(out):
-        rc = cli._ingest_converted(args, src, spec, None)
+        rc = _cli_converted(args, src, spec)
+    assert reached == [spec], (spec.token, rc, out.getvalue())
     said = _refused_for(rc, out.getvalue())
     if spec.token in accepted:
         assert said is None, (spec.token, rc, out.getvalue())
@@ -216,7 +226,7 @@ def test_an_image_with_no_apple_reader_names_only_a_reader_that_would_work(monke
     out = io.StringIO()
     args = argparse.Namespace(out=str(tmp_path / "ingest"), doc_class=None)
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(out):
-        rc = cli._ingest_converted(args, src, convert.spec_for(src), None)
+        rc = _cli_converted(args, src, convert.spec_for(src))
     err = out.getvalue()
     assert rc == 2 and "Traceback" not in err and convert.image_remedy(extras) in err, err
     assert ("--docling-models DIR" in err) == macos, err
@@ -229,7 +239,7 @@ def test_an_image_with_no_apple_reader_names_only_a_reader_that_would_work(monke
         apple_arm.AppleReaderUnavailable(started)))
     out = io.StringIO()
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(out):
-        assert cli._ingest_converted(args, src, convert.spec_for(src), None) == 2
+        assert _cli_converted(args, src, convert.spec_for(src)) == 2
     assert f"{started}. {convert.image_remedy(extras)}" in out.getvalue(), out.getvalue()
     if macos and "convert-ml" in extras:
         assert "--docling-models" in _row(listing, "image")

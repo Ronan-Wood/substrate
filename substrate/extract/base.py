@@ -28,7 +28,9 @@ LIST_MARKER = re.compile(
 class Extractor(Protocol):
     name: str
 
-    def extract(self, pdf: Path, doc_class: str, *, pages: tuple[int, int] | None = None) -> Document:
+    def extract(self, pdf: Path, doc_class: str, *, pages: tuple[int, int] | None = None,
+                checksum: str | None = None) -> Document:
+        """`checksum`, where the caller has it, is `pdf`'s sha256, which is then not taken again."""
         ...
 
 

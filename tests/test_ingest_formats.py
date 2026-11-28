@@ -42,6 +42,7 @@ from substrate.markdown.ingest import (  # noqa: E402
     ingest_markdown,
 )
 from substrate.models import SourceOrigin  # noqa: E402
+from substrate.extract.base import sha256_file  # noqa: E402
 
 # Opt-in only, not opt-in and docling present: a job that opts in on an install whose docling will
 # not import must fail, or the `convert` extra breaks unseen.
@@ -590,6 +591,21 @@ def test_a_converted_document_with_one_passage_still_ingests() -> None:
 
 # ---------------------------------------------------------------- what the CLI says and returns
 
+def _cli_converted(args, src: Path, spec=None, models=None):
+    """`ingest` of a converted document, from its snapshot as `cmd_ingest` runs it."""
+    from substrate import cli
+
+    spec = spec or convert.spec_for(src)
+    return cli._from_snapshot(
+        src, lambda snap: cli._ingest_converted(args, src, spec, models, snap))
+
+
+def _cli_pdf(args, pdf: Path, models):
+    from substrate import cli
+
+    return cli._from_snapshot(pdf, lambda snap: cli._ingest_pdf(args, pdf, models, snap))
+
+
 def _captured(fn):
     """Run `fn`, returning `(result, stderr)`. stdout is swallowed: these assert on the WARNING."""
     import contextlib
@@ -625,8 +641,6 @@ def test_a_converter_that_cannot_run_exits_2_rather_than_tracebacking() -> None:
     reached the documented 2-vs-3 split — they came out as a traceback."""
     import argparse
 
-    from substrate import cli
-
     root = _tmp()
     src = root / "review.docx"
     src.write_bytes(b"PK\x03\x04 pretend this is the real artifact")
@@ -644,7 +658,7 @@ def test_a_converter_that_cannot_run_exits_2_rather_than_tracebacking() -> None:
                             (convert.ConverterUnsupported("'vtt' is not a valid InputFormat"),
                              "InputFormat")):
             convert.to_markdown = raiser(exc)
-            rc, err = _captured(lambda: cli._ingest_converted(args, src, spec, None))
+            rc, err = _captured(lambda: _cli_converted(args, src, spec))
             assert rc == 2, (rc, err)          # an INPUT/environment problem, not a gate
             assert expect in err, err
             assert "Traceback" not in err
@@ -658,7 +672,6 @@ def test_a_missing_extra_is_named_by_the_refusal() -> None:
     traceback: nothing caught it there, because docling was always installed."""
     import argparse
 
-    from substrate import cli
     from substrate.extract import docling_arm
 
     root = _tmp()
@@ -683,19 +696,19 @@ def test_a_missing_extra_is_named_by_the_refusal() -> None:
     try:
         pdf_args = argparse.Namespace(out=str(root / "pdf"), doc_class="reference-frozen",
                                       pages=None, batch=1)
+        (root / "scan.pdf").write_bytes(b"%PDF-1.7 pretend")
         convert.to_markdown = raising(no_docling)
-        rc, err = _captured(lambda: cli._ingest_converted(args, src, convert.spec_for(src), None))
+        rc, err = _captured(lambda: _cli_converted(args, src))
         assert rc == 2 and "[convert] extra" in err and "uv sync --inexact --extra convert" in err, err
 
         for exc in (no_docling, no_ocrmac):
             convert.to_markdown = raising(exc)
-            rc, err = _captured(lambda: cli._ingest_converted(args, image, convert.spec_for(image),
-                                                              root))
+            rc, err = _captured(lambda: _cli_converted(args, image, models=root))
             assert rc == 2 and "[convert-ml] extra" in err and "uv sync --inexact --extra convert-ml" in err, err
 
         for exc in (no_docling, no_parse):
             docling_arm.DoclingExtractor.extract = raising(exc)
-            rc, err = _captured(lambda: cli._ingest_pdf(pdf_args, root / "scan.pdf", root))
+            rc, err = _captured(lambda: _cli_pdf(pdf_args, root / "scan.pdf", root))
             assert rc == 2 and "[convert-ml] extra" in err and "without --docling-models" in err, err
             assert "Traceback" not in err
 
@@ -703,8 +716,8 @@ def test_a_missing_extra_is_named_by_the_refusal() -> None:
         ours = ImportError("cannot import name 'configure' from 'substrate.paths'", name="substrate.paths")
         convert.to_markdown = raising(ours)
         docling_arm.DoclingExtractor.extract = raising(ours)
-        for run in (lambda: cli._ingest_converted(args, src, convert.spec_for(src), None),
-                    lambda: cli._ingest_pdf(pdf_args, root / "scan.pdf", root)):
+        for run in (lambda: _cli_converted(args, src),
+                    lambda: _cli_pdf(pdf_args, root / "scan.pdf", root)):
             try:
                 _captured(run)
             except ImportError as e:
@@ -766,7 +779,7 @@ def _roundtrip(src: Path, *expect: str) -> convert.Conversion:
     """Convert `src` with docling and check the reading: each expected string is in the markdown,
     and a format with a raw-text probe was measured whole."""
     spec = convert.spec_for(src)
-    conv = convert.to_markdown(src, spec, log=lambda *_: None)
+    conv = convert.to_markdown(src, spec, log=lambda *_: None, checksum=sha256_file(src))
     for text in expect:
         assert text in conv.markdown, (spec.token, text, conv.markdown)
     assert conv.stats["docling_status"].endswith("SUCCESS"), conv.stats
@@ -781,7 +794,8 @@ def test_docling_roundtrip_docx() -> None:
     src = _docx(_tmp() / "review.docx", ["Quarterly Substrate Review",
                                          "The engine ingested six scopes without a refusal."],
                 valid=True)
-    conv = convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None)
+    conv = convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None,
+                               checksum=sha256_file(src))
     assert "Quarterly Substrate Review" in conv.markdown
     from importlib.metadata import version
 
@@ -904,7 +918,8 @@ def test_docling_roundtrip_html_is_not_slowed_by_deep_nesting() -> None:
     src = _tmp() / "nested.html"
     src.write_text("<html><body><p>Quarterly review</p>" + "<p>" * 2000 + "deep text</body></html>",
                    "utf-8")
-    conv = convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None)
+    conv = convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None,
+                               checksum=sha256_file(src))
     assert conv.stats["converted_seconds"] < 3.0, conv.stats
     assert "deep text" in conv.markdown and conv.stats["raw_coverage"] == 1.0
 
@@ -921,7 +936,8 @@ def test_docling_roundtrip_email_with_a_received_date_past_int64() -> None:
         b"Subject: Quarterly review\r\nMIME-Version: 1.0\r\n"
         b"Content-Type: text/html; charset=utf-8\r\n\r\n"
         b"<html><body><p>The engine ingested six scopes without a refusal.</p></body></html>\r\n")
-    conv = convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None)
+    conv = convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None,
+                               checksum=sha256_file(src))
     assert "six scopes" in conv.markdown and "without a refusal." in conv.markdown
 
 
@@ -955,7 +971,8 @@ def test_docling_refuses_a_file_whose_bytes_disagree_with_its_extension() -> Non
     src = _tmp() / "liar.docx"
     src.write_text("<html><body><h1>Not a Word document</h1></body></html>", "utf-8")
     try:
-        convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None)
+        convert.to_markdown(src, convert.spec_for(src), log=lambda *_: None,
+                               checksum=sha256_file(src))
     except convert.ConversionRefused as e:
         assert "could not convert" in str(e)
     else:
